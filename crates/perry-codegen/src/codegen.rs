@@ -26448,9 +26448,20 @@ fn compile_expr(
                                     .ok_or_else(|| anyhow!("perry_ui_widget_add_child not declared"))?;
                                 let add_child_ref = module.declare_func_in_func(*add_child_func, builder.func);
 
+                                // Extract raw handle from NaN-boxed child values
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+
                                 for elem in elements {
                                     let child_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, elem, this_ctx)?;
-                                    let child_handle = ensure_i64(builder, child_val);
+                                    // Child widgets return NaN-boxed POINTER_TAG handles (from generic result path)
+                                    // or raw bitcast handles (from Button/VStack special paths).
+                                    // js_nanbox_get_pointer handles both: extracts pointer from POINTER_TAG,
+                                    // or returns raw bits for non-tagged values.
+                                    let child_f64 = ensure_f64(builder, child_val);
+                                    let ptr_call = builder.ins().call(get_ptr_ref, &[child_f64]);
+                                    let child_handle = builder.inst_results(ptr_call)[0];
                                     builder.ins().call(add_child_ref, &[container_handle, child_handle]);
                                 }
                             }

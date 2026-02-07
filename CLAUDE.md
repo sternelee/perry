@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.121
+**Current Version:** 0.2.122
 
 ## Workflow Requirements
 
@@ -269,6 +269,18 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.117)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.122
+- Fix VStack/HStack children not rendering — NaN-boxed handle extraction
+  - Root cause: VStack child loop used `ensure_i64` (raw bitcast) on child values, but Text/State
+    widgets return NaN-boxed POINTER_TAG handles from the generic NativeMethodCall result path
+  - For a widget handle like 2, the NaN-boxed value has bits `0x7FFD_0000_0000_0002`
+  - `ensure_i64` bitcast gave i64 `0x7FFD...`, but `get_widget` expected raw handle `2`
+  - `(0x7FFD... - 1) as usize` was way out of bounds, so `get_widget` returned None → child silently skipped
+  - Button worked because its special handler returns raw bitcast (not NaN-boxed)
+  - Fix: Use `js_nanbox_get_pointer` to extract raw handle from child values
+  - This handles both NaN-boxed (Text, State) and raw bitcast (Button, nested VStack) children
+  - Counter app now correctly shows "Count: 0" text AND "Increment" button
 
 ### v0.2.121
 - Fix UI widgets not rendering text — string pointer format mismatch
