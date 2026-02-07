@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.132
+**Current Version:** 0.2.133
 
 ## Workflow Requirements
 
@@ -352,6 +352,18 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.133
+- Move array allocation from system malloc to arena bump allocator
+  - `js_array_alloc()` now uses `arena_alloc()` instead of `std::alloc::alloc()`
+  - `js_array_grow()` allocates new block from arena + `ptr::copy_nonoverlapping` (no `realloc`)
+  - Eliminates per-array malloc overhead — bump allocation is a single pointer increment
+  - **object_create benchmark: 13-14ms → 2-3ms (5x faster, now 2-3x faster than Node's 6-7ms)**
+- Fix `new Array(n)` pre-allocation — `arr[i] = val` now hits in-bounds fast path
+  - New `js_array_alloc_with_length(n)` sets both `length = n` and `capacity = n`
+  - Previous `js_array_alloc(n)` set `length = 0`, so `arr[i]` always took the slow extend path
+  - Codegen: `new Array(n)` emits `js_array_alloc_with_length` (single-arg), `new Array()` and `new Array(a,b,c)` still use `js_array_alloc`
+  - `arr.length` now correctly returns `n` after `new Array(n)`
 
 ### v0.2.132
 - Advanced Reactive UI Phase 4: Multi-state text, two-way binding, conditional rendering, dynamic lists

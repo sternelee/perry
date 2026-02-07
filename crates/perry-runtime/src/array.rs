@@ -5,8 +5,8 @@
 //! - Capacity
 //! - Elements array (inline)
 
-use std::alloc::{alloc, realloc, Layout};
 use std::ptr;
+use crate::arena::arena_alloc;
 
 /// Array header - precedes the elements in memory
 #[repr(C)]
@@ -17,12 +17,10 @@ pub struct ArrayHeader {
     pub capacity: u32,
 }
 
-/// Calculate the layout for an array with N elements capacity
-fn array_layout(capacity: usize) -> Layout {
-    let header_size = std::mem::size_of::<ArrayHeader>();
-    let elements_size = capacity * std::mem::size_of::<f64>(); // Using f64 for now
-    let total_size = header_size + elements_size;
-    Layout::from_size_align(total_size, 8).unwrap()
+/// Calculate the byte size for an array with N elements capacity
+#[inline]
+fn array_byte_size(capacity: usize) -> usize {
+    std::mem::size_of::<ArrayHeader>() + capacity * std::mem::size_of::<f64>()
 }
 
 /// Minimum initial capacity for arrays to reduce reallocations
@@ -33,22 +31,31 @@ const MIN_ARRAY_CAPACITY: u32 = 16;
 pub extern "C" fn js_array_alloc(capacity: u32) -> *mut ArrayHeader {
     // Use at least MIN_ARRAY_CAPACITY to reduce reallocations for growing arrays
     let actual_capacity = capacity.max(MIN_ARRAY_CAPACITY);
-    let layout = array_layout(actual_capacity as usize);
-    unsafe {
-        let ptr = alloc(layout) as *mut ArrayHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate array");
-        }
+    let ptr = arena_alloc(array_byte_size(actual_capacity as usize), 8) as *mut ArrayHeader;
 
+    unsafe {
         // Initialize header
         (*ptr).length = 0;
         (*ptr).capacity = actual_capacity;
-
-        // Don't initialize elements - they'll be written before read
-        // This saves significant time for large arrays
-
-        ptr
     }
+
+    ptr
+}
+
+/// Allocate a new array with the given capacity AND set length = capacity.
+/// Used for `new Array(n)` which in JavaScript creates an array with length n.
+/// Elements are NOT initialized — caller is expected to fill them before reading.
+#[no_mangle]
+pub extern "C" fn js_array_alloc_with_length(capacity: u32) -> *mut ArrayHeader {
+    let actual_capacity = capacity.max(MIN_ARRAY_CAPACITY);
+    let ptr = arena_alloc(array_byte_size(actual_capacity as usize), 8) as *mut ArrayHeader;
+
+    unsafe {
+        (*ptr).length = capacity;  // Set length = requested capacity
+        (*ptr).capacity = actual_capacity;
+    }
+
+    ptr
 }
 
 /// Allocate and initialize an array from a list of f64 values
@@ -145,17 +152,15 @@ pub extern "C" fn js_array_grow(arr: *mut ArrayHeader, min_capacity: u32) -> *mu
 
         // Double the capacity, or use min_capacity if larger
         let new_capacity = std::cmp::max(old_capacity * 2, min_capacity);
-        let old_layout = array_layout(old_capacity as usize);
-        let new_layout = array_layout(new_capacity as usize);
+        let old_size = array_byte_size(old_capacity as usize);
+        let new_size = array_byte_size(new_capacity as usize);
 
-        let new_ptr = realloc(arr as *mut u8, old_layout, new_layout.size()) as *mut ArrayHeader;
-        if new_ptr.is_null() {
-            panic!("Failed to grow array");
-        }
+        // Allocate new from arena and copy old data
+        // Old memory is abandoned (bump allocator never frees individually)
+        let new_ptr = arena_alloc(new_size, 8) as *mut ArrayHeader;
+        ptr::copy_nonoverlapping(arr as *const u8, new_ptr as *mut u8, old_size);
 
         (*new_ptr).capacity = new_capacity;
-
-        // Don't initialize new elements - they'll be written before read
 
         new_ptr
     }
