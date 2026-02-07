@@ -104,3 +104,25 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
         super::register_widget(view)
     }
 }
+
+/// Set whether a button has a border.
+pub fn set_bordered(handle: i64, bordered: bool) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
+            btn.setBordered(bordered);
+        }
+    }
+}
+
+/// Set the title text of a button.
+pub fn set_title(handle: i64, title_ptr: *const u8) {
+    let title = str_from_header(title_ptr);
+    if let Some(view) = super::get_widget(handle) {
+        let ns_title = NSString::from_str(title);
+        unsafe {
+            let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
+            btn.setTitle(&ns_title);
+        }
+    }
+}

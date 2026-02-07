@@ -5,3 +5,4 @@
 pub mod codegen;
 
 pub use codegen::Compiler;
+pub use codegen::generate_stub_object;

@@ -1,14 +1,15 @@
 use objc2::rc::Retained;
-use objc2::runtime::Sel;
-use objc2::MainThreadOnly;
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventModifierFlags,
     NSLayoutConstraint, NSMenu, NSMenuItem, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGSize, CGRect};
-use objc2_foundation::{NSString, MainThreadMarker};
+use objc2_foundation::{NSObject, NSString, MainThreadMarker};
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use crate::widgets;
 
@@ -169,4 +170,127 @@ pub fn app_run(_app_handle: i64) {
     app.activateIgnoringOtherApps(true);
 
     app.run();
+}
+
+/// Set the minimum window size.
+pub fn set_min_size(app_handle: i64, w: f64, h: f64) {
+    APPS.with(|a| {
+        let apps = a.borrow();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].window.setMinSize(CGSize::new(w, h));
+        }
+    });
+}
+
+/// Set the maximum window size.
+pub fn set_max_size(app_handle: i64, w: f64, h: f64) {
+    APPS.with(|a| {
+        let apps = a.borrow();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].window.setMaxSize(CGSize::new(w, h));
+        }
+    });
+}
+
+// ============================================
+// Keyboard Shortcuts
+// ============================================
+
+thread_local! {
+    static SHORTCUT_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+}
+
+extern "C" {
+    fn js_closure_call0(closure: *const u8) -> f64;
+    fn js_nanbox_get_pointer(value: f64) -> i64;
+}
+
+pub struct PerryShortcutTargetIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryShortcutTarget"]
+    #[ivars = PerryShortcutTargetIvars]
+    pub struct PerryShortcutTarget;
+
+    impl PerryShortcutTarget {
+        #[unsafe(method(shortcutFired:))]
+        fn shortcut_fired(&self, _sender: &AnyObject) {
+            let key = self.ivars().callback_key.get();
+            SHORTCUT_CALLBACKS.with(|cbs| {
+                if let Some(&closure_f64) = cbs.borrow().get(&key) {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
+                }
+            });
+        }
+    }
+);
+
+impl PerryShortcutTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryShortcutTargetIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Add a keyboard shortcut to the app menu.
+/// `key_ptr` is a StringHeader pointer to the key character (e.g., "s" for Cmd+S).
+/// `modifiers` is a bitfield: 1=Cmd, 2=Shift, 4=Option, 8=Control.
+/// `callback` is a NaN-boxed closure pointer.
+pub fn add_keyboard_shortcut(key_ptr: *const u8, modifiers: f64, callback: f64) {
+    let key_str = str_from_header(key_ptr);
+    let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+
+    let app = NSApplication::sharedApplication(mtm);
+
+    unsafe {
+        let target = PerryShortcutTarget::new();
+        let target_addr = Retained::as_ptr(&target) as usize;
+        target.ivars().callback_key.set(target_addr);
+
+        SHORTCUT_CALLBACKS.with(|cbs| {
+            cbs.borrow_mut().insert(target_addr, callback);
+        });
+
+        let ns_key = NSString::from_str(key_str);
+        let title = NSString::from_str(&format!("Shortcut {}", key_str));
+        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &title,
+            Some(Sel::register(c"shortcutFired:")),
+            &ns_key,
+        );
+
+        // Build modifier flags
+        let mod_bits = modifiers as u64;
+        let mut flags = NSEventModifierFlags::empty();
+        if mod_bits & 1 != 0 { flags |= NSEventModifierFlags::Command; }
+        if mod_bits & 2 != 0 { flags |= NSEventModifierFlags::Shift; }
+        if mod_bits & 4 != 0 { flags |= NSEventModifierFlags::Option; }
+        if mod_bits & 8 != 0 { flags |= NSEventModifierFlags::Control; }
+        item.setKeyEquivalentModifierMask(flags);
+
+        item.setTarget(Some(&target));
+        std::mem::forget(target);
+
+        // Add to the app menu (first menu item's submenu)
+        if let Some(main_menu) = app.mainMenu() {
+            if main_menu.numberOfItems() > 0 {
+                if let Some(app_menu_item) = main_menu.itemAtIndex(0) {
+                    if let Some(submenu) = app_menu_item.submenu() {
+                        submenu.addItem(&item);
+                    }
+                }
+            }
+        }
+    }
 }

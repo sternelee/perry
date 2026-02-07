@@ -10,13 +10,16 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Init, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Thread-local tracking of the current function being compiled (for self-recursive call optimization)
 thread_local! {
     static CURRENT_FUNC_HIR_ID: Cell<Option<u32>> = Cell::new(None);
+    /// Import module prefixes: maps imported name -> source module's scoped prefix.
+    /// Set at the start of compile_module, used by compile_expr for scoped symbol lookup.
+    static IMPORT_MODULE_PREFIXES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// Global counter for generating unique temporary variable IDs
@@ -25,6 +28,18 @@ static TEMP_VAR_COUNTER: AtomicUsize = AtomicUsize::new(10000);
 /// Get a unique temporary variable ID
 fn next_temp_var_id() -> usize {
     TEMP_VAR_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Construct a scoped export name for an imported symbol, using the thread-local mapping.
+fn tl_scoped_export_name(name: &str) -> String {
+    IMPORT_MODULE_PREFIXES.with(|p| {
+        let map = p.borrow();
+        if let Some(prefix) = map.get(name) {
+            format!("__export_{}__{}", prefix, name)
+        } else {
+            format!("__export_{}", name)
+        }
+    })
 }
 
 /// Global counter for generating unique regex data IDs
@@ -356,6 +371,14 @@ pub struct Compiler {
     /// Imported function parameter counts: function name -> param count
     /// Used to ensure consistent wrapper signatures for functions with optional params
     imported_func_param_counts: HashMap<String, usize>,
+    /// Module symbol prefix for scoping cross-module symbols (sanitized module path)
+    module_symbol_prefix: String,
+    /// Mapping from imported function name -> source module's symbol prefix
+    /// Used to construct the correct scoped wrapper name when calling cross-module functions
+    import_module_prefixes: HashMap<String, String>,
+    /// Pre-declared import wrapper function IDs: unscoped func_name -> (scoped FuncId, param_count)
+    /// Populated by pre_declare_import_wrapper before compile_module
+    pre_declared_import_wrappers: HashMap<String, (cranelift_module::FuncId, usize)>,
 }
 
 impl Compiler {
@@ -411,6 +434,9 @@ impl Compiler {
             module_var_data_ids: HashMap::new(),
             module_level_locals: HashMap::new(),
             imported_func_param_counts: HashMap::new(),
+            module_symbol_prefix: String::new(),
+            import_module_prefixes: HashMap::new(),
+            pre_declared_import_wrappers: HashMap::new(),
         })
     }
 
@@ -442,6 +468,100 @@ impl Compiler {
     /// the function has optional parameters and is called with different arities.
     pub fn register_imported_func_param_count(&mut self, func_name: String, param_count: usize) {
         self.imported_func_param_counts.insert(func_name, param_count);
+    }
+
+    /// Set the module symbol prefix for scoping cross-module symbols.
+    /// This should be the sanitized module path (e.g., "lib_generic_ts").
+    pub fn set_module_symbol_prefix(&mut self, prefix: String) {
+        self.module_symbol_prefix = prefix;
+    }
+
+    /// Register that an imported function name comes from a specific source module.
+    /// This allows the compiler to construct the correct scoped wrapper name.
+    pub fn register_import_source(&mut self, func_name: String, source_prefix: String) {
+        self.import_module_prefixes.insert(func_name, source_prefix);
+    }
+
+    /// Construct a module-scoped export global name.
+    /// For the exporting module: uses self.module_symbol_prefix.
+    fn scoped_export_name(&self, name: &str) -> String {
+        if self.module_symbol_prefix.is_empty() {
+            format!("__export_{}", name)
+        } else {
+            format!("__export_{}__{}", self.module_symbol_prefix, name)
+        }
+    }
+
+    /// Construct a module-scoped wrapper function name.
+    /// For the exporting module: uses self.module_symbol_prefix.
+    fn scoped_wrapper_name(&self, name: &str) -> String {
+        if self.module_symbol_prefix.is_empty() {
+            format!("__wrapper_{}", name)
+        } else {
+            format!("__wrapper_{}__{}", self.module_symbol_prefix, name)
+        }
+    }
+
+    /// Construct a scoped export name for an imported symbol from another module.
+    /// Looks up the source module's prefix from import_module_prefixes.
+    fn import_scoped_export_name(&self, name: &str) -> String {
+        if let Some(prefix) = self.import_module_prefixes.get(name) {
+            format!("__export_{}__{}", prefix, name)
+        } else {
+            format!("__export_{}", name)
+        }
+    }
+
+    /// Construct a scoped wrapper name for an imported function from another module.
+    fn import_scoped_wrapper_name(&self, name: &str) -> String {
+        if let Some(prefix) = self.import_module_prefixes.get(name) {
+            format!("__wrapper_{}__{}", prefix, name)
+        } else {
+            format!("__wrapper_{}", name)
+        }
+    }
+
+    /// Pre-declare an imported wrapper function with its scoped name.
+    /// This is called from compile.rs before compile_module() to set up the import references
+    /// with the correct module-scoped symbol names. When compile_expr encounters an ExternFuncRef
+    /// call, it checks pre_declared_import_wrappers first before constructing a wrapper name.
+    /// Pre-declare an imported wrapper function with its scoped name.
+    /// Stores the FuncId in extern_funcs with a `__scoped_wrapper__` prefix key
+    /// so compile_expr can find it without needing a new parameter.
+    pub fn pre_declare_import_wrapper(&mut self, func_name: &str, source_module_prefix: &str, param_count: usize) -> Result<()> {
+        let scoped_name = format!("__wrapper_{}__{}", source_module_prefix, func_name);
+        let mut sig = self.module.make_signature();
+        sig.params.push(AbiParam::new(types::I64)); // closure_ptr (ignored)
+        for _ in 0..param_count {
+            sig.params.push(AbiParam::new(types::F64));
+        }
+        sig.returns.push(AbiParam::new(types::F64));
+        let key = format!("__scoped_wrapper__{}", func_name);
+        match self.module.declare_function(&scoped_name, Linkage::Import, &sig) {
+            Ok(func_id) => {
+                self.extern_funcs.insert(key, func_id);
+                // Also store param count for proper argument padding
+                self.imported_func_param_counts.entry(func_name.to_string()).or_insert(param_count);
+            }
+            Err(_) => {
+                // Already declared or incompatible - try to find existing
+                for (id, decl) in self.module.declarations().get_functions() {
+                    if decl.name.as_deref() == Some(&scoped_name) {
+                        self.extern_funcs.insert(key, id);
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Pre-declare an imported export global with its scoped name.
+    pub fn pre_declare_import_export(&mut self, export_name: &str, source_module_prefix: &str) -> Result<()> {
+        let scoped_name = format!("__export_{}__{}", source_module_prefix, export_name);
+        let _ = self.module.declare_data(&scoped_name, Linkage::Import, true, false);
+        self.import_module_prefixes.insert(export_name.to_string(), source_module_prefix.to_string());
+        Ok(())
     }
 
     /// Register an imported class from another module.
@@ -806,6 +926,18 @@ impl Compiler {
 
     /// Compile a HIR module to an object file
     pub fn compile_module(mut self, hir: &HirModule) -> Result<Vec<u8>> {
+        // Set the module symbol prefix from the module name
+        self.module_symbol_prefix = hir.name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
+
+        // Populate thread-local import module prefixes for use by compile_expr
+        IMPORT_MODULE_PREFIXES.with(|p| {
+            let mut map = p.borrow_mut();
+            map.clear();
+            for (k, v) in &self.import_module_prefixes {
+                map.insert(k.clone(), v.clone());
+            }
+        });
+
         // Store HIR functions for wrapper generation
         self.hir_functions = hir.functions.clone();
 
@@ -1045,7 +1177,7 @@ impl Compiler {
         // Create exported globals for native instances (e.g., `export const pool = new Pool(...)`)
         // These will be filled in during compile_init and accessed by other modules
         for (export_name, _module_name, _class_name) in &hir.exported_native_instances {
-            let global_name = format!("__export_{}", export_name);
+            let global_name = self.scoped_export_name(export_name);
             let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
             // Create a data description with space for one f64 (8 bytes), initialized to 0
             let mut data_desc = DataDescription::new();
@@ -1066,7 +1198,7 @@ impl Compiler {
             if native_instance_names.contains(export_name) {
                 continue;
             }
-            let global_name = format!("__export_{}", export_name);
+            let global_name = self.scoped_export_name(export_name);
             let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
             // Create a data description with space for one f64 (8 bytes), initialized to 0
             let mut data_desc = DataDescription::new();
@@ -1078,7 +1210,7 @@ impl Compiler {
         // Create exported globals for functions (e.g., `export function foo() { ... }`)
         // These allow functions to be passed as values to other modules
         for (func_name, func_id) in &hir.exported_functions {
-            let global_name = format!("__export_{}", func_name);
+            let global_name = self.scoped_export_name(func_name);
             let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
             // Create a data description with space for one f64 (8 bytes), initialized to 0
             let mut data_desc = DataDescription::new();
@@ -1125,7 +1257,11 @@ impl Compiler {
 
         // Generate wrapper aliases (trampolines that just call the original wrapper)
         for (alias_name, _original_name, original_wrapper_id) in wrapper_aliases_needed {
-            let alias_wrapper_name = format!("__wrapper_{}", alias_name);
+            let alias_wrapper_name = if self.module_symbol_prefix.is_empty() {
+                format!("__wrapper_{}", alias_name)
+            } else {
+                format!("__wrapper_{}__{}", self.module_symbol_prefix, alias_name)
+            };
 
             // Get the signature from the original wrapper
             let sig = self.module.declarations().get_function_decl(original_wrapper_id).signature.clone();
@@ -9379,6 +9515,255 @@ impl Compiler {
         }
 
         // ============================================
+        // Perry UI Phase A: Enhanced Widget Functions
+        // ============================================
+
+        // perry_ui_text_set_string(handle: i64, text_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::I64)); // text string ptr
+            let func_id = self.module.declare_function("perry_ui_text_set_string", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_text_set_string".to_string(), func_id);
+        }
+
+        // perry_ui_vstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // spacing
+            sig.params.push(AbiParam::new(types::F64)); // top
+            sig.params.push(AbiParam::new(types::F64)); // left
+            sig.params.push(AbiParam::new(types::F64)); // bottom
+            sig.params.push(AbiParam::new(types::F64)); // right
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_vstack_create_with_insets", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_vstack_create_with_insets".to_string(), func_id);
+        }
+
+        // perry_ui_hstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // spacing
+            sig.params.push(AbiParam::new(types::F64)); // top
+            sig.params.push(AbiParam::new(types::F64)); // left
+            sig.params.push(AbiParam::new(types::F64)); // bottom
+            sig.params.push(AbiParam::new(types::F64)); // right
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_hstack_create_with_insets", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_hstack_create_with_insets".to_string(), func_id);
+        }
+
+        // perry_ui_scrollview_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_scrollview_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_scrollview_create".to_string(), func_id);
+        }
+
+        // perry_ui_scrollview_set_child(scroll_handle: i64, child_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // scroll handle
+            sig.params.push(AbiParam::new(types::I64)); // child handle
+            let func_id = self.module.declare_function("perry_ui_scrollview_set_child", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_scrollview_set_child".to_string(), func_id);
+        }
+
+        // perry_ui_clipboard_read() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64)); // NaN-boxed string
+            let func_id = self.module.declare_function("perry_ui_clipboard_read", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_clipboard_read".to_string(), func_id);
+        }
+
+        // perry_ui_clipboard_write(text_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // text string ptr
+            let func_id = self.module.declare_function("perry_ui_clipboard_write", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_clipboard_write".to_string(), func_id);
+        }
+
+        // perry_ui_add_keyboard_shortcut(key_ptr: i64, modifiers: f64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // key string ptr
+            sig.params.push(AbiParam::new(types::F64)); // modifiers bitfield
+            sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
+            let func_id = self.module.declare_function("perry_ui_add_keyboard_shortcut", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_add_keyboard_shortcut".to_string(), func_id);
+        }
+
+        // perry_ui_text_set_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // r
+            sig.params.push(AbiParam::new(types::F64)); // g
+            sig.params.push(AbiParam::new(types::F64)); // b
+            sig.params.push(AbiParam::new(types::F64)); // a
+            let func_id = self.module.declare_function("perry_ui_text_set_color", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_text_set_color".to_string(), func_id);
+        }
+
+        // perry_ui_text_set_font_size(handle: i64, size: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // size
+            let func_id = self.module.declare_function("perry_ui_text_set_font_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_text_set_font_size".to_string(), func_id);
+        }
+
+        // perry_ui_text_set_font_weight(handle: i64, size: f64, weight: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // size
+            sig.params.push(AbiParam::new(types::F64)); // weight
+            let func_id = self.module.declare_function("perry_ui_text_set_font_weight", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_text_set_font_weight".to_string(), func_id);
+        }
+
+        // perry_ui_text_set_selectable(handle: i64, selectable: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // selectable (0 or 1)
+            let func_id = self.module.declare_function("perry_ui_text_set_selectable", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_text_set_selectable".to_string(), func_id);
+        }
+
+        // perry_ui_button_set_bordered(handle: i64, bordered: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // bordered (0 or 1)
+            let func_id = self.module.declare_function("perry_ui_button_set_bordered", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_button_set_bordered".to_string(), func_id);
+        }
+
+        // perry_ui_button_set_title(handle: i64, title_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::I64)); // title string ptr
+            let func_id = self.module.declare_function("perry_ui_button_set_title", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_button_set_title".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_focus(handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_textfield_focus", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_focus".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_set_string(handle: i64, text_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::I64)); // text string ptr
+            let func_id = self.module.declare_function("perry_ui_textfield_set_string", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_set_string".to_string(), func_id);
+        }
+
+        // perry_ui_scrollview_scroll_to(scroll_handle: i64, child_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // scroll handle
+            sig.params.push(AbiParam::new(types::I64)); // child handle
+            let func_id = self.module.declare_function("perry_ui_scrollview_scroll_to", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_scrollview_scroll_to".to_string(), func_id);
+        }
+
+        // perry_ui_scrollview_get_offset(scroll_handle: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // scroll handle
+            sig.returns.push(AbiParam::new(types::F64)); // offset
+            let func_id = self.module.declare_function("perry_ui_scrollview_get_offset", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_scrollview_get_offset".to_string(), func_id);
+        }
+
+        // perry_ui_scrollview_set_offset(scroll_handle: i64, offset: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // scroll handle
+            sig.params.push(AbiParam::new(types::F64)); // offset
+            let func_id = self.module.declare_function("perry_ui_scrollview_set_offset", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_scrollview_set_offset".to_string(), func_id);
+        }
+
+        // perry_ui_menu_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // menu handle
+            let func_id = self.module.declare_function("perry_ui_menu_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menu_create".to_string(), func_id);
+        }
+
+        // perry_ui_menu_add_item(menu_handle: i64, title_ptr: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            sig.params.push(AbiParam::new(types::I64)); // title string ptr
+            sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
+            let func_id = self.module.declare_function("perry_ui_menu_add_item", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menu_add_item".to_string(), func_id);
+        }
+
+        // perry_ui_widget_set_context_menu(widget_handle: i64, menu_handle: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            let func_id = self.module.declare_function("perry_ui_widget_set_context_menu", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_set_context_menu".to_string(), func_id);
+        }
+
+        // perry_ui_open_file_dialog(callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
+            let func_id = self.module.declare_function("perry_ui_open_file_dialog", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_open_file_dialog".to_string(), func_id);
+        }
+
+        // perry_ui_app_set_min_size(app_handle: i64, w: f64, h: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::F64)); // width
+            sig.params.push(AbiParam::new(types::F64)); // height
+            let func_id = self.module.declare_function("perry_ui_app_set_min_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_app_set_min_size".to_string(), func_id);
+        }
+
+        // perry_ui_app_set_max_size(app_handle: i64, w: f64, h: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::F64)); // width
+            sig.params.push(AbiParam::new(types::F64)); // height
+            let func_id = self.module.declare_function("perry_ui_app_set_max_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_app_set_max_size".to_string(), func_id);
+        }
+
+        // perry_ui_widget_add_child_at(parent: i64, child: i64, index: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // parent handle
+            sig.params.push(AbiParam::new(types::I64)); // child handle
+            sig.params.push(AbiParam::new(types::F64)); // index
+            let func_id = self.module.declare_function("perry_ui_widget_add_child_at", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_add_child_at".to_string(), func_id);
+        }
+
+        // ============================================
         // V8 JavaScript Runtime FFI functions
         // ============================================
 
@@ -9547,7 +9932,11 @@ impl Compiler {
             &func.name
         };
 
-        let linkage = if func.is_exported {
+        // Use Local linkage for all functions - cross-module calls go through
+        // scoped __wrapper_ functions, so the raw name doesn't need to be exported.
+        // This prevents duplicate symbol errors when two modules define functions
+        // with the same name (e.g., formatTokenAmount in lib/generic.ts and lib/risk-assessment.ts).
+        let linkage = if false && func.is_exported {
             Linkage::Export
         } else {
             Linkage::Local
@@ -11652,10 +12041,13 @@ impl Compiler {
         // All wrappers return f64 for uniform cross-module ABI (NaN-boxing for type safety)
         sig.returns.push(AbiParam::new(types::F64));
 
-        let wrapper_name = format!("__wrapper_{}", func.name);
-        // Always use Export linkage for wrappers since they are meant to be called cross-module.
-        // Even if func.is_exported is false, the function might be exported via `export { func }`
-        // which is handled separately, and the wrapper still needs to be visible to the linker.
+        // Scope wrapper name with module prefix to prevent collisions between modules
+        // that define functions with the same name (e.g., formatTokenAmount in lib/generic.ts and lib/risk-assessment.ts)
+        let wrapper_name = if self.module_symbol_prefix.is_empty() {
+            format!("__wrapper_{}", func.name)
+        } else {
+            format!("__wrapper_{}__{}", self.module_symbol_prefix, func.name)
+        };
         let wrapper_id = self.module.declare_function(&wrapper_name, Linkage::Export, &sig)?;
         // Track whether we need to NaN-box the return value (always needed since we return f64)
         let needs_return_boxing = original_return_abi == types::I64;
@@ -11830,11 +12222,19 @@ impl Compiler {
                 }
                 sig.returns.push(AbiParam::new(types::F64));
 
-                let wrapper_name = format!("__wrapper_{}", name);
+                let wrapper_name = if self.module_symbol_prefix.is_empty() {
+                    format!("__wrapper_{}", name)
+                } else {
+                    format!("__wrapper_{}__{}", self.module_symbol_prefix, name)
+                };
                 let wrapper_id = self.module.declare_function(&wrapper_name, Linkage::Export, &sig)?;
 
                 // Get the data ID for the exported global
-                let export_global_name = format!("__export_{}", name);
+                let export_global_name = if self.module_symbol_prefix.is_empty() {
+                    format!("__export_{}", name)
+                } else {
+                    format!("__export_{}__{}", self.module_symbol_prefix, name)
+                };
                 let data_id = match self.exported_object_ids.get(name) {
                     Some(id) => *id,
                     None => {
@@ -23648,65 +24048,58 @@ fn compile_expr(
                     // For TypeScript module imports, call the exported wrapper function
                     // which has a uniform ABI: (i64, f64*) -> f64
                     // The wrapper handles NaN-boxing for pointer returns
-                    let wrapper_name = format!("__wrapper_{}", func_name);
 
-                    // Build the wrapper signature: first param is i64 (closure_ptr, ignored),
-                    // remaining params are all f64, return is always f64
-                    // IMPORTANT: Use the full function signature (not call-site arity) to ensure
-                    // functions with optional parameters always have a consistent signature.
-                    // Priority: 1) imported_func_param_counts (from cross-module compile info)
-                    //          2) param_types.len() (from HIR type info)
-                    //          3) arg_vals.len() (fallback to call-site arity)
+                    // Check if we have a pre-declared scoped wrapper for this function
+                    // (set up by compile.rs via pre_declare_import_wrapper)
+                    let scoped_key = format!("__scoped_wrapper__{}", func_name);
+
                     let initial_param_count = if let Some(&count) = imported_func_param_counts.get(func_name) {
-                        // Use the registered full param count from the exporting module
                         count
                     } else if !param_types.is_empty() {
-                        // Use param_types from ExternFuncRef
                         param_types.len()
                     } else {
-                        // Fallback for builtins without type info - use call-site arity
                         arg_vals.len()
                     };
-                    let mut sig = module.make_signature();
-                    sig.params.push(AbiParam::new(types::I64)); // closure_ptr (will be 0)
-                    for _ in 0..initial_param_count {
-                        sig.params.push(AbiParam::new(types::F64));
-                    }
-                    sig.returns.push(AbiParam::new(types::F64)); // always f64 return
 
-                    // Declare the wrapper function as imported
-                    // If it's already declared with a different signature (e.g., more params),
-                    // find the existing declaration and use its signature instead.
-                    let (func_id, full_param_count) = match module.declare_function(
-                        &wrapper_name,
-                        cranelift_module::Linkage::Import,
-                        &sig,
-                    ) {
-                        Ok(id) => (id, initial_param_count),
-                        Err(e) => {
-                            // Check if this is an incompatible declaration error
-                            let err_str = format!("{:?}", e);
-                            let err_msg = e.to_string();
-                            let is_incompatible = err_str.to_lowercase().contains("incompatible") ||
-                                                   err_msg.to_lowercase().contains("incompatible") ||
-                                                   matches!(e, cranelift_module::ModuleError::IncompatibleDeclaration(_));
-                            if is_incompatible {
-                                // Find existing function by name and use its signature
-                                let mut found = None;
-                                for (id, decl) in module.declarations().get_functions() {
-                                    if decl.name.as_deref() == Some(&wrapper_name) {
-                                        // Found existing declaration - get its param count
-                                        let existing_param_count = decl.signature.params.len() - 1; // -1 for closure_ptr
-                                        found = Some((id, existing_param_count));
-                                        break;
+                    let (func_id, full_param_count) = if let Some(&scoped_func_id) = extern_funcs.get(&scoped_key) {
+                        // Use pre-declared scoped wrapper (module-prefixed symbol name)
+                        (scoped_func_id, initial_param_count)
+                    } else {
+                        // Fallback: declare unscoped wrapper (for single-module or backward compat)
+                        let wrapper_name = format!("__wrapper_{}", func_name);
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64)); // closure_ptr
+                        for _ in 0..initial_param_count {
+                            sig.params.push(AbiParam::new(types::F64));
+                        }
+                        sig.returns.push(AbiParam::new(types::F64));
+
+                        match module.declare_function(
+                            &wrapper_name,
+                            cranelift_module::Linkage::Import,
+                            &sig,
+                        ) {
+                            Ok(id) => (id, initial_param_count),
+                            Err(e) => {
+                                let err_msg = e.to_string();
+                                let is_incompatible = err_msg.to_lowercase().contains("incompatible") ||
+                                    matches!(e, cranelift_module::ModuleError::IncompatibleDeclaration(_));
+                                if is_incompatible {
+                                    let mut found = None;
+                                    for (id, decl) in module.declarations().get_functions() {
+                                        if decl.name.as_deref() == Some(&wrapper_name) {
+                                            let existing_param_count = decl.signature.params.len() - 1;
+                                            found = Some((id, existing_param_count));
+                                            break;
+                                        }
                                     }
+                                    match found {
+                                        Some((id, count)) => (id, count),
+                                        None => return Err(anyhow!("Failed to declare wrapper {}: {}", wrapper_name, e)),
+                                    }
+                                } else {
+                                    return Err(anyhow!("Failed to declare wrapper {}: {}", wrapper_name, e));
                                 }
-                                match found {
-                                    Some((id, count)) => (id, count),
-                                    None => return Err(anyhow!("Failed to declare wrapper function {}: incompatible signature but no existing declaration found: {}", wrapper_name, e)),
-                                }
-                            } else {
-                                return Err(anyhow!("Failed to declare wrapper function {}: {}", wrapper_name, e));
                             }
                         }
                     };
@@ -25776,8 +26169,8 @@ fn compile_expr(
             // Special handling for ExternFuncRef (imported values from another module)
             // e.g., import { config } from './config'; then config.db.host
             if let Expr::ExternFuncRef { name, .. } = object.as_ref() {
-                // Load the exported value from the other module's global
-                let global_name = format!("__export_{}", name);
+                // Load the exported value from the other module's global (scoped to source module)
+                let global_name = tl_scoped_export_name(name);
                 let data_id = module.declare_data(&global_name, Linkage::Import, true, false)
                     .map_err(|e| anyhow!("Failed to import global {}: {}", global_name, e))?;
                 let global_val = module.declare_data_in_func(data_id, builder.func);
@@ -27923,6 +28316,320 @@ fn compile_expr(
 
                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), container_handle));
                     }
+                    // ============================================================
+                    // Phase A: Handle-extracting widget mutation functions
+                    // ============================================================
+                    "textSetString" | "buttonSetTitle" | "textfieldSetString" => {
+                        // (handle, text) — extract handle via js_nanbox_get_pointer, text via js_get_string_pointer_unified
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                        let text_f64 = ensure_f64(builder, arg_vals[1]);
+                        let str_call = builder.ins().call(get_str_ref, &[text_f64]);
+                        let text_ptr = builder.inst_results(str_call)[0];
+
+                        let ffi_name = match method.as_str() {
+                            "textSetString" => "perry_ui_text_set_string",
+                            "buttonSetTitle" => "perry_ui_button_set_title",
+                            "textfieldSetString" => "perry_ui_textfield_set_string",
+                            _ => unreachable!(),
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, text_ptr]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "widgetSetHidden" | "textSetFontSize" | "textSetSelectable" |
+                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" => {
+                        // (handle, ...) — extract handle, pass remaining args as f64
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let ffi_name = match method.as_str() {
+                            "widgetSetHidden" => "perry_ui_set_widget_hidden",
+                            "textSetFontSize" => "perry_ui_text_set_font_size",
+                            "textSetSelectable" => "perry_ui_text_set_selectable",
+                            "buttonSetBordered" => "perry_ui_button_set_bordered",
+                            "textfieldFocus" => "perry_ui_textfield_focus",
+                            "widgetClearChildren" => "perry_ui_widget_clear_children",
+                            _ => unreachable!(),
+                        };
+
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+
+                        let mut call_args = vec![handle];
+                        for i in 1..arg_vals.len() {
+                            call_args.push(ensure_f64(builder, arg_vals[i]));
+                        }
+                        // widgetSetHidden and widgetClearChildren take i64 args — convert f64 → i64
+                        if method == "widgetSetHidden" {
+                            let hidden_f64 = ensure_f64(builder, arg_vals[1]);
+                            let hidden_i64 = builder.ins().fcvt_to_sint(types::I64, hidden_f64);
+                            builder.ins().call(func_ref, &[handle, hidden_i64]);
+                        } else if method == "widgetClearChildren" || method == "textfieldFocus" {
+                            builder.ins().call(func_ref, &[handle]);
+                        } else {
+                            builder.ins().call(func_ref, &call_args);
+                        }
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "textSetColor" => {
+                        // (handle, r, g, b, a) — extract handle, pass 4 f64 args
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let r = ensure_f64(builder, arg_vals[1]);
+                        let g = ensure_f64(builder, arg_vals[2]);
+                        let b = ensure_f64(builder, arg_vals[3]);
+                        let a = ensure_f64(builder, arg_vals[4]);
+
+                        let func = extern_funcs.get("perry_ui_text_set_color")
+                            .ok_or_else(|| anyhow!("perry_ui_text_set_color not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, r, g, b, a]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "textSetFontWeight" => {
+                        // (handle, size, weight) — extract handle, pass 2 f64 args
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let size = ensure_f64(builder, arg_vals[1]);
+                        let weight = ensure_f64(builder, arg_vals[2]);
+
+                        let func = extern_funcs.get("perry_ui_text_set_font_weight")
+                            .ok_or_else(|| anyhow!("perry_ui_text_set_font_weight not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, size, weight]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "scrollviewSetChild" | "scrollviewScrollTo" | "widgetSetContextMenu" => {
+                        // (handle1, handle2) — extract 2 handles via js_nanbox_get_pointer
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+
+                        let h1_f64 = ensure_f64(builder, arg_vals[0]);
+                        let h1_call = builder.ins().call(get_ptr_ref, &[h1_f64]);
+                        let h1 = builder.inst_results(h1_call)[0];
+
+                        let h2_f64 = ensure_f64(builder, arg_vals[1]);
+                        let h2_call = builder.ins().call(get_ptr_ref, &[h2_f64]);
+                        let h2 = builder.inst_results(h2_call)[0];
+
+                        let ffi_name = match method.as_str() {
+                            "scrollviewSetChild" => "perry_ui_scrollview_set_child",
+                            "scrollviewScrollTo" => "perry_ui_scrollview_scroll_to",
+                            "widgetSetContextMenu" => "perry_ui_widget_set_context_menu",
+                            _ => unreachable!(),
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[h1, h2]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "scrollviewGetOffset" => {
+                        // (handle) — extract handle, return f64
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_scrollview_get_offset")
+                            .ok_or_else(|| anyhow!("perry_ui_scrollview_get_offset not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[handle]);
+                        return Ok(builder.inst_results(call)[0]); // returns f64 directly
+                    }
+                    "scrollviewSetOffset" => {
+                        // (handle, offset) — extract handle, pass offset as f64
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let offset = ensure_f64(builder, arg_vals[1]);
+                        let func = extern_funcs.get("perry_ui_scrollview_set_offset")
+                            .ok_or_else(|| anyhow!("perry_ui_scrollview_set_offset not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[handle, offset]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "clipboardRead" => {
+                        // () — no args, returns NaN-boxed string (f64)
+                        let func = extern_funcs.get("perry_ui_clipboard_read")
+                            .ok_or_else(|| anyhow!("perry_ui_clipboard_read not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[]);
+                        return Ok(builder.inst_results(call)[0]); // already NaN-boxed f64
+                    }
+                    "clipboardWrite" => {
+                        // (text) — extract string pointer
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                        let text_f64 = ensure_f64(builder, arg_vals[0]);
+                        let str_call = builder.ins().call(get_str_ref, &[text_f64]);
+                        let text_ptr = builder.inst_results(str_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_clipboard_write")
+                            .ok_or_else(|| anyhow!("perry_ui_clipboard_write not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[text_ptr]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "addKeyboardShortcut" => {
+                        // (key, modifiers, callback) — extract key string, pass modifiers and callback as f64
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                        let key_f64 = ensure_f64(builder, arg_vals[0]);
+                        let str_call = builder.ins().call(get_str_ref, &[key_f64]);
+                        let key_ptr = builder.inst_results(str_call)[0];
+
+                        let mods = ensure_f64(builder, arg_vals[1]);
+                        let callback = ensure_f64(builder, arg_vals[2]);
+
+                        let func = extern_funcs.get("perry_ui_add_keyboard_shortcut")
+                            .ok_or_else(|| anyhow!("perry_ui_add_keyboard_shortcut not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[key_ptr, mods, callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "menuAddItem" => {
+                        // (menuHandle, title, callback) — extract menu handle, title string, pass callback
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let h_f64 = ensure_f64(builder, arg_vals[0]);
+                        let h_call = builder.ins().call(get_ptr_ref, &[h_f64]);
+                        let menu_handle = builder.inst_results(h_call)[0];
+
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                        let title_f64 = ensure_f64(builder, arg_vals[1]);
+                        let str_call = builder.ins().call(get_str_ref, &[title_f64]);
+                        let title_ptr = builder.inst_results(str_call)[0];
+
+                        let callback = ensure_f64(builder, arg_vals[2]);
+
+                        let func = extern_funcs.get("perry_ui_menu_add_item")
+                            .ok_or_else(|| anyhow!("perry_ui_menu_add_item not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[menu_handle, title_ptr, callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "openFileDialog" => {
+                        // (callback) — pass callback as f64
+                        let callback = ensure_f64(builder, arg_vals[0]);
+                        let func = extern_funcs.get("perry_ui_open_file_dialog")
+                            .ok_or_else(|| anyhow!("perry_ui_open_file_dialog not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[callback]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "appSetMinSize" | "appSetMaxSize" => {
+                        // (appHandle, w, h) — extract handle, pass w/h as f64
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let h_f64 = ensure_f64(builder, arg_vals[0]);
+                        let h_call = builder.ins().call(get_ptr_ref, &[h_f64]);
+                        let app_handle = builder.inst_results(h_call)[0];
+
+                        let w = ensure_f64(builder, arg_vals[1]);
+                        let h = ensure_f64(builder, arg_vals[2]);
+
+                        let ffi_name = if method == "appSetMinSize" { "perry_ui_app_set_min_size" } else { "perry_ui_app_set_max_size" };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[app_handle, w, h]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "widgetAddChild" => {
+                        // (parent, child) — extract 2 handles
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+
+                        let p_f64 = ensure_f64(builder, arg_vals[0]);
+                        let p_call = builder.ins().call(get_ptr_ref, &[p_f64]);
+                        let parent = builder.inst_results(p_call)[0];
+
+                        let c_f64 = ensure_f64(builder, arg_vals[1]);
+                        let c_call = builder.ins().call(get_ptr_ref, &[c_f64]);
+                        let child = builder.inst_results(c_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_widget_add_child")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_add_child not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[parent, child]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "widgetAddChildAt" => {
+                        // (parent, child, index) — extract 2 handles, pass index as f64
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+
+                        let p_f64 = ensure_f64(builder, arg_vals[0]);
+                        let p_call = builder.ins().call(get_ptr_ref, &[p_f64]);
+                        let parent = builder.inst_results(p_call)[0];
+
+                        let c_f64 = ensure_f64(builder, arg_vals[1]);
+                        let c_call = builder.ins().call(get_ptr_ref, &[c_f64]);
+                        let child = builder.inst_results(c_call)[0];
+
+                        let index = ensure_f64(builder, arg_vals[2]);
+
+                        let func = extern_funcs.get("perry_ui_widget_add_child_at")
+                            .ok_or_else(|| anyhow!("perry_ui_widget_add_child_at not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[parent, child, index]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
                     _ => {} // Fall through to generic dispatch
                 }
             }
@@ -28439,6 +29146,11 @@ fn compile_expr(
                 ("perry/ui", false, "State") => "perry_ui_state_create",
                 ("perry/ui", false, "Spacer") => "perry_ui_spacer_create",
                 ("perry/ui", false, "Divider") => "perry_ui_divider_create",
+                ("perry/ui", false, "ScrollView") => "perry_ui_scrollview_create",
+                ("perry/ui", false, "menuCreate") => "perry_ui_menu_create",
+                // VStack/HStack with insets — 5 f64 args
+                ("perry/ui", false, "VStackWithInsets") => "perry_ui_vstack_create_with_insets",
+                ("perry/ui", false, "HStackWithInsets") => "perry_ui_hstack_create_with_insets",
                 // State methods (with object)
                 ("perry/ui", true, "value") => "perry_ui_state_get",
                 ("perry/ui", true, "set") => "perry_ui_state_set",
@@ -28616,8 +29328,8 @@ fn compile_expr(
                 // Method call with object - object handle is first arg
                 // Special handling for ExternFuncRef (imported native instance from another module)
                 let obj_val = if let Expr::ExternFuncRef { name, .. } = obj_expr.as_ref() {
-                    // This is an imported variable - look up the exported global from the other module
-                    let global_name = format!("__export_{}", name);
+                    // This is an imported variable - look up the exported global from the other module (scoped)
+                    let global_name = tl_scoped_export_name(name);
                     // Declare the data as imported (will be resolved by linker)
                     let data_id = module.declare_data(&global_name, Linkage::Import, true, false)
                         .map_err(|e| anyhow!("Failed to import global {}: {}", global_name, e))?;
@@ -30646,7 +31358,7 @@ fn compile_expr(
         // ExternFuncRef used as a value (e.g., imported and passed as argument)
         // Load the exported value from the other module's global
         Expr::ExternFuncRef { name, .. } => {
-            let global_name = format!("__export_{}", name);
+            let global_name = tl_scoped_export_name(name);
             // Declare the data as imported (will be resolved by linker)
             let data_id = module.declare_data(&global_name, Linkage::Import, true, false)
                 .map_err(|e| anyhow!("Failed to import global {}: {}", global_name, e))?;

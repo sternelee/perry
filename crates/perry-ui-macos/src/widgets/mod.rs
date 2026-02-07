@@ -7,6 +7,7 @@ pub mod divider;
 pub mod textfield;
 pub mod toggle;
 pub mod slider;
+pub mod scrollview;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
@@ -61,6 +62,26 @@ pub fn clear_children(handle: i64) {
                 stack.removeArrangedSubview(&*sv);
                 sv.removeFromSuperview();
             }
+        }
+    }
+}
+
+/// Add a child view to a parent view at a specific index.
+pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            parent.isKindOfClass(cls)
+        } else {
+            false
+        };
+
+        if is_stack {
+            let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
+            unsafe {
+                let _: () = objc2::msg_send![stack, insertArrangedSubview: &*child, atIndex: index as usize];
+            }
+        } else {
+            parent.addSubview(&child);
         }
     }
 }

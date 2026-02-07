@@ -678,6 +678,52 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format)?;
 
+    // Recompute project_root as the common ancestor of all module paths.
+    // The initial project_root is the parent of the entry file, but modules may be in sibling
+    // directories (e.g., entry in workers/, modules in lib/). This ensures unique module names.
+    if ctx.native_modules.len() > 1 {
+        let mut common: Option<PathBuf> = None;
+        for path in ctx.native_modules.keys() {
+            if let Some(parent) = path.parent() {
+                match &common {
+                    None => common = Some(parent.to_path_buf()),
+                    Some(prev) => {
+                        // Find common prefix of prev and parent
+                        let mut new_common = PathBuf::new();
+                        for (a, b) in prev.components().zip(parent.components()) {
+                            if a == b {
+                                new_common.push(a);
+                            } else {
+                                break;
+                            }
+                        }
+                        common = Some(new_common);
+                    }
+                }
+            }
+        }
+        if let Some(new_root) = common {
+            if !new_root.as_os_str().is_empty() {
+                ctx.project_root = new_root;
+                // Re-set module names based on the new project root
+                let paths: Vec<PathBuf> = ctx.native_modules.keys().cloned().collect();
+                for path in paths {
+                    if let Some(module) = ctx.native_modules.get_mut(&path) {
+                        let filename = path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("module.ts");
+                        module.name = path
+                            .strip_prefix(&ctx.project_root)
+                            .ok()
+                            .and_then(|p| p.to_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| filename.to_string());
+                    }
+                }
+            }
+        }
+    }
+
     let total_modules = ctx.native_modules.len() + ctx.js_modules.len();
     match format {
         OutputFormat::Text => {
@@ -1041,11 +1087,30 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     compiler.register_imported_class(class, Some(&local_name))?;
                 }
 
+                // Compute source module's symbol prefix for scoped cross-module symbols
+                let source_module_prefix = {
+                    let source_path = PathBuf::from(&resolved_path);
+                    let source_module_name = source_path
+                        .strip_prefix(&ctx.project_root)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| source_path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("module")
+                            .to_string());
+                    source_module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+                };
+
                 // Check if this import is a function from another module
-                // Register its param count so wrapper signatures are consistent
+                // Register its param count and pre-declare the scoped wrapper
                 if let Some(&param_count) = exported_func_param_counts.get(&key) {
-                    compiler.register_imported_func_param_count(exported_name, param_count);
+                    compiler.register_imported_func_param_count(exported_name.clone(), param_count);
+                    let _ = compiler.pre_declare_import_wrapper(&exported_name, &source_module_prefix, param_count);
                 }
+
+                // Pre-declare scoped export global for this import
+                let _ = compiler.pre_declare_import_export(&exported_name, &source_module_prefix);
 
                 // Check if this import is an enum from another module
                 if let Some(members) = exported_enums.get(&key) {
@@ -1086,6 +1151,44 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             OutputFormat::Json => {}
         }
         obj_paths.push(obj_path);
+    }
+
+    // Generate stubs for missing symbols from unresolved imports (npm packages etc.)
+    {
+        use std::collections::HashSet;
+        let mut undefined_syms: HashSet<String> = HashSet::new();
+        let mut defined_syms: HashSet<String> = HashSet::new();
+        let runtime_lib_path = find_runtime_library().ok();
+        let stdlib_lib_path = find_stdlib_library();
+        let mut all_scan_paths: Vec<PathBuf> = obj_paths.clone();
+        if let Some(ref p) = runtime_lib_path { all_scan_paths.push(p.clone()); }
+        if let Some(ref p) = stdlib_lib_path { all_scan_paths.push(p.clone()); }
+        for scan_path in &all_scan_paths {
+            if let Ok(output) = std::process::Command::new("nm").arg("-g").arg(scan_path).output() {
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let (st, sn) = if parts.len() == 3 { (parts[1], parts[2]) } else { (parts[0], parts[1]) };
+                        let cn = sn.strip_prefix('_').unwrap_or(sn);
+                        if st == "U" && (cn.starts_with("__export_") || cn.starts_with("__wrapper_") || cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle") {
+                            undefined_syms.insert(cn.to_string());
+                        } else if matches!(st, "T" | "t" | "D" | "d" | "S" | "s" | "B" | "b") {
+                            defined_syms.insert(cn.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        let missing: Vec<String> = undefined_syms.difference(&defined_syms).cloned().collect();
+        if !missing.is_empty() {
+            let (mut md, mut mf) = (Vec::new(), Vec::new());
+            for s in &missing { if s.starts_with("__export_") { md.push(s.clone()); } else { mf.push(s.clone()); } }
+            if let OutputFormat::Text = format { eprintln!("  Generating stubs for {} missing symbols ({} data, {} functions)", missing.len(), md.len(), mf.len()); }
+            let stub_bytes = perry_codegen::generate_stub_object(&md, &mf)?;
+            let stub_path = PathBuf::from("_perry_stubs.o");
+            fs::write(&stub_path, &stub_bytes)?;
+            obj_paths.push(stub_path);
+        }
     }
 
     // Generate JS bundle if needed

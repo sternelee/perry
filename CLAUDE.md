@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.133
+**Current Version:** 0.2.135
 
 ## Workflow Requirements
 
@@ -226,6 +226,32 @@ Perry/ui supports 5 types of reactive bindings, all dispatched from `state_set()
 | `perry_ui_set_widget_hidden` | `(handle: i64, hidden: i64)` | Show/hide widget |
 | `perry_ui_for_each_init` | `(container: i64, state: i64, closure: f64)` | Init dynamic list with ForEach |
 | `perry_ui_widget_clear_children` | `(handle: i64)` | Remove all children from container |
+| `perry_ui_text_set_string` | `(handle: i64, text_ptr: i64)` | Update text content |
+| `perry_ui_text_set_color` | `(handle: i64, r: f64, g: f64, b: f64, a: f64)` | Set text color |
+| `perry_ui_text_set_font_size` | `(handle: i64, size: f64)` | Set font size |
+| `perry_ui_text_set_font_weight` | `(handle: i64, size: f64, weight: f64)` | Set font weight |
+| `perry_ui_text_set_selectable` | `(handle: i64, selectable: f64)` | Set text selectable |
+| `perry_ui_button_set_bordered` | `(handle: i64, bordered: f64)` | Set button border |
+| `perry_ui_button_set_title` | `(handle: i64, title_ptr: i64)` | Set button title |
+| `perry_ui_vstack_create_with_insets` | `(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64` | VStack with custom insets |
+| `perry_ui_hstack_create_with_insets` | `(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64` | HStack with custom insets |
+| `perry_ui_scrollview_create` | `() -> i64` | Create NSScrollView |
+| `perry_ui_scrollview_set_child` | `(scroll: i64, child: i64)` | Set scroll document view |
+| `perry_ui_scrollview_scroll_to` | `(scroll: i64, child: i64)` | Scroll child into view |
+| `perry_ui_scrollview_get_offset` | `(scroll: i64) -> f64` | Get vertical scroll offset |
+| `perry_ui_scrollview_set_offset` | `(scroll: i64, offset: f64)` | Set vertical scroll offset |
+| `perry_ui_clipboard_read` | `() -> f64` | Read text from clipboard |
+| `perry_ui_clipboard_write` | `(text_ptr: i64)` | Write text to clipboard |
+| `perry_ui_add_keyboard_shortcut` | `(key_ptr: i64, modifiers: f64, callback: f64)` | Add keyboard shortcut |
+| `perry_ui_textfield_focus` | `(handle: i64)` | Focus text field |
+| `perry_ui_textfield_set_string` | `(handle: i64, text_ptr: i64)` | Set text field value |
+| `perry_ui_menu_create` | `() -> i64` | Create context menu |
+| `perry_ui_menu_add_item` | `(menu: i64, title_ptr: i64, callback: f64)` | Add menu item |
+| `perry_ui_widget_set_context_menu` | `(widget: i64, menu: i64)` | Set context menu on widget |
+| `perry_ui_open_file_dialog` | `(callback: f64)` | Open file dialog |
+| `perry_ui_app_set_min_size` | `(app: i64, w: f64, h: f64)` | Set minimum window size |
+| `perry_ui_app_set_max_size` | `(app: i64, w: f64, h: f64)` | Set maximum window size |
+| `perry_ui_widget_add_child_at` | `(parent: i64, child: i64, index: f64)` | Insert child at index |
 
 ### How to Add a New Widget
 
@@ -352,6 +378,53 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.135
+- Module-scoped cross-module symbols for large multi-module compilation
+  - **Duplicate symbol fix**: When multiple modules define functions with the same name (e.g., `formatTokenAmount`
+    in `lib/generic.ts` and `lib/risk-assessment.ts`), linker symbols like `__wrapper_formatTokenAmount` collided
+  - All cross-module symbols now prefixed with sanitized module path:
+    - `__wrapper_{module_prefix}__{func_name}` for wrapper functions
+    - `__export_{module_prefix}__{var_name}` for export data globals
+    - `__perry_init_{module_path}` uses full relative path (not just filename)
+  - Raw exported function linkage changed from `Linkage::Export` to `Linkage::Local` (only wrappers are exported)
+  - Thread-local `IMPORT_MODULE_PREFIXES` maps function names to source module prefixes for compile_expr
+  - `pre_declare_import_wrapper()` and `pre_declare_import_export()` pre-declare scoped symbols before compilation
+  - Common ancestor project root: computes shared path prefix across all discovered modules for consistent naming
+- Stub generation for unresolved external dependencies
+  - `generate_stub_object()` creates object files with stub functions that return TAG_UNDEFINED
+  - Allows compilation of projects with npm dependencies that aren't natively implemented
+  - Stub symbols logged at compile time for visibility
+- Successfully compiled 183-module arb worker application to 65MB native arm64 executable
+
+### v0.2.134
+- Perry UI Phase A: 24 new FFI functions for dynamic widget mutation, styling, scrolling, clipboard, keyboard shortcuts, context menus, and file dialogs
+  - **Phase A.0**: `widgetSetHidden(h, flag)`, `widgetClearChildren(h)` — now callable from TypeScript
+  - **Phase A.1 — Text mutation & layout control**:
+    - `textSetString(h, text)` — update Text widget content
+    - `VStackWithInsets(spacing, top, left, bottom, right)` / `HStackWithInsets(...)` — stacks with custom edge insets
+  - **Phase A.2 — ScrollView, Clipboard & Keyboard shortcuts**:
+    - `ScrollView()` — NSScrollView with vertical scroller
+    - `scrollviewSetChild(scroll, child)` — set document view
+    - `clipboardRead()` / `clipboardWrite(text)` — system clipboard access (NSPasteboard)
+    - `addKeyboardShortcut(key, modifiers, callback)` — add menu shortcuts (1=Cmd, 2=Shift, 4=Option, 8=Control)
+  - **Phase A.3 — Text & Button styling**:
+    - `textSetColor(h, r, g, b, a)` — RGBA text color via NSColor
+    - `textSetFontSize(h, size)` / `textSetFontWeight(h, size, weight)` — font control via NSFont
+    - `textSetSelectable(h, flag)` — make text selectable
+    - `buttonSetBordered(h, flag)` / `buttonSetTitle(h, title)` — button mutations
+  - **Phase A.4 — Focus & scroll-to**:
+    - `textfieldFocus(h)` — make text field first responder
+    - `textfieldSetString(h, text)` — set text field value
+    - `scrollviewScrollTo(scroll, child)` / `scrollviewGetOffset(h)` / `scrollviewSetOffset(h, y)` — scroll control
+  - **Phase A.5 — Context menus, file dialog & window sizing**:
+    - `menuCreate()` / `menuAddItem(menu, title, callback)` / `widgetSetContextMenu(widget, menu)` — right-click context menus
+    - `openFileDialog(callback)` — NSOpenPanel modal file picker
+    - `appSetMinSize(app, w, h)` / `appSetMaxSize(app, w, h)` — window size constraints
+  - **Bonus**: `widgetAddChild(parent, child)`, `widgetAddChildAt(parent, child, index)` — programmatic child management
+  - New Cargo.toml features: NSScrollView, NSClipView, NSPasteboard, NSColor, NSFont, NSSavePanel, NSOpenPanel
+  - All functions use module-level NativeMethodCall dispatch (no HIR changes needed)
+  - New files: `scrollview.rs`, `clipboard.rs`, `menu.rs`, `file_dialog.rs`
 
 ### v0.2.133
 - Move array allocation from system malloc to arena bump allocator

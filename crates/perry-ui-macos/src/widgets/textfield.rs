@@ -135,3 +135,27 @@ pub fn create(placeholder_ptr: *const u8, on_change: f64) -> i64 {
         handle
     }
 }
+
+/// Focus an editable text field (make it first responder).
+pub fn focus(handle: i64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            if let Some(window) = tf.window() {
+                window.makeFirstResponder(Some(tf));
+            }
+        }
+    }
+}
+
+/// Set the text of an editable text field from a StringHeader pointer.
+pub fn set_string_value(handle: i64, text_ptr: *const u8) {
+    let text = str_from_header(text_ptr);
+    if let Some(view) = super::get_widget(handle) {
+        let ns_string = NSString::from_str(text);
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            tf.setStringValue(&ns_string);
+        }
+    }
+}
