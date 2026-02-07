@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.135
+**Current Version:** 0.2.136
 
 ## Workflow Requirements
 
@@ -378,6 +378,17 @@ These are recurring issues encountered during development. Check these first whe
 - `CGPoint`/`CGSize`/`CGRect` are in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.136
+- Comprehensive perry/ui smoke test (`test-files/test_ui_comprehensive.ts`)
+  - Single file exercising all 9 widgets, 5 reactive binding types, and 24+ Phase A FFI functions
+  - Covers: styled text, counter, multi-state text, two-way slider binding, conditional rendering,
+    ForEach dynamic lists, TextField, dynamic mutation (textSetString, textSetColor, textSetFontWeight,
+    buttonSetTitle, buttonSetBordered), widget tree manipulation (widgetAddChild, widgetClearChildren,
+    widgetSetHidden), ScrollView with scrollviewSetChild/scrollviewSetOffset, clipboard read/write,
+    keyboard shortcuts (Cmd+N, Cmd+O), context menus, window size constraints (appSetMinSize/appSetMaxSize),
+    VStackWithInsets/HStackWithInsets, openFileDialog, textSetSelectable, textfieldFocus
+  - Compiles to 41MB arm64 native executable — serves as regression test for the full UI surface area
 
 ### v0.2.135
 - Module-scoped cross-module symbols for large multi-module compilation
