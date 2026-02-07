@@ -12,7 +12,8 @@ thread_local! {
 }
 
 extern "C" {
-    fn js_closure_call0(closure: i64) -> f64;
+    fn js_closure_call0(closure: *const u8) -> f64;
+    fn js_nanbox_get_pointer(value: f64) -> i64;
 }
 
 /// Internal state for our button target
@@ -32,9 +33,10 @@ define_class!(
             let key = self.ivars().callback_key.get();
             BUTTON_CALLBACKS.with(|cbs| {
                 if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                    let closure_i64 = closure_f64.to_bits() as i64;
+                    // Extract raw closure pointer from NaN-boxed value
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
                     unsafe {
-                        js_closure_call0(closure_i64);
+                        js_closure_call0(closure_ptr as *const u8);
                     }
                 }
             });

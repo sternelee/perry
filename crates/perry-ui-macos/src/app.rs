@@ -1,8 +1,9 @@
 use objc2::rc::Retained;
+use objc2::runtime::Sel;
 use objc2::MainThreadOnly;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSLayoutConstraint, NSWindow,
-    NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEventModifierFlags,
+    NSLayoutConstraint, NSMenu, NSMenuItem, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGSize, CGRect};
 use objc2_foundation::{NSString, MainThreadMarker};
@@ -116,12 +117,44 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
     });
 }
 
+/// Create a standard macOS menu bar with Quit (Cmd+Q) support.
+fn setup_menu_bar(app: &NSApplication, mtm: MainThreadMarker) {
+    unsafe {
+        // Main menu bar
+        let menu_bar = NSMenu::new(mtm);
+
+        // App menu (the first menu, shown as the app name)
+        let app_menu_item = NSMenuItem::new(mtm);
+        let app_menu = NSMenu::new(mtm);
+
+        // Quit menu item: "Quit" with Cmd+Q
+        let quit_title = NSString::from_str("Quit");
+        let quit_key = NSString::from_str("q");
+        let quit_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &quit_title,
+            Some(Sel::register(c"terminate:")),
+            &quit_key,
+        );
+        quit_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        app_menu.addItem(&quit_item);
+
+        app_menu_item.setSubmenu(Some(&app_menu));
+        menu_bar.addItem(&app_menu_item);
+
+        app.setMainMenu(Some(&menu_bar));
+    }
+}
+
 /// Run the application event loop (blocks).
 pub fn app_run(_app_handle: i64) {
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+
+    // Set up menu bar with Cmd+Q support
+    setup_menu_bar(&app, mtm);
 
     APPS.with(|a| {
         let apps = a.borrow();

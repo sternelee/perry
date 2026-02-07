@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.122
+**Current Version:** 0.2.123
 
 ## Workflow Requirements
 
@@ -269,6 +269,15 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 ## Recent Fixes (v0.2.37-0.2.117)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
+
+### v0.2.123
+- Fix Cmd+Q to quit and button callbacks in perry/ui apps
+  - **Cmd+Q**: Added standard macOS menu bar with Quit menu item wired to `terminate:` action
+  - **Button callbacks**: `js_closure_call0` expects raw `*const ClosureHeader` but received NaN-boxed
+    POINTER_TAG bits (`0x7FFD...`). Now uses `js_nanbox_get_pointer` to extract raw closure pointer
+    before calling `js_closure_call0`
+  - Clicking "Increment" now correctly calls the closure which updates the State value
+  - Note: Text label reactivity (updating when state changes) is a Phase 2 feature
 
 ### v0.2.122
 - Fix VStack/HStack children not rendering — NaN-boxed handle extraction
