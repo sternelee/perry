@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.124
+**Current Version:** 0.2.125
 
 ## Workflow Requirements
 
@@ -122,6 +122,174 @@ The HIR (`crates/perry-hir/src/ir.rs`) represents a simplified, typed intermedia
 - **Class**: Name, fields, constructor, instance/static methods
 - **Statement**: Let, Expr, Return, If, While, For, Break, Continue, Throw, Try
 - **Expression**: Literals, variable access (LocalGet/Set, GlobalGet/Set), operations, calls, object/array literals
+
+## Native UI Architecture (`perry/ui`)
+
+Perry supports native macOS GUI apps via the `perry/ui` module. Developers write declarative TypeScript that compiles to AppKit calls — no Electron, no WebView.
+
+### TypeScript API
+
+```typescript
+import { App, VStack, HStack, Text, Button, State } from "perry/ui"
+
+const count = State(0)
+
+App({
+    title: "Counter",
+    width: 400,
+    height: 300,
+    body: VStack(16, [
+        Text(`Count: ${count.value}`),
+        Button("Increment", () => count.set(count.value + 1)),
+    ])
+})
+```
+
+### End-to-End Pipeline
+
+```
+TypeScript: import { Text, Button } from "perry/ui"
+    ↓
+HIR: "perry/ui" in NATIVE_MODULES → NativeMethodCall { module: "perry/ui", method: "Text" }
+    ↓
+Codegen: Special dispatch for VStack/HStack/Button/App → calls perry_ui_* FFI functions
+         Generic dispatch for Text/State → calls perry_ui_text_create / perry_ui_state_*
+    ↓
+Linker: Detects perry/ui import → links libperry_ui_macos.a + AppKit framework
+    ↓
+Runtime: perry-ui-macos uses objc2 to create NSWindow, NSStackView, NSTextField, NSButton
+```
+
+### Crate Structure
+
+- **`perry-ui`** (`crates/perry-ui/`) — Platform-agnostic types: `WidgetHandle`, `WidgetKind`, `StateId`. Pure `rlib`, no platform deps.
+- **`perry-ui-macos`** (`crates/perry-ui-macos/`) — macOS AppKit backend via `objc2`. Builds as `staticlib` (`libperry_ui_macos.a`).
+- Future: `perry-ui-linux` (GTK4), `perry-ui-ios`, etc.
+
+### Handle-Based Widget System
+
+All UI objects (windows, widgets, state cells) are stored in thread-local `Vec`s and referenced by **1-based i64 handles**:
+
+```rust
+thread_local! {
+    static WIDGETS: RefCell<Vec<Retained<NSView>>> = RefCell::new(Vec::new());
+}
+fn register_widget(view: Retained<NSView>) -> i64 {
+    WIDGETS.with(|w| { w.borrow_mut().push(view); w.borrow().len() as i64 })
+}
+fn get_widget(handle: i64) -> Option<Retained<NSView>> { /* index = handle - 1 */ }
+```
+
+Handles are NaN-boxed with `POINTER_TAG` when returned from generic `NativeMethodCall` codegen, so callers must use `js_nanbox_get_pointer(f64) -> i64` to extract raw handles.
+
+### Reactive State Binding
+
+State cells hold `f64` values. Text widgets can be **bound** to state so they auto-update:
+
+1. **Compile time**: `detect_text_state_binding()` in codegen detects `Text("prefix" + State.value)` pattern
+2. **Compile time**: Emits `perry_ui_state_bind_text_numeric(state_handle, text_handle, prefix_ptr)` after creating the Text widget
+3. **Runtime**: `state_set()` iterates all bindings for that state, formats `"{prefix}{value}"`, calls `set_text_str()` on NSTextField
+
+### FFI Surface (all `#[no_mangle] pub extern "C"`)
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `perry_ui_app_create` | `(title: i64, w: f64, h: f64) -> i64` | Create NSWindow, return app handle |
+| `perry_ui_app_set_body` | `(app: i64, root: i64)` | Set root widget with Auto Layout |
+| `perry_ui_app_run` | `(app: i64)` | Run NSApplication event loop (blocks) |
+| `perry_ui_text_create` | `(text_ptr: i64) -> i64` | Create NSTextField label |
+| `perry_ui_button_create` | `(label: i64, on_press: f64) -> i64` | Create NSButton with closure callback |
+| `perry_ui_vstack_create` | `(spacing: f64) -> i64` | Create vertical NSStackView |
+| `perry_ui_hstack_create` | `(spacing: f64) -> i64` | Create horizontal NSStackView |
+| `perry_ui_widget_add_child` | `(parent: i64, child: i64)` | Add child to container |
+| `perry_ui_state_create` | `(initial: f64) -> i64` | Create reactive state cell |
+| `perry_ui_state_get` | `(state: i64) -> f64` | Read state value |
+| `perry_ui_state_set` | `(state: i64, value: f64)` | Write state + trigger bindings |
+| `perry_ui_state_bind_text_numeric` | `(state: i64, text: i64, prefix: i64)` | Bind text to `"{prefix}{value}"` |
+
+### How to Add a New Widget
+
+Adding a new widget (e.g., `Slider`, `TextField`, `Image`) requires changes in **4 places**:
+
+#### 1. Runtime: `crates/perry-ui-macos/src/widgets/`
+
+Create `slider.rs` (example):
+
+```rust
+pub fn create(min: f64, max: f64, initial: f64) -> i64 {
+    let mtm = MainThreadMarker::new().expect("must run on main thread");
+    let slider = unsafe { NSSlider::initWithTarget_action(NSSlider::alloc(mtm), None, None) };
+    // Configure min/max/value...
+    let view: Retained<NSView> = unsafe { Retained::cast_unchecked(slider) };
+    super::register_widget(view)
+}
+```
+
+Add `pub mod slider;` to `widgets/mod.rs`.
+
+#### 2. FFI: `crates/perry-ui-macos/src/lib.rs`
+
+```rust
+#[no_mangle]
+pub extern "C" fn perry_ui_slider_create(min: f64, max: f64, initial: f64) -> i64 {
+    widgets::slider::create(min, max, initial)
+}
+```
+
+#### 3. Codegen: `crates/perry-codegen/src/codegen.rs`
+
+**3a. Declare extern function** (in `declare_runtime_functions`, search for `perry_ui_`):
+
+```rust
+// perry_ui_slider_create(min: f64, max: f64, initial: f64) -> i64
+{
+    let mut sig = self.module.make_signature();
+    sig.params.push(AbiParam::new(types::F64)); // min
+    sig.params.push(AbiParam::new(types::F64)); // max
+    sig.params.push(AbiParam::new(types::F64)); // initial
+    sig.returns.push(AbiParam::new(types::I64)); // handle
+    let func_id = self.module.declare_function("perry_ui_slider_create", Linkage::Import, &sig)?;
+    self.extern_funcs.insert("perry_ui_slider_create".to_string(), func_id);
+}
+```
+
+**3b. Add dispatch entry** (in `NativeMethodCall` match, search for `"perry/ui"`):
+
+For simple widgets (no children array), add to the func_name match:
+```rust
+("perry/ui", false, "Slider") => "perry_ui_slider_create",
+```
+
+For container widgets (with children array), add a special handler in the `if native_module == "perry/ui"` block, following the VStack/HStack pattern.
+
+**3c. Result handling** is automatic — the `perry/ui` result handler NaN-boxes i64 handles with `POINTER_TAG`.
+
+#### 4. HIR: `crates/perry-hir/src/lower.rs` (only if widget has stateful methods)
+
+If the widget has instance methods (e.g., `slider.value`, `slider.onChange(cb)`), register it as a native instance class like State:
+
+```rust
+if module_name == "perry/ui" && method_name == "Slider" {
+    ctx.register_native_instance(name.clone(), module_name.to_string(), "Slider".to_string());
+}
+```
+
+This enables `slider.value` → `NativeMethodCall { method: "value", object: Some(slider_local) }`.
+
+### Build & Test UI
+
+```bash
+# Build UI crate
+cargo build --release -p perry-ui-macos
+
+# Full build (compiler + runtime + UI)
+cargo build --release && cargo build --release -p perry-runtime
+
+# Compile & run UI app
+cargo run --release -- test-files/test_ui_counter.ts -o counter && ./counter
+```
+
+Non-UI programs are completely unaffected — `libperry_ui_macos.a` and AppKit are only linked when `perry/ui` is imported.
 
 ## NaN-Boxing Implementation
 
@@ -266,7 +434,7 @@ See `docs/CROSS_PLATFORM.md` for detailed documentation on:
 - Cross-compilation with `cross`
 - Alternative approaches (Multipass, Lima, Codespaces, Nix)
 
-## Recent Fixes (v0.2.37-0.2.117)
+## Recent Fixes (v0.2.37-0.2.125)
 
 **Milestone: v0.2.49** - Full production worker running as native binary (MySQL, LLM APIs, string parsing, scoring)
 

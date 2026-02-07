@@ -163,27 +163,42 @@ pub extern "C" fn js_set_timeout_callback(callback: i64, delay_ms: f64) -> i64 {
     let delay = Duration::from_millis(delay_ms.max(0.0) as u64);
     let deadline = Instant::now() + delay;
 
+    let id = NEXT_CALLBACK_TIMER_ID.with(|id_cell| {
+        let mut id = id_cell.borrow_mut();
+        let current = *id;
+        *id += 1;
+        current
+    });
+
     // Store callback in a special timer structure
     CALLBACK_TIMERS.with(|q| {
         q.borrow_mut().push(CallbackTimer {
+            id,
             deadline,
             callback,
+            cleared: false,
         });
     });
 
-    0 // timer ID (not really used currently)
+    id
 }
 
 /// A scheduled timer with a callback
 struct CallbackTimer {
+    /// Unique ID for this timer
+    id: i64,
     /// When this timer should fire
     deadline: Instant,
     /// The closure pointer to call
     callback: i64,
+    /// Whether this timer has been cleared
+    cleared: bool,
 }
 
 thread_local! {
     static CALLBACK_TIMERS: RefCell<Vec<CallbackTimer>> = RefCell::new(Vec::new());
+    /// Next callback timer ID to assign
+    static NEXT_CALLBACK_TIMER_ID: RefCell<i64> = RefCell::new(1);
 }
 
 /// Process any expired callback timers
@@ -195,13 +210,15 @@ pub extern "C" fn js_callback_timer_tick() -> i32 {
     let now = Instant::now();
     let mut fired = 0;
 
-    // Collect expired timers
+    // Collect expired, non-cleared timers
     let expired: Vec<CallbackTimer> = CALLBACK_TIMERS.with(|q| {
         let mut queue = q.borrow_mut();
         let mut expired = Vec::new();
         let mut i = 0;
         while i < queue.len() {
-            if queue[i].deadline <= now {
+            if queue[i].cleared {
+                queue.remove(i);
+            } else if queue[i].deadline <= now {
                 expired.push(queue.remove(i));
             } else {
                 i += 1;
@@ -212,12 +229,14 @@ pub extern "C" fn js_callback_timer_tick() -> i32 {
 
     // Call the callbacks
     for timer in expired {
-        // Call the closure with no arguments
-        // The closure pointer is an i64 (pointer to ClosureHeader)
-        unsafe {
-            js_closure_call0(timer.callback as *const crate::closure::ClosureHeader);
+        if !timer.cleared {
+            // Call the closure with no arguments
+            // The closure pointer is an i64 (pointer to ClosureHeader)
+            unsafe {
+                js_closure_call0(timer.callback as *const crate::closure::ClosureHeader);
+            }
+            fired += 1;
         }
-        fired += 1;
     }
 
     fired
@@ -226,7 +245,27 @@ pub extern "C" fn js_callback_timer_tick() -> i32 {
 /// Check if there are any pending callback timers
 #[no_mangle]
 pub extern "C" fn js_callback_timer_has_pending() -> i32 {
-    CALLBACK_TIMERS.with(|q| if q.borrow().is_empty() { 0 } else { 1 })
+    CALLBACK_TIMERS.with(|q| {
+        let q = q.borrow();
+        if q.iter().any(|t| !t.cleared) { 1 } else { 0 }
+    })
+}
+
+/// Clear a callback timer by ID
+/// After this call, the callback will no longer be invoked
+#[no_mangle]
+pub extern "C" fn clearTimeout(timer_id: i64) {
+    CALLBACK_TIMERS.with(|timers| {
+        let mut timers = timers.borrow_mut();
+        for timer in timers.iter_mut() {
+            if timer.id == timer_id {
+                timer.cleared = true;
+                break;
+            }
+        }
+        // Remove cleared timers to prevent memory growth
+        timers.retain(|t| !t.cleared);
+    });
 }
 
 // ============================================================================
