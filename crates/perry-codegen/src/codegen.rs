@@ -197,7 +197,11 @@ fn ensure_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
         // Extend i32 to i64
         builder.ins().uextend(types::I64, val)
     } else {
-        builder.ins().bitcast(types::I64, MemFlags::new(), val)
+        // F64 NaN-boxed pointer - must strip the tag bits (top 16 bits)
+        // to get the raw pointer address
+        let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+        let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
+        builder.ins().band(val_i64, mask)
     }
 }
 
@@ -1519,6 +1523,8 @@ impl Compiler {
     }
 
     fn process_class(&mut self, class: &Class, all_classes: &[Class]) -> Result<()> {
+        eprintln!("[CODEGEN-DEBUG] process_class called for: {}", class.name);
+
         // Find parent class name if this class extends another
         // First try to resolve by ClassId, then fall back to extends_name for imported classes
         let parent_class = class.extends.and_then(|parent_id| {
@@ -1572,6 +1578,7 @@ impl Compiler {
             method_return_types,
             type_params,
         });
+        eprintln!("[CODEGEN-DEBUG] Inserted class {} into classes HashMap (id={}, field_count={})", class.name, class.id, own_field_count);
 
         Ok(())
     }
@@ -26268,7 +26275,9 @@ fn compile_expr(
 
             // Handle new ClassName(args)
             // First try to find a known class definition
+            eprintln!("[CODEGEN-DEBUG] Looking for class '{}' in classes HashMap (has {} entries)", class_name, classes.len());
             if let Some(class_meta) = classes.get(class_name) {
+                eprintln!("[CODEGEN-DEBUG] Found class '{}' in HashMap!", class_name);
                 // Get parent class ID for inheritance (0 if no parent)
                 let parent_id = if let Some(ref parent_name) = class_meta.parent_class {
                     classes.get(parent_name).map(|p| p.id).unwrap_or(0)
@@ -26345,12 +26354,43 @@ fn compile_expr(
                     }
                     final_call_args.truncate(expected_param_count);
 
-                    builder.ins().call(func_ref, &final_call_args);
+                    let ctor_call = builder.ins().call(func_ref, &final_call_args);
+                    let ctor_result = builder.inst_results(ctor_call);
+
+                    // JavaScript semantics: if constructor explicitly returns an object, use that instead of `this`
+                    // Check if constructor returned a non-undefined value
+                    if !ctor_result.is_empty() {
+                        let return_val = ctor_result[0];
+
+                        // Check if return value is NOT undefined (0x7FFC tag)
+                        // We need to check at runtime if it's an object (POINTER_TAG = 0x7FFD)
+                        // If it is, use that; otherwise use obj_ptr
+
+                        // Extract top 16 bits to check the NaN-box tag
+                        let return_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), return_val);
+                        let shift_48 = builder.ins().iconst(types::I64, 48);
+                        let top16 = builder.ins().ushr(return_i64, shift_48);
+
+                        // Check if top16 == 0x7FFD (POINTER_TAG)
+                        let pointer_tag = builder.ins().iconst(types::I64, 0x7FFD);
+                        let is_object = builder.ins().icmp(IntCC::Equal, top16, pointer_tag);
+
+                        // If constructor returned an object (top16 == 0x7FFD), use that; otherwise use obj_ptr
+                        let obj_ptr_nanboxed = inline_nanbox_pointer(builder, obj_ptr);
+                        let final_result = builder.ins().select(is_object, return_val, obj_ptr_nanboxed);
+
+                        return Ok(final_result);
+                    }
                 }
 
-                // Return the object pointer as f64-bitcasted
-                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), obj_ptr));
+                // Return the object pointer as f64-bitcasted with POINTER_TAG (NaN-boxing)
+                // CRITICAL: Must use inline_nanbox_pointer, not plain bitcast, so consumers
+                // can detect it's an object pointer via POINTER_TAG (0x7FFD)
+                return Ok(inline_nanbox_pointer(builder, obj_ptr));
             }
+
+            eprintln!("[CODEGEN-DEBUG] Class '{}' NOT found in HashMap, trying fallback paths...", class_name);
+            eprintln!("[CODEGEN-DEBUG] Available classes: {:?}", classes.keys().collect::<Vec<_>>());
 
             // Class not found - try to find a local variable with this name
             // This handles dynamically created constructor functions like:
@@ -26592,9 +26632,12 @@ fn compile_expr(
                         let obj_ptr = builder.use_var(ctx.this_var);
                         let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
+                        // Ensure val is f64 for storage (critical for NaN-boxed values)
+                        let val_f64 = ensure_f64(builder, val);
+
                         // ObjectHeader is 24 bytes, fields start after that
                         let field_offset = 24 + (field_idx as i32) * 8;
-                        builder.ins().store(MemFlags::new(), val, obj_ptr, field_offset);
+                        builder.ins().store(MemFlags::new(), val_f64, obj_ptr, field_offset);
 
                         return Ok(val);
                     }

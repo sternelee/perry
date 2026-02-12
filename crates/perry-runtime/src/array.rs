@@ -769,18 +769,25 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
 #[no_mangle]
 pub extern "C" fn js_array_is_array(value: f64) -> f64 {
     use crate::value::JSValue;
-    let jsvalue = JSValue::from_bits(value.to_bits());
+    let bits = value.to_bits();
+    eprintln!("[ARRAY-IS-ARRAY-DEBUG] Called with value bits=0x{:016x}, top16=0x{:04x}", bits, bits >> 48);
+
+    let jsvalue = JSValue::from_bits(bits);
 
     // Check if it's a pointer
     if !jsvalue.is_pointer() {
+        eprintln!("[ARRAY-IS-ARRAY-DEBUG] Not a pointer, returning false");
         return 0.0;
     }
 
     // Get the pointer
     let ptr = jsvalue.as_pointer::<ArrayHeader>();
     if ptr.is_null() {
+        eprintln!("[ARRAY-IS-ARRAY-DEBUG] Pointer is null, returning false");
         return 0.0;
     }
+
+    eprintln!("[ARRAY-IS-ARRAY-DEBUG] Valid pointer 0x{:x}, returning true", ptr as usize);
 
     // Check if it's an array by looking at the header
     // Arrays have a specific structure - we check the magic/type indicator

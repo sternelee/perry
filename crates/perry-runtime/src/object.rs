@@ -154,6 +154,7 @@ pub extern "C" fn js_object_alloc_fast(class_id: u32, field_count: u32) -> *mut 
 /// Fast object allocation with parent class ID - NO field initialization
 #[no_mangle]
 pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_id: u32, field_count: u32) -> *mut ObjectHeader {
+
     // Only register class if it has a parent (one-time operation per class)
     if parent_class_id != 0 {
         register_class(class_id, parent_class_id);
@@ -458,17 +459,51 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
     }
     unsafe {
         let keys = (*obj).keys_array;
+
+        // Debug output
+        let key_str = if !key.is_null() {
+            let len = (*key).length;
+            let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize))
+        } else {
+            "<null>"
+        };
+
+        if key_str == "poolAddress" {
+            eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] Looking for 'poolAddress': obj=0x{:x}, keys_array=0x{:x}, is_null={}",
+                obj as usize, keys as usize, keys.is_null());
+            eprintln!("[OBJECT-HEADER-DEBUG] obj=0x{:x}: object_type={}, class_id={}, parent_class_id={}, field_count={}, keys_array=0x{:x}",
+                obj as usize, (*obj).object_type, (*obj).class_id, (*obj).parent_class_id, (*obj).field_count, (*obj).keys_array as usize);
+        }
+
         if keys.is_null() {
+            if key_str == "poolAddress" {
+                eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] keys_array is NULL, returning undefined");
+            }
             return JSValue::undefined();
         }
 
         // Search through the keys array for a match
         let key_count = crate::array::js_array_length(keys) as usize;
+
+        if key_str == "poolAddress" {
+            eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] keys_array has {} keys", key_count);
+        }
+
         for i in 0..key_count {
             let key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
                 let stored_key = key_val.as_pointer::<crate::StringHeader>();
+
+                // Debug: print all keys when looking for poolAddress
+                if key_str == "poolAddress" {
+                    let stored_key_len = (*stored_key).length;
+                    let stored_key_data = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                    let stored_key_str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(stored_key_data, stored_key_len as usize));
+                    eprintln!("[OBJECT-GET-FIELD-BY-NAME-DEBUG] Key {}: '{}'", i, stored_key_str);
+                }
+
                 if crate::string::js_string_equals(key, stored_key) {
                     // Found it - return the field at this index
                     return js_object_get_field(obj, i as u32);
@@ -486,7 +521,32 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
 #[no_mangle]
 pub extern "C" fn js_object_get_field_by_name_f64(obj: *const ObjectHeader, key: *const crate::StringHeader) -> f64 {
     let value = js_object_get_field_by_name(obj, key);
-    f64::from_bits(value.bits())
+    let result_bits = value.bits();
+    let top16 = result_bits >> 48;
+
+    // Debug output for specific properties
+    if !key.is_null() {
+        let key_str = unsafe {
+            let len = (*key).length;
+            let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize))
+        };
+
+        if key_str == "paths" || key_str == "poolAddress" || key_str == "commands" {
+            eprintln!("[OBJECT-GET-DEBUG] Getting '{}' property: result_bits=0x{:016x}, top16=0x{:04x}, is_pointer={}, is_undefined={}",
+                key_str, result_bits, top16, top16 == 0x7FFD, top16 == 0x7FFC);
+            if top16 == 0x7FFD {
+                let raw_ptr = result_bits & 0x0000_FFFF_FFFF_FFFF;
+                eprintln!("[OBJECT-GET-DEBUG] POINTER_TAG found, raw_ptr=0x{:016x}", raw_ptr);
+            } else if top16 == 0x7FFC {
+                eprintln!("[OBJECT-GET-DEBUG] UNDEFINED tag found");
+            } else if top16 == 0x7FFF {
+                eprintln!("[OBJECT-GET-DEBUG] STRING_TAG found");
+            }
+        }
+    }
+
+    f64::from_bits(result_bits)
 }
 
 /// Set a field value by its string key name (dynamic property access)
@@ -516,12 +576,28 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
     unsafe {
         let keys = (*obj).keys_array;
 
+        // Debug for field assignment
+        let key_str = {
+            let len = (*key).length;
+            let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, len as usize))
+        };
+
         // If no keys array exists, create one
         if keys.is_null() {
+            if key_str == "poolAddress" || key_str == "pairAddress" || key_str == "inputAmount" {
+                eprintln!("[OBJECT-SET-FIELD-DEBUG] Creating NEW keys_array for obj=0x{:x}, first key='{}'",
+                    obj as usize, key_str);
+            }
             // Create a new keys array with the key
             let new_keys = crate::array::js_array_alloc(4);
             crate::array::js_array_push(new_keys, JSValue::string_ptr(key as *mut _));
             (*obj).keys_array = new_keys;
+
+            if key_str == "poolAddress" || key_str == "pairAddress" || key_str == "inputAmount" {
+                eprintln!("[OBJECT-SET-FIELD-DEBUG] Created keys_array=0x{:x} for obj=0x{:x}",
+                    new_keys as usize, obj as usize);
+            }
 
             // Reallocate fields to hold at least one value
             // Note: We assume the object has enough field slots pre-allocated
@@ -545,6 +621,10 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         }
 
         // Key not found - add it to the object
+        if key_str == "poolAddress" || key_str == "pairAddress" || key_str == "inputAmount" {
+            eprintln!("[OBJECT-SET-FIELD-DEBUG] Adding key '{}' to EXISTING keys_array=0x{:x} for obj=0x{:x} (had {} keys)",
+                key_str, keys as usize, obj as usize, key_count);
+        }
         // First, add the key to the keys array
         crate::array::js_array_push(keys, JSValue::string_ptr(key as *mut _));
 

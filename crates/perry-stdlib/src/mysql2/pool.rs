@@ -138,6 +138,10 @@ pub unsafe extern "C" fn js_mysql2_pool_query(
                 let query_future = sqlx::query(&sql).fetch_all(&wrapper.pool);
                 match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
                     Ok(Ok(rows)) => {
+                        // TEMP DEBUG: Log query and result count
+                        eprintln!("[MYSQL-DEBUG] Query executed successfully");
+                        eprintln!("[MYSQL-DEBUG] SQL: {}", if sql.len() > 200 { &sql[..200] } else { &sql });
+                        eprintln!("[MYSQL-DEBUG] Rows returned: {}", rows.len());
                         // Extract raw data on worker thread (no JSValue allocation)
                         let raw_result = RawQueryResult::from_mysql_rows(rows);
                         Ok(raw_result)
@@ -211,6 +215,11 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
                 let query_future = query.fetch_all(&wrapper.pool);
                 match timeout(Duration::from_secs(DEFAULT_QUERY_TIMEOUT_SECS), query_future).await {
                     Ok(Ok(rows)) => {
+                        // TEMP DEBUG: Log query and result count
+                        eprintln!("[MYSQL-DEBUG-EXECUTE] Query executed successfully");
+                        eprintln!("[MYSQL-DEBUG-EXECUTE] SQL: {}", if sql.len() > 200 { &sql[..200] } else { &sql });
+                        eprintln!("[MYSQL-DEBUG-EXECUTE] Params: {:?}", param_values);
+                        eprintln!("[MYSQL-DEBUG-EXECUTE] Rows returned: {}", rows.len());
                         // Extract raw data on worker thread (no JSValue allocation)
                         let raw_result = RawQueryResult::from_mysql_rows(rows);
                         Ok(raw_result)
