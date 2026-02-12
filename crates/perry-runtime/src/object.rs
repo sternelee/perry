@@ -209,8 +209,10 @@ pub extern "C" fn js_object_alloc_class_with_keys(
     // Use class_id as shape_id for caching the keys array
     let keys_arr = SHAPE_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        // Use class_id + 1000000 as shape_id to avoid collision with object literal shapes
-        let shape_id = class_id + 1000000;
+        // Use hash of (class_id, field_count) as shape_id to avoid collisions between
+        // classes from different modules that might have the same class_id
+        // This ensures unique shape_ids across all classes regardless of module
+        let shape_id = class_id.wrapping_mul(10007).wrapping_add(field_count.wrapping_mul(100003)).wrapping_add(1000000);
         if let Some(&arr) = cache.get(&shape_id) {
             return arr;
         }
@@ -219,6 +221,7 @@ pub extern "C" fn js_object_alloc_class_with_keys(
         let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
         let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
         let num_keys = keys.len();
+
         let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
         let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
 
@@ -455,11 +458,13 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
 
     // The object must be a pointer (object, array, etc.)
     if !obj_val.is_pointer() {
+        eprintln!("[HAS-PROP-DEBUG] obj is not a pointer");
         return 0.0;
     }
 
     let obj_ptr = obj_val.as_pointer::<ObjectHeader>();
     if obj_ptr.is_null() {
+        eprintln!("[HAS-PROP-DEBUG] obj_ptr is null");
         return 0.0;
     }
 
@@ -467,32 +472,51 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
     if !key_val.is_string() {
         // If key is a number, convert to string for lookup
         // For now, we only support string keys
+        eprintln!("[HAS-PROP-DEBUG] key is not a string");
         return 0.0;
     }
 
     let key_str = key_val.as_pointer::<crate::StringHeader>();
+    let key_str_rust = unsafe {
+        let len = (*key_str).length;
+        let ptr = (key_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        let bytes = std::slice::from_raw_parts(ptr, len as usize);
+        std::str::from_utf8(bytes).unwrap_or("<invalid>")
+    };
 
     unsafe {
         let keys = (*obj_ptr).keys_array;
+        let class_id = (*obj_ptr).class_id;
         if keys.is_null() {
+            eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, but keys_array is NULL!", key_str_rust, class_id);
             return 0.0;
         }
 
         // Search through the keys array for a match
         let key_count = crate::array::js_array_length(keys) as usize;
+        eprintln!("[HAS-PROP-DEBUG] Looking for '{}' in class_id={}, key_count={}", key_str_rust, class_id, key_count);
         for i in 0..key_count {
             let stored_key_val = crate::array::js_array_get(keys, i as u32);
             // Keys are stored as string pointers (NaN-boxed)
             if stored_key_val.is_string() {
                 let stored_key = stored_key_val.as_pointer::<crate::StringHeader>();
+                let stored_key_rust = {
+                    let len = (*stored_key).length;
+                    let ptr = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                    let bytes = std::slice::from_raw_parts(ptr, len as usize);
+                    std::str::from_utf8(bytes).unwrap_or("<invalid>")
+                };
+                eprintln!("[HAS-PROP-DEBUG]   [{}] = '{}'", i, stored_key_rust);
                 if crate::string::js_string_equals(key_str, stored_key) {
                     // Found the property
+                    eprintln!("[HAS-PROP-DEBUG] FOUND '{}' at index {}", key_str_rust, i);
                     return 1.0;
                 }
             }
         }
 
         // Key not found
+        eprintln!("[HAS-PROP-DEBUG] NOT FOUND '{}'", key_str_rust);
         0.0
     }
 }
