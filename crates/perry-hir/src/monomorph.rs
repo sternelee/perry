@@ -1851,7 +1851,8 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
         }
         // Math operations
         Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
-        Expr::MathAbs(expr) | Expr::MathSqrt(expr) => {
+        Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
+        Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             collect_instantiations_in_expr(expr, ctx, module);
         }
         Expr::MathPow(base, exp) => {
@@ -2257,7 +2258,8 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
         }
         // Math operations
         Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
-        Expr::MathAbs(expr) | Expr::MathSqrt(expr) => {
+        Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
+        Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             update_call_sites_in_expr(expr, ctx, lookup);
         }
         Expr::MathPow(base, exp) => {

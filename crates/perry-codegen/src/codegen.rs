@@ -8903,6 +8903,33 @@ impl Compiler {
             self.extern_funcs.insert("js_math_pow".to_string(), func_id);
         }
 
+        // js_math_log(x: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_math_log", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_math_log".to_string(), func_id);
+        }
+
+        // js_math_log2(x: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_math_log2", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_math_log2".to_string(), func_id);
+        }
+
+        // js_math_log10(x: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_math_log10", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_math_log10".to_string(), func_id);
+        }
+
         // js_math_random() -> f64
         {
             let mut sig = self.module.make_signature();
@@ -11914,7 +11941,8 @@ impl Compiler {
             }
             // Math operations
             Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
-            Expr::MathAbs(expr) | Expr::MathSqrt(expr) => {
+            Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
+            Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
             }
             // Crypto operations
@@ -18227,6 +18255,33 @@ fn compile_expr(
             let val_f64 = ensure_f64(builder, val);
             Ok(builder.ins().sqrt(val_f64))
         }
+        Expr::MathLog(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_log")
+                .ok_or_else(|| anyhow!("js_math_log not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathLog2(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_log2")
+                .ok_or_else(|| anyhow!("js_math_log2 not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::MathLog10(expr) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+            let func = extern_funcs.get("js_math_log10")
+                .ok_or_else(|| anyhow!("js_math_log10 not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::MathPow(base_expr, exp_expr) => {
             let base = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, base_expr, this_ctx)?;
             let exp = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, exp_expr, this_ctx)?;
@@ -19654,8 +19709,18 @@ fn compile_expr(
             // Get the array pointer
             let info = locals.get(array_id)
                 .ok_or_else(|| anyhow!("Undefined array variable: {}", array_id))?;
-            let arr_val = builder.use_var(info.var);
-            let arr_ptr = ensure_i64(builder, arr_val);
+            let arr_ptr = if info.is_boxed {
+                let box_ptr = builder.use_var(info.var);
+                let box_get_func = extern_funcs.get("js_box_get")
+                    .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                let val_f64 = builder.inst_results(call)[0];
+                builder.ins().bitcast(types::I64, MemFlags::new(), val_f64)
+            } else {
+                let arr_val = builder.use_var(info.var);
+                ensure_i64(builder, arr_val)
+            };
 
             // Compile the value
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
@@ -19705,13 +19770,23 @@ fn compile_expr(
             let new_arr_ptr = builder.inst_results(call)[0];
 
             // Update the local variable with the new pointer (in case of reallocation)
-            // Convert back to variable's storage type (i64 if is_pointer && !is_union, f64 otherwise)
-            let store_val = if info.is_pointer && !info.is_union {
-                new_arr_ptr
+            if info.is_boxed {
+                // For boxed variables (mutable closure captures), write new pointer into the box
+                let box_ptr = builder.use_var(info.var);
+                let box_set_func = extern_funcs.get("js_box_set")
+                    .ok_or_else(|| anyhow!("js_box_set not declared"))?;
+                let box_set_ref = module.declare_func_in_func(*box_set_func, builder.func);
+                let val_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
+                builder.ins().call(box_set_ref, &[box_ptr, val_f64]);
             } else {
-                builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
-            };
-            builder.def_var(info.var, store_val);
+                // Convert back to variable's storage type (i64 if is_pointer && !is_union, f64 otherwise)
+                let store_val = if info.is_pointer && !info.is_union {
+                    new_arr_ptr
+                } else {
+                    builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
+                };
+                builder.def_var(info.var, store_val);
+            }
 
             // Get and return the new length
             let len_func = extern_funcs.get("js_array_length")
@@ -19750,8 +19825,18 @@ fn compile_expr(
         Expr::ArrayUnshift { array_id, value } => {
             let info = locals.get(array_id)
                 .ok_or_else(|| anyhow!("Undefined array variable: {}", array_id))?;
-            let arr_val = builder.use_var(info.var);
-            let arr_ptr = ensure_i64(builder, arr_val);
+            let arr_ptr = if info.is_boxed {
+                let box_ptr = builder.use_var(info.var);
+                let box_get_func = extern_funcs.get("js_box_get")
+                    .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                let val_f64 = builder.inst_results(call)[0];
+                builder.ins().bitcast(types::I64, MemFlags::new(), val_f64)
+            } else {
+                let arr_val = builder.use_var(info.var);
+                ensure_i64(builder, arr_val)
+            };
 
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
@@ -19762,13 +19847,21 @@ fn compile_expr(
             let new_arr_ptr = builder.inst_results(call)[0];
 
             // Update the local variable with the new pointer
-            // Convert back to variable's storage type (i64 if is_pointer && !is_union, f64 otherwise)
-            let store_val = if info.is_pointer && !info.is_union {
-                new_arr_ptr
+            if info.is_boxed {
+                let box_ptr = builder.use_var(info.var);
+                let box_set_func = extern_funcs.get("js_box_set")
+                    .ok_or_else(|| anyhow!("js_box_set not declared"))?;
+                let box_set_ref = module.declare_func_in_func(*box_set_func, builder.func);
+                let val_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
+                builder.ins().call(box_set_ref, &[box_ptr, val_f64]);
             } else {
-                builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
-            };
-            builder.def_var(info.var, store_val);
+                let store_val = if info.is_pointer && !info.is_union {
+                    new_arr_ptr
+                } else {
+                    builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
+                };
+                builder.def_var(info.var, store_val);
+            }
 
             // Get and return the new length
             let len_func = extern_funcs.get("js_array_length")
@@ -20525,8 +20618,19 @@ fn compile_expr(
             // Get the set pointer from the local variable
             let info = locals.get(set_id)
                 .ok_or_else(|| anyhow!("Undefined set variable: {}", set_id))?;
-            let set_val = builder.use_var(info.var);
-            let set_ptr = ensure_i64(builder, set_val);
+            let set_ptr = if info.is_boxed {
+                // For boxed variables (mutable closure captures), read value from box first
+                let box_ptr = builder.use_var(info.var);
+                let box_get_func = extern_funcs.get("js_box_get")
+                    .ok_or_else(|| anyhow!("js_box_get not declared"))?;
+                let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
+                let call = builder.ins().call(box_get_ref, &[box_ptr]);
+                let val_f64 = builder.inst_results(call)[0];
+                builder.ins().bitcast(types::I64, MemFlags::new(), val_f64)
+            } else {
+                let set_val = builder.use_var(info.var);
+                ensure_i64(builder, set_val)
+            };
 
             let value_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
@@ -20557,13 +20661,23 @@ fn compile_expr(
             let new_set_ptr = builder.inst_results(call)[0];
 
             // Update the local variable with the new pointer (in case of reallocation)
-            // Convert back to the variable's storage type
-            let store_val = if info.is_pointer && !info.is_union {
-                new_set_ptr
+            if info.is_boxed {
+                // For boxed variables (mutable closure captures), write new pointer into the box
+                let box_ptr = builder.use_var(info.var);
+                let box_set_func = extern_funcs.get("js_box_set")
+                    .ok_or_else(|| anyhow!("js_box_set not declared"))?;
+                let box_set_ref = module.declare_func_in_func(*box_set_func, builder.func);
+                let val_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_set_ptr);
+                builder.ins().call(box_set_ref, &[box_ptr, val_f64]);
             } else {
-                builder.ins().bitcast(types::F64, MemFlags::new(), new_set_ptr)
-            };
-            builder.def_var(info.var, store_val);
+                // Convert back to the variable's storage type
+                let store_val = if info.is_pointer && !info.is_union {
+                    new_set_ptr
+                } else {
+                    builder.ins().bitcast(types::F64, MemFlags::new(), new_set_ptr)
+                };
+                builder.def_var(info.var, store_val);
+            }
 
             // Return as f64 (NaN-boxed pointer) - for chaining
             Ok(builder.ins().bitcast(types::F64, MemFlags::new(), new_set_ptr))
@@ -20724,7 +20838,6 @@ fn compile_expr(
                     let available: Vec<_> = locals.iter()
                         .map(|(k, v)| format!("{}:{}", k, v.name.as_deref().unwrap_or("?")))
                         .collect();
-                    // Print the module variable data IDs for debugging
                     anyhow!("Undefined local variable: {} (LocalGet). Available locals: {:?}. This LocalId may be from a different function's scope - likely a closure capture bug or wrong identifier resolution in HIR lowering.", id, available)
                 })?;
 
@@ -21916,19 +22029,38 @@ fn compile_expr(
                 let cmp = builder.ins().icmp(icc, lhs_i64, rhs_i64);
                 Ok(builder.ins().select(cmp, one, zero))
             } else if is_null_compare {
-                // F64 null comparison: null/undefined are NaN-boxed (TAG_NULL = 0x7FFC_0000_0000_0002)
-                // fcmp(NaN, NaN) returns false per IEEE 754, so use bit-pattern comparison
+                // F64 null comparison implementing JS loose equality: null == undefined is true
+                // null = TAG_NULL (0x7FFC_0000_0000_0002), undefined = TAG_UNDEFINED (0x7FFC_0000_0000_0001)
+                // Both are specific NaN-boxed bit patterns, so use integer comparison
                 let lhs_f64 = ensure_f64(builder, lhs);
                 let rhs_f64 = ensure_f64(builder, rhs);
-                let lhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs_f64);
-                let rhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), rhs_f64);
-                let icc = match op {
-                    CompareOp::Eq => IntCC::Equal,
-                    CompareOp::Ne => IntCC::NotEqual,
-                    _ => return Err(anyhow!("Invalid null comparison operator")),
-                };
-                let cmp = builder.ins().icmp(icc, lhs_i64, rhs_i64);
-                Ok(builder.ins().select(cmp, one, zero))
+
+                // Determine which side is the null/undefined literal and which is the value
+                let is_lhs_null = matches!(left.as_ref(), Expr::Null | Expr::Undefined);
+                let value_f64 = if is_lhs_null { rhs_f64 } else { lhs_f64 };
+
+                let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), value_f64);
+
+                // Check 1: value == TAG_NULL (0x7FFC_0000_0000_0002)
+                let null_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+                let is_null = builder.ins().icmp(IntCC::Equal, val_i64, null_const);
+
+                // Check 2: value == TAG_UNDEFINED (0x7FFC_0000_0000_0001)
+                let undef_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                let is_undefined = builder.ins().icmp(IntCC::Equal, val_i64, undef_const);
+
+                // Combine: value == null || value == undefined
+                let is_nullish = builder.ins().bor(is_null, is_undefined);
+
+                match op {
+                    CompareOp::Eq => Ok(builder.ins().select(is_nullish, one, zero)),
+                    CompareOp::Ne => {
+                        // NOT nullish
+                        let not_nullish = builder.ins().bxor_imm(is_nullish, 1);
+                        Ok(builder.ins().select(not_nullish, one, zero))
+                    }
+                    _ => Err(anyhow!("Invalid null comparison operator")),
+                }
             } else {
                 // Check if this is a BigInt comparison
                 fn is_bigint_compare_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
@@ -29126,7 +29258,13 @@ fn compile_expr(
                                 let set_func = extern_funcs.get("js_array_set_f64_extend")
                                     .ok_or_else(|| anyhow!("js_array_set_f64_extend not declared"))?;
                                 let func_ref = module.declare_func_in_func(*set_func, builder.func);
-                                let call = builder.ins().call(func_ref, &[arr_ptr, idx_i32, val]);
+                                // Ensure val is f64 (pointer types like Named are I64 but js_array_set_f64_extend expects f64)
+                                let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                                    builder.ins().bitcast(types::F64, MemFlags::new(), val)
+                                } else {
+                                    val
+                                };
+                                let call = builder.ins().call(func_ref, &[arr_ptr, idx_i32, val_f64]);
                                 let new_arr_ptr = builder.inst_results(call)[0];
                                 // Only update variable when reallocation happens
                                 // Convert back to the variable's storage type
@@ -32982,13 +33120,11 @@ fn compile_expr(
         }
         Expr::BigIntCoerce(value) => {
             // BigInt(value) -> bigint
-            // Compile the value
+            // js_bigint_from_f64 already handles strings, numbers, and other NaN-boxed types at runtime
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-
-            // Ensure it's f64 for the runtime function
             let val_f64 = ensure_f64(builder, val);
 
-            // Call js_bigint_from_f64(value) -> I64 pointer
+            // Call js_bigint_from_f64(value) -> I64 pointer (handles string/number/bigint at runtime)
             let from_f64_func = extern_funcs.get("js_bigint_from_f64")
                 .ok_or_else(|| anyhow!("js_bigint_from_f64 not declared"))?;
             let from_f64_ref = module.declare_func_in_func(*from_f64_func, builder.func);

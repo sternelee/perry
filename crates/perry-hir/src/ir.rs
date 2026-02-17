@@ -697,6 +697,9 @@ pub enum Expr {
     MathRound(Box<Expr>),                // Math.round(x) -> number
     MathAbs(Box<Expr>),                  // Math.abs(x) -> number
     MathSqrt(Box<Expr>),                 // Math.sqrt(x) -> number
+    MathLog(Box<Expr>),                  // Math.log(x) -> number
+    MathLog2(Box<Expr>),                 // Math.log2(x) -> number
+    MathLog10(Box<Expr>),                // Math.log10(x) -> number
     MathPow(Box<Expr>, Box<Expr>),       // Math.pow(base, exp) -> number
     MathMin(Vec<Expr>),                  // Math.min(...values) -> number
     MathMax(Vec<Expr>),                  // Math.max(...values) -> number

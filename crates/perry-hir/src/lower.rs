@@ -3775,6 +3775,21 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 return Ok(Expr::MathSqrt(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
+                                        "log" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathLog(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "log2" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathLog2(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "log10" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::MathLog10(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
                                         "pow" => {
                                             if args.len() >= 2 {
                                                 let mut args_iter = args.into_iter();
@@ -8089,7 +8104,8 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         }
         // Math operations
         Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
-        Expr::MathAbs(expr) | Expr::MathSqrt(expr) => {
+        Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
+        Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             collect_local_refs_expr(expr, refs);
         }
         Expr::MathPow(base, exp) => {
@@ -8786,7 +8802,8 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         }
         // Math operations
         Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |
-        Expr::MathAbs(expr) | Expr::MathSqrt(expr) => {
+        Expr::MathAbs(expr) | Expr::MathSqrt(expr) |
+        Expr::MathLog(expr) | Expr::MathLog2(expr) | Expr::MathLog10(expr) => {
             collect_assigned_locals_expr(expr, assigned);
         }
         Expr::MathPow(base, exp) => {

@@ -938,7 +938,8 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         }
         // Math operations
         Expr::MathFloor(inner) | Expr::MathCeil(inner) | Expr::MathRound(inner) |
-        Expr::MathAbs(inner) | Expr::MathSqrt(inner) => {
+        Expr::MathAbs(inner) | Expr::MathSqrt(inner) |
+        Expr::MathLog(inner) | Expr::MathLog2(inner) | Expr::MathLog10(inner) => {
             substitute_locals(inner, param_map, next_local_id);
         }
         Expr::MathPow(base, exp) => {
@@ -995,6 +996,144 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         }
         Expr::StringFromCharCode(code) | Expr::StringCoerce(code) => {
             substitute_locals(code, param_map, next_local_id);
+        }
+        // Type coercions
+        Expr::BigIntCoerce(inner) | Expr::NumberCoerce(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        // Global set
+        Expr::GlobalSet(_, value) => {
+            substitute_locals(value, param_map, next_local_id);
+        }
+        // Sequence
+        Expr::Sequence(exprs) => {
+            for e in exprs {
+                substitute_locals(e, param_map, next_local_id);
+            }
+        }
+        // InstanceOf / In
+        Expr::InstanceOf { expr, .. } => {
+            substitute_locals(expr, param_map, next_local_id);
+        }
+        Expr::In { property, object } => {
+            substitute_locals(property, param_map, next_local_id);
+            substitute_locals(object, param_map, next_local_id);
+        }
+        // Delete
+        Expr::Delete(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        // ObjectRest
+        Expr::ObjectRest { object, .. } => {
+            substitute_locals(object, param_map, next_local_id);
+        }
+        // ArrayIsArray
+        Expr::ArrayIsArray(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        // RegExp
+        Expr::RegExpTest { regex, string } => {
+            substitute_locals(regex, param_map, next_local_id);
+            substitute_locals(string, param_map, next_local_id);
+        }
+        Expr::StringMatch { string, regex } => {
+            substitute_locals(string, param_map, next_local_id);
+            substitute_locals(regex, param_map, next_local_id);
+        }
+        Expr::StringReplace { string, pattern, replacement } => {
+            substitute_locals(string, param_map, next_local_id);
+            substitute_locals(pattern, param_map, next_local_id);
+            substitute_locals(replacement, param_map, next_local_id);
+        }
+        // Error
+        Expr::ErrorNew(Some(inner)) | Expr::ErrorMessage(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        // Date operations
+        Expr::DateNew(Some(inner)) | Expr::DateGetTime(inner) |
+        Expr::DateToISOString(inner) | Expr::DateGetFullYear(inner) |
+        Expr::DateGetMonth(inner) | Expr::DateGetDate(inner) |
+        Expr::DateGetHours(inner) | Expr::DateGetMinutes(inner) |
+        Expr::DateGetSeconds(inner) | Expr::DateGetMilliseconds(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        // FS operations
+        Expr::FsReadFileSync(inner) | Expr::FsExistsSync(inner) |
+        Expr::FsMkdirSync(inner) | Expr::FsUnlinkSync(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        Expr::FsWriteFileSync(a, b) | Expr::FsAppendFileSync(a, b) => {
+            substitute_locals(a, param_map, next_local_id);
+            substitute_locals(b, param_map, next_local_id);
+        }
+        // Buffer operations
+        Expr::BufferFrom { data, encoding } => {
+            substitute_locals(data, param_map, next_local_id);
+            if let Some(enc) = encoding { substitute_locals(enc, param_map, next_local_id); }
+        }
+        Expr::BufferAlloc { size, fill } => {
+            substitute_locals(size, param_map, next_local_id);
+            if let Some(f) = fill { substitute_locals(f, param_map, next_local_id); }
+        }
+        Expr::BufferAllocUnsafe(inner) | Expr::BufferConcat(inner) |
+        Expr::BufferIsBuffer(inner) | Expr::BufferByteLength(inner) |
+        Expr::BufferLength(inner) => {
+            substitute_locals(inner, param_map, next_local_id);
+        }
+        Expr::BufferToString { buffer, encoding } => {
+            substitute_locals(buffer, param_map, next_local_id);
+            if let Some(enc) = encoding { substitute_locals(enc, param_map, next_local_id); }
+        }
+        Expr::BufferSlice { buffer, start, end } => {
+            substitute_locals(buffer, param_map, next_local_id);
+            if let Some(s) = start { substitute_locals(s, param_map, next_local_id); }
+            if let Some(e) = end { substitute_locals(e, param_map, next_local_id); }
+        }
+        Expr::BufferEquals { buffer, other } => {
+            substitute_locals(buffer, param_map, next_local_id);
+            substitute_locals(other, param_map, next_local_id);
+        }
+        Expr::BufferIndexGet { buffer, index } => {
+            substitute_locals(buffer, param_map, next_local_id);
+            substitute_locals(index, param_map, next_local_id);
+        }
+        Expr::BufferIndexSet { buffer, index, value } => {
+            substitute_locals(buffer, param_map, next_local_id);
+            substitute_locals(index, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
+            substitute_locals(source, param_map, next_local_id);
+            substitute_locals(target, param_map, next_local_id);
+            if let Some(ts) = target_start { substitute_locals(ts, param_map, next_local_id); }
+            if let Some(ss) = source_start { substitute_locals(ss, param_map, next_local_id); }
+            if let Some(se) = source_end { substitute_locals(se, param_map, next_local_id); }
+        }
+        Expr::BufferWrite { buffer, string, offset, encoding } => {
+            substitute_locals(buffer, param_map, next_local_id);
+            substitute_locals(string, param_map, next_local_id);
+            if let Some(o) = offset { substitute_locals(o, param_map, next_local_id); }
+            if let Some(e) = encoding { substitute_locals(e, param_map, next_local_id); }
+        }
+        // JS interop
+        Expr::JsGetExport { module_handle, .. } | Expr::JsGetProperty { object: module_handle, .. } => {
+            substitute_locals(module_handle, param_map, next_local_id);
+        }
+        Expr::JsSetProperty { object, value, .. } => {
+            substitute_locals(object, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::JsCallFunction { module_handle, args, .. } | Expr::JsCallMethod { object: module_handle, args, .. } => {
+            substitute_locals(module_handle, param_map, next_local_id);
+            for arg in args { substitute_locals(arg, param_map, next_local_id); }
+        }
+        Expr::JsCreateCallback { closure, .. } => {
+            substitute_locals(closure, param_map, next_local_id);
+        }
+        // Static/Super method calls
+        Expr::StaticMethodCall { args, .. } | Expr::SuperCall(args) |
+        Expr::SuperMethodCall { args, .. } => {
+            for arg in args { substitute_locals(arg, param_map, next_local_id); }
         }
         _ => {}
     }
