@@ -1546,6 +1546,22 @@ fn lower_stmt(
             // Lower the iterable expression (the array)
             let arr_expr = lower_expr(ctx, &for_of_stmt.right)?;
 
+            // If the iterable is a Map, wrap in MapEntries to convert to array
+            // This handles: for (const [k, v] of myMap) { ... }
+            let arr_expr = if let ast::Expr::Ident(ident) = &*for_of_stmt.right {
+                let name = ident.sym.to_string();
+                let is_map = ctx.lookup_local_type(&name)
+                    .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                    .unwrap_or(false);
+                if is_map {
+                    Expr::MapEntries(Box::new(arr_expr))
+                } else {
+                    arr_expr
+                }
+            } else {
+                arr_expr
+            };
+
             // Create internal variables for the array and index
             let arr_id = ctx.fresh_local();
             let idx_id = ctx.fresh_local();
@@ -2823,6 +2839,22 @@ fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Result<Vec<St
         ast::Stmt::ForOf(for_of_stmt) => {
             // Desugar for-of to a regular for loop (same as in lower_stmt)
             let arr_expr = lower_expr(ctx, &for_of_stmt.right)?;
+
+            // If the iterable is a Map, wrap in MapEntries to convert to array
+            let arr_expr = if let ast::Expr::Ident(ident) = &*for_of_stmt.right {
+                let name = ident.sym.to_string();
+                let is_map = ctx.lookup_local_type(&name)
+                    .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                    .unwrap_or(false);
+                if is_map {
+                    Expr::MapEntries(Box::new(arr_expr))
+                } else {
+                    arr_expr
+                }
+            } else {
+                arr_expr
+            };
+
             let arr_id = ctx.fresh_local();
             let idx_id = ctx.fresh_local();
             ctx.locals.push((format!("__arr_{}", arr_id), arr_id, Type::Array(Box::new(Type::Any))));
@@ -4163,7 +4195,11 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             }
                                         }
                                         "forEach" => {
-                                            if args.len() >= 1 {
+                                            // Check if the receiver is a Map or Set - if so, don't use ArrayForEach
+                                            let is_map_or_set = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map" || base == "Set"))
+                                                .unwrap_or(false);
+                                            if !is_map_or_set && args.len() >= 1 {
                                                 return Ok(Expr::ArrayForEach {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(args.into_iter().next().unwrap()),
@@ -4313,6 +4349,31 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                                 return Ok(Expr::MapClear(Box::new(Expr::LocalGet(array_id))));
                                             }
                                             // Fall through if neither Set nor Map
+                                        }
+                                        // Map iterator methods: entries(), keys(), values()
+                                        "entries" => {
+                                            let is_map = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                                                .unwrap_or(false);
+                                            if is_map && args.is_empty() {
+                                                return Ok(Expr::MapEntries(Box::new(Expr::LocalGet(array_id))));
+                                            }
+                                        }
+                                        "keys" => {
+                                            let is_map = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                                                .unwrap_or(false);
+                                            if is_map && args.is_empty() {
+                                                return Ok(Expr::MapKeys(Box::new(Expr::LocalGet(array_id))));
+                                            }
+                                        }
+                                        "values" => {
+                                            let is_map = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map"))
+                                                .unwrap_or(false);
+                                            if is_map && args.is_empty() {
+                                                return Ok(Expr::MapValues(Box::new(Expr::LocalGet(array_id))));
+                                            }
                                         }
                                         // Set methods
                                         "add" => {
@@ -4669,11 +4730,21 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                         });
                                     }
                                     "forEach" if args.len() >= 1 => {
-                                        let array_expr = lower_expr(ctx, &member.obj)?;
-                                        return Ok(Expr::ArrayForEach {
-                                            array: Box::new(array_expr),
-                                            callback: Box::new(args.into_iter().next().unwrap()),
-                                        });
+                                        // Check if the receiver is a Map or Set - if so, don't use ArrayForEach
+                                        let is_map_or_set = if let ast::Expr::Ident(ident) = member.obj.as_ref() {
+                                            ctx.lookup_local_type(&ident.sym.to_string())
+                                                .map(|ty| matches!(ty, Type::Generic { base, .. } if base == "Map" || base == "Set"))
+                                                .unwrap_or(false)
+                                        } else {
+                                            false
+                                        };
+                                        if !is_map_or_set {
+                                            let array_expr = lower_expr(ctx, &member.obj)?;
+                                            return Ok(Expr::ArrayForEach {
+                                                array: Box::new(array_expr),
+                                                callback: Box::new(args.into_iter().next().unwrap()),
+                                            });
+                                        }
                                     }
                                     "find" if args.len() >= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
@@ -4689,7 +4760,55 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                             callback: Box::new(args.into_iter().next().unwrap()),
                                         });
                                     }
-                                    _ => {} // Fall through - includes, indexOf, slice, join are ambiguous with string methods
+                                    // join/indexOf/includes are ambiguous with string methods,
+                                    // but if the receiver is a known array-returning expression,
+                                    // we can safely create the array version directly.
+                                    "join" if args.len() <= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        if matches!(&array_expr,
+                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } |
+                                            Expr::ArraySlice { .. } | Expr::Array(_) |
+                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_)
+                                        ) {
+                                            let separator = if args.is_empty() { None } else { Some(Box::new(args.into_iter().next().unwrap())) };
+                                            return Ok(Expr::ArrayJoin {
+                                                array: Box::new(array_expr),
+                                                separator,
+                                            });
+                                        }
+                                    }
+                                    "indexOf" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        if matches!(&array_expr,
+                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } |
+                                            Expr::ArraySlice { .. } | Expr::Array(_) |
+                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_)
+                                        ) {
+                                            let value_expr = args.into_iter().next().unwrap();
+                                            return Ok(Expr::ArrayIndexOf {
+                                                array: Box::new(array_expr),
+                                                value: Box::new(value_expr),
+                                            });
+                                        }
+                                    }
+                                    "includes" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        if matches!(&array_expr,
+                                            Expr::ArrayMap { .. } | Expr::ArrayFilter { .. } |
+                                            Expr::ArraySlice { .. } | Expr::Array(_) |
+                                            Expr::ArrayFrom(_) | Expr::StringSplit(_, _) |
+                                            Expr::ObjectKeys(_) | Expr::ObjectValues(_)
+                                        ) {
+                                            let value_expr = args.into_iter().next().unwrap();
+                                            return Ok(Expr::ArrayIncludes {
+                                                array: Box::new(array_expr),
+                                                value: Box::new(value_expr),
+                                            });
+                                        }
+                                    }
+                                    _ => {} // Fall through - ambiguous methods on non-array expressions use generic dispatch
                                 }
                             }
                         }
@@ -7947,7 +8066,8 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
             collect_local_refs_expr(map, refs);
             collect_local_refs_expr(key, refs);
         }
-        Expr::MapSize(map) | Expr::MapClear(map) => {
+        Expr::MapSize(map) | Expr::MapClear(map) |
+        Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
             collect_local_refs_expr(map, refs);
         }
         // Set operations
@@ -8643,7 +8763,8 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
             collect_assigned_locals_expr(map, assigned);
             collect_assigned_locals_expr(key, assigned);
         }
-        Expr::MapSize(map) | Expr::MapClear(map) => {
+        Expr::MapSize(map) | Expr::MapClear(map) |
+        Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
             collect_assigned_locals_expr(map, assigned);
         }
         // Set operations

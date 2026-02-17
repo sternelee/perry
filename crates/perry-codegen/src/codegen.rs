@@ -438,6 +438,9 @@ struct ClassMeta {
     static_method_return_types: HashMap<String, perry_types::Type>,
     /// Type parameters of the class (e.g., ["T"] for class Box<T>)
     type_params: Vec<String>,
+    /// Field default initializer expressions: field name -> init expr
+    /// Used by Expr::New to initialize field defaults before calling constructor
+    field_inits: HashMap<String, Expr>,
 }
 
 /// Enum member value (resolved at compile time)
@@ -786,6 +789,14 @@ impl Compiler {
         // Extract type parameter names
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
+        // Collect field default initializer expressions
+        let mut field_inits = HashMap::new();
+        for field in &class.fields {
+            if let Some(ref init) = field.init {
+                field_inits.insert(field.name.clone(), init.clone());
+            }
+        }
+
         // Create the class metadata (constructor_id and method_ids will be filled below)
         // Use extends_name for imported classes where extends ClassId may not resolve locally
         self.classes.insert(class.name.clone(), ClassMeta {
@@ -805,6 +816,7 @@ impl Compiler {
             method_return_types,
             static_method_return_types,
             type_params,
+            field_inits,
         });
 
         // Declare the constructor as an import (if present)
@@ -1593,6 +1605,14 @@ impl Compiler {
         // Extract type parameter names
         let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
 
+        // Collect field default initializer expressions
+        let mut field_inits = HashMap::new();
+        for field in &class.fields {
+            if let Some(ref init) = field.init {
+                field_inits.insert(field.name.clone(), init.clone());
+            }
+        }
+
         self.classes.insert(class.name.clone(), ClassMeta {
             id: class.id,
             parent_class,
@@ -1610,6 +1630,7 @@ impl Compiler {
             method_return_types,
             static_method_return_types,
             type_params,
+            field_inits,
         });
 
         Ok(())
@@ -2670,6 +2691,10 @@ impl Compiler {
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_string = matches!(param.ty, perry_types::Type::String);
                 let is_array = matches!(param.ty, perry_types::Type::Array(_));
+                let is_map = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Map")
+                    || matches!(&param.ty, perry_types::Type::Named(name) if name == "Map");
+                let is_set = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Set")
+                    || matches!(&param.ty, perry_types::Type::Named(name) if name == "Set");
                 let is_union = matches!(param.ty, perry_types::Type::Any | perry_types::Type::Union(_) | perry_types::Type::Unknown);
                 let is_pointer = is_closure || is_string || is_array ||
                     matches!(param.ty, perry_types::Type::Object(_) | perry_types::Type::Named(_) | perry_types::Type::Promise(_));
@@ -2691,7 +2716,7 @@ impl Compiler {
                     is_bigint: false,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union,
+                    is_map, is_set, is_buffer: false, is_event_emitter: false, is_union,
                     is_mixed_array: false,
                     is_integer: false,
                     is_integer_array: false,
@@ -3523,6 +3548,20 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_array_indexOf_f64".to_string(), func_id);
+        }
+
+        // js_array_indexOf_jsvalue(arr: *const ArrayHeader, value: f64) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed value
+            sig.returns.push(AbiParam::new(types::I32)); // index (-1 if not found)
+            let func_id = self.module.declare_function(
+                "js_array_indexOf_jsvalue",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_indexOf_jsvalue".to_string(), func_id);
         }
 
         // js_array_includes_f64(arr: *const ArrayHeader, value: f64) -> i32
@@ -10642,6 +10681,11 @@ impl Compiler {
                 let is_closure = matches!(param.ty, perry_types::Type::Function(_));
                 let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
                 let is_pointer = abi_type == types::I64;
+                // Detect Map/Set parameter types for proper property dispatch
+                let is_map = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Map")
+                    || matches!(&param.ty, perry_types::Type::Named(name) if name == "Map");
+                let is_set = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Set")
+                    || matches!(&param.ty, perry_types::Type::Named(name) if name == "Set");
                 // Named types (interfaces) and Object types may contain NaN-boxed values
                 // when accessed via PropertyGet, so treat them as potentially union
                 let is_union = matches!(param.ty,
@@ -10666,7 +10710,7 @@ impl Compiler {
                     is_bigint,
                     is_closure,
                     is_boxed: false,
-                    is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union,
+                    is_map, is_set, is_buffer: false, is_event_emitter: false, is_union,
                     is_mixed_array,
                     is_integer: matches!(param.ty, perry_types::Type::Number),
                     is_integer_array: false,
@@ -11936,8 +11980,9 @@ impl Compiler {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(index, closures, enclosing_class);
             }
-            // Map/Set size and clear operations
-            Expr::MapSize(map) | Expr::MapClear(map) => {
+            // Map/Set size, clear, and iterator operations
+            Expr::MapSize(map) | Expr::MapClear(map) |
+            Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
                 self.collect_closures_from_expr(map, closures, enclosing_class);
             }
             Expr::SetSize(set) | Expr::SetClear(set) => {
@@ -19770,10 +19815,28 @@ fn compile_expr(
                 let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
-                let func = extern_funcs.get("js_array_indexOf_f64")
-                    .ok_or_else(|| anyhow!("js_array_indexOf_f64 not declared"))?;
+                // Use jsvalue comparison for string values (handles NaN-boxed strings)
+                let is_string_value = match value.as_ref() {
+                    Expr::String(_) => true,
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                    _ => false,
+                };
+
+                let (func_name, val_arg) = if is_string_value {
+                    let ptr = ensure_i64(builder, val);
+                    let nanbox_func = extern_funcs.get("js_nanbox_string")
+                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let nanbox_call = builder.ins().call(nanbox_ref, &[ptr]);
+                    ("js_array_indexOf_jsvalue", builder.inst_results(nanbox_call)[0])
+                } else {
+                    ("js_array_indexOf_f64", ensure_f64(builder, val))
+                };
+
+                let func = extern_funcs.get(func_name)
+                    .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                 let func_ref = module.declare_func_in_func(*func, builder.func);
-                let call = builder.ins().call(func_ref, &[arr_ptr, val]);
+                let call = builder.ins().call(func_ref, &[arr_ptr, val_arg]);
                 let index = builder.inst_results(call)[0];
 
                 // Convert i32 to f64
@@ -20406,6 +20469,41 @@ fn compile_expr(
             builder.ins().call(clear_ref, &[map_ptr]);
             // clear() returns undefined (0.0)
             Ok(builder.ins().f64const(0.0))
+        }
+        Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
+            // Get map pointer
+            let map_ptr = if let Expr::LocalGet(id) = map.as_ref() {
+                if let Some(info) = locals.get(id) {
+                    if (info.is_map || info.is_pointer) && !info.is_union {
+                        { let v = builder.use_var(info.var); ensure_i64(builder, v) }
+                    } else {
+                        let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
+                        builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                    }
+                } else {
+                    let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
+                    builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                }
+            } else {
+                let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
+                builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+            };
+
+            // Determine which runtime function to call
+            let func_name = match expr {
+                Expr::MapEntries(_) => "js_map_entries",
+                Expr::MapKeys(_) => "js_map_keys",
+                Expr::MapValues(_) => "js_map_values",
+                _ => unreachable!(),
+            };
+            let func = extern_funcs.get(func_name)
+                .ok_or_else(|| anyhow!("{} not declared", func_name))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[map_ptr]);
+            let arr_ptr = builder.inst_results(call)[0]; // I64 pointer to array
+
+            // Return as F64 (bitcast), consistent with Expr::Array
+            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr))
         }
         // Set operations
         Expr::SetNew => {
@@ -26862,6 +26960,52 @@ fn compile_expr(
 
                 let alloc_call = builder.ins().call(alloc_ref, &[class_id, parent_class_id, field_count, keys_ptr, keys_len]);
                 let obj_ptr = builder.inst_results(alloc_call)[0];
+
+                // Initialize field defaults BEFORE calling constructor
+                // This is equivalent to TypeScript/JavaScript semantics where field initializers
+                // run at the beginning of construction, before the constructor body.
+                // Without this, fields like `items: number[] = []` remain uninitialized (garbage memory),
+                // causing crashes/hangs when accessed (e.g., obj.items.push(42) dereferences garbage).
+                for (field_name, init_expr) in &class_meta.field_inits {
+                    if let Some(&field_idx) = class_meta.field_indices.get(field_name) {
+                        let field_offset = 24 + (field_idx as i32) * 8;
+
+                        // Compile the init expression to get the default value
+                        let init_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, init_expr, this_ctx)?;
+
+                        // Determine if the value needs NaN-boxing for storage
+                        let store_val = match init_expr {
+                            // Array literals and empty arrays produce raw I64 pointers that need NaN-boxing
+                            Expr::Array(_) | Expr::ArraySpread(_) => {
+                                let ptr_i64 = ensure_i64(builder, init_val);
+                                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let nanbox_call = builder.ins().call(nanbox_ref, &[ptr_i64]);
+                                builder.inst_results(nanbox_call)[0]
+                            }
+                            // Object literals produce raw I64 pointers
+                            Expr::Object(_) => {
+                                let ptr_i64 = ensure_i64(builder, init_val);
+                                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let nanbox_call = builder.ins().call(nanbox_ref, &[ptr_i64]);
+                                builder.inst_results(nanbox_call)[0]
+                            }
+                            // New expressions produce NaN-boxed values (inline_nanbox_pointer is called in Expr::New)
+                            Expr::New { .. } | Expr::MapNew | Expr::SetNew => {
+                                ensure_f64(builder, init_val)
+                            }
+                            // Numbers, booleans, and other f64 values store directly
+                            _ => {
+                                ensure_f64(builder, init_val)
+                            }
+                        };
+
+                        builder.ins().store(MemFlags::new(), store_val, obj_ptr, field_offset);
+                    }
+                }
 
                 // Call the constructor with 'this' as first argument
                 if let Some(ctor_id) = class_meta.constructor_id {

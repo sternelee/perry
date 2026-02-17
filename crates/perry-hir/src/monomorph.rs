@@ -1130,6 +1130,9 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         },
         Expr::MapSize(map) => Expr::MapSize(Box::new(substitute_expr(map, substitutions))),
         Expr::MapClear(map) => Expr::MapClear(Box::new(substitute_expr(map, substitutions))),
+        Expr::MapEntries(map) => Expr::MapEntries(Box::new(substitute_expr(map, substitutions))),
+        Expr::MapKeys(map) => Expr::MapKeys(Box::new(substitute_expr(map, substitutions))),
+        Expr::MapValues(map) => Expr::MapValues(Box::new(substitute_expr(map, substitutions))),
 
         // Set operations
         Expr::SetNew => Expr::SetNew,
@@ -1827,7 +1830,8 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(map, ctx, module);
             collect_instantiations_in_expr(key, ctx, module);
         }
-        Expr::MapSize(map) | Expr::MapClear(map) => {
+        Expr::MapSize(map) | Expr::MapClear(map) |
+        Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
             collect_instantiations_in_expr(map, ctx, module);
         }
         Expr::SetNew => {}
@@ -2232,7 +2236,8 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(map, ctx, lookup);
             update_call_sites_in_expr(key, ctx, lookup);
         }
-        Expr::MapSize(map) | Expr::MapClear(map) => {
+        Expr::MapSize(map) | Expr::MapClear(map) |
+        Expr::MapEntries(map) | Expr::MapKeys(map) | Expr::MapValues(map) => {
             update_call_sites_in_expr(map, ctx, lookup);
         }
         Expr::SetNew => {}

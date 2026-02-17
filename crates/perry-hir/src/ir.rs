@@ -864,6 +864,9 @@ pub enum Expr {
     MapDelete { map: Box<Expr>, key: Box<Expr> },              // map.delete(key) -> boolean
     MapSize(Box<Expr>),                                        // map.size -> number
     MapClear(Box<Expr>),                                       // map.clear() -> void
+    MapEntries(Box<Expr>),                                     // map.entries() -> Array<[key, value]>
+    MapKeys(Box<Expr>),                                        // map.keys() -> Array<key>
+    MapValues(Box<Expr>),                                      // map.values() -> Array<value>
 
     // Set operations
     SetNew,                                                    // new Set() -> empty set

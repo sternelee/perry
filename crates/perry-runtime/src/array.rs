@@ -293,6 +293,22 @@ pub extern "C" fn js_array_indexOf_f64(arr: *const ArrayHeader, value: f64) -> i
     }
 }
 
+/// indexOf for arrays, using jsvalue comparison (handles NaN-boxed strings correctly)
+#[no_mangle]
+pub extern "C" fn js_array_indexOf_jsvalue(arr: *const ArrayHeader, value: f64) -> i32 {
+    unsafe {
+        let length = (*arr).length;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        for i in 0..length as usize {
+            let element = *elements_ptr.add(i);
+            if crate::value::js_jsvalue_equals(element, value) == 1 {
+                return i as i32;
+            }
+        }
+        -1
+    }
+}
+
 /// Check if an array includes a value
 /// Returns 1 if found, 0 if not
 #[no_mangle]
