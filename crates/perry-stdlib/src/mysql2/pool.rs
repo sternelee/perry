@@ -290,6 +290,22 @@ unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
             } else {
                 ParamValue::Null
             }
+        } else if element.is_bigint() {
+            // Convert BigInt to string (MySQL handles numeric strings correctly)
+            let bigint_ptr = element.as_bigint_ptr();
+            if !bigint_ptr.is_null() {
+                let str_ptr = perry_runtime::bigint::js_bigint_to_string(bigint_ptr);
+                if !str_ptr.is_null() {
+                    let len = (*str_ptr).length as usize;
+                    let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<perry_runtime::StringHeader>());
+                    let bytes = std::slice::from_raw_parts(data_ptr, len);
+                    ParamValue::String(String::from_utf8_lossy(bytes).to_string())
+                } else {
+                    ParamValue::String("0".to_string())
+                }
+            } else {
+                ParamValue::String("0".to_string())
+            }
         } else if element.is_int32() {
             ParamValue::Int(element.as_int32() as i64)
         } else if element.is_bool() {

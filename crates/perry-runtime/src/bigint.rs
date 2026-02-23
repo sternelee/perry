@@ -173,6 +173,20 @@ pub extern "C" fn js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader {
     }
 }
 
+/// Check if a BigInt is zero (all limbs are zero). Returns 1 for zero, 0 for non-zero.
+#[no_mangle]
+pub extern "C" fn js_bigint_is_zero(a: *const BigIntHeader) -> i32 {
+    unsafe {
+        let limbs = (*a).limbs;
+        for i in 0..BIGINT_LIMBS {
+            if limbs[i] != 0 {
+                return 0;
+            }
+        }
+        1
+    }
+}
+
 /// Add two BigInts
 #[no_mangle]
 pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
@@ -298,9 +312,10 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
 
-        // Check for division by zero
+        // Division by zero: return 0 instead of panicking (panic can't unwind in extern "C")
         if b_limbs == ZERO_LIMBS {
-            panic!("Division by zero");
+            (*ptr).limbs = ZERO_LIMBS;
+            return ptr;
         }
 
         let a_neg = is_negative(&a_limbs);
@@ -331,9 +346,10 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
         let a_limbs = (*a).limbs;
         let b_limbs = (*b).limbs;
 
-        // Check for division by zero
+        // Division by zero: return 0 instead of panicking (panic can't unwind in extern "C")
         if b_limbs == ZERO_LIMBS {
-            panic!("Division by zero");
+            (*ptr).limbs = ZERO_LIMBS;
+            return ptr;
         }
 
         let a_neg = is_negative(&a_limbs);

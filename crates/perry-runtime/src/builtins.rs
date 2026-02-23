@@ -712,6 +712,8 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         } else {
             "object"
         }
+    } else if jsval.is_bigint() {
+        "bigint"
     } else if jsval.is_int32() {
         "number"
     } else {

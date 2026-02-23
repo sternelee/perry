@@ -4,7 +4,9 @@ target/
 
 # Compiled test executables (no extension)
 test_*
+test-*
 !test_*.ts
+!test-*.ts
 bench_*
 !bench_*.ts
 
@@ -40,6 +42,8 @@ node_modules/
 
 # Temporary files
 tmp/
+debug_test.ts
+test-hir.txt
 
 # Private files
 private-*
