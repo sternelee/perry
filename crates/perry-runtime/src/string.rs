@@ -9,6 +9,14 @@ use std::ptr;
 use std::slice;
 use std::str;
 
+/// Check if a pointer is valid (not null and not a small invalid value from bad NaN-unboxing).
+/// When codegen extracts a "pointer" from TAG_UNDEFINED (0x7FFC_0000_0000_0001), the lower
+/// 48-bit AND yields 1, which passes is_null() but crashes on dereference.
+#[inline]
+pub fn is_valid_string_ptr(p: *const StringHeader) -> bool {
+    !p.is_null() && (p as usize) >= 0x1000
+}
+
 /// Header for heap-allocated strings
 #[repr(C)]
 pub struct StringHeader {
@@ -53,9 +61,9 @@ pub extern "C" fn js_string_from_bytes_with_capacity(data: *const u8, len: u32, 
 /// This is the key optimization for `str = str + x` patterns
 #[no_mangle]
 pub extern "C" fn js_string_append(dest: *mut StringHeader, src: *const StringHeader) -> *mut StringHeader {
-    if dest.is_null() {
-        // If dest is null, just duplicate src
-        if src.is_null() {
+    if !is_valid_string_ptr(dest as *const StringHeader) {
+        // If dest is invalid, just duplicate src
+        if !is_valid_string_ptr(src) {
             return js_string_from_bytes(ptr::null(), 0);
         }
         let src_len = unsafe { (*src).length };
@@ -63,7 +71,7 @@ pub extern "C" fn js_string_append(dest: *mut StringHeader, src: *const StringHe
         return js_string_from_bytes(src_data, src_len);
     }
 
-    if src.is_null() {
+    if !is_valid_string_ptr(src) {
         return dest;
     }
 
@@ -121,7 +129,7 @@ fn js_string_from_str(s: &str) -> *mut StringHeader {
 /// Get string length (in bytes for now, chars would need UTF-8 counting)
 #[no_mangle]
 pub extern "C" fn js_string_length(s: *const StringHeader) -> u32 {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         return 0;
     }
     unsafe { (*s).length }
@@ -149,8 +157,8 @@ fn string_as_str<'a>(s: *const StringHeader) -> &'a str {
 /// Concatenate two strings
 #[no_mangle]
 pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeader) -> *mut StringHeader {
-    let len_a = if a.is_null() { 0 } else { unsafe { (*a).length } };
-    let len_b = if b.is_null() { 0 } else { unsafe { (*b).length } };
+    let len_a = if is_valid_string_ptr(a) { unsafe { (*a).length } } else { 0 };
+    let len_b = if is_valid_string_ptr(b) { unsafe { (*b).length } } else { 0 };
     let total_len = len_a + len_b;
 
     let total_size = std::mem::size_of::<StringHeader>() + total_len as usize;
@@ -164,10 +172,10 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
 
         let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
 
-        if !a.is_null() && len_a > 0 {
+        if is_valid_string_ptr(a) && len_a > 0 {
             ptr::copy_nonoverlapping(string_data(a), data_ptr, len_a as usize);
         }
-        if !b.is_null() && len_b > 0 {
+        if is_valid_string_ptr(b) && len_b > 0 {
             ptr::copy_nonoverlapping(string_data(b), data_ptr.add(len_a as usize), len_b as usize);
         }
 
@@ -205,7 +213,7 @@ pub extern "C" fn js_number_to_fixed(value: f64, decimals: f64) -> *mut StringHe
 /// Returns a new string from start to end (exclusive)
 #[no_mangle]
 pub extern "C" fn js_string_slice(s: *const StringHeader, start: i32, end: i32) -> *mut StringHeader {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         return js_string_from_bytes(ptr::null(), 0);
     }
 
@@ -232,7 +240,7 @@ pub extern "C" fn js_string_slice(s: *const StringHeader, start: i32, end: i32) 
 /// Returns a new string from start to end (exclusive)
 #[no_mangle]
 pub extern "C" fn js_string_substring(s: *const StringHeader, start: i32, end: i32) -> *mut StringHeader {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         return js_string_from_bytes(ptr::null(), 0);
     }
 
@@ -261,7 +269,7 @@ pub extern "C" fn js_string_substring(s: *const StringHeader, start: i32, end: i
 /// Trim whitespace from both ends of a string
 #[no_mangle]
 pub extern "C" fn js_string_trim(s: *const StringHeader) -> *mut StringHeader {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         return js_string_from_bytes(ptr::null(), 0);
     }
 
@@ -273,7 +281,7 @@ pub extern "C" fn js_string_trim(s: *const StringHeader) -> *mut StringHeader {
 /// Convert string to lowercase
 #[no_mangle]
 pub extern "C" fn js_string_to_lower_case(s: *const StringHeader) -> *mut StringHeader {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         return js_string_from_bytes(ptr::null(), 0);
     }
 
@@ -285,7 +293,7 @@ pub extern "C" fn js_string_to_lower_case(s: *const StringHeader) -> *mut String
 /// Convert string to uppercase
 #[no_mangle]
 pub extern "C" fn js_string_to_upper_case(s: *const StringHeader) -> *mut StringHeader {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         return js_string_from_bytes(ptr::null(), 0);
     }
 
@@ -303,7 +311,7 @@ pub extern "C" fn js_string_index_of(haystack: *const StringHeader, needle: *con
 /// Find index of substring starting from a given position (-1 if not found)
 #[no_mangle]
 pub extern "C" fn js_string_index_of_from(haystack: *const StringHeader, needle: *const StringHeader, from_index: i32) -> i32 {
-    if haystack.is_null() || needle.is_null() {
+    if !is_valid_string_ptr(haystack) || !is_valid_string_ptr(needle) {
         return -1;
     }
 
@@ -326,10 +334,12 @@ pub extern "C" fn js_string_index_of_from(haystack: *const StringHeader, needle:
 /// Compare two strings for equality
 #[no_mangle]
 pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeader) -> bool {
-    if a.is_null() && b.is_null() {
+    let a_valid = is_valid_string_ptr(a);
+    let b_valid = is_valid_string_ptr(b);
+    if !a_valid && !b_valid {
         return true;
     }
-    if a.is_null() || b.is_null() {
+    if !a_valid || !b_valid {
         return false;
     }
 
@@ -357,7 +367,7 @@ pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeade
 /// Check if a string starts with a prefix
 #[no_mangle]
 pub extern "C" fn js_string_starts_with(s: *const StringHeader, prefix: *const StringHeader) -> i32 {
-    if s.is_null() || prefix.is_null() {
+    if !is_valid_string_ptr(s) || !is_valid_string_ptr(prefix) {
         return 0;
     }
 
@@ -385,7 +395,7 @@ pub extern "C" fn js_string_starts_with(s: *const StringHeader, prefix: *const S
 /// Check if a string ends with a suffix
 #[no_mangle]
 pub extern "C" fn js_string_ends_with(s: *const StringHeader, suffix: *const StringHeader) -> i32 {
-    if s.is_null() || suffix.is_null() {
+    if !is_valid_string_ptr(s) || !is_valid_string_ptr(suffix) {
         return 0;
     }
 
@@ -414,7 +424,7 @@ pub extern "C" fn js_string_ends_with(s: *const StringHeader, suffix: *const Str
 /// Get character code at index (returns UTF-16 code unit, or NaN if out of bounds)
 #[no_mangle]
 pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: i32) -> f64 {
-    if s.is_null() || index < 0 {
+    if !is_valid_string_ptr(s) || index < 0 {
         return f64::NAN;
     }
 
@@ -432,7 +442,7 @@ pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: i32) -> 
 /// Get character at index (returns single-character string, empty string if out of bounds)
 #[no_mangle]
 pub extern "C" fn js_string_char_at(s: *const StringHeader, index: i32) -> *mut StringHeader {
-    if s.is_null() || index < 0 {
+    if !is_valid_string_ptr(s) || index < 0 {
         return js_string_from_bytes(std::ptr::null(), 0);
     }
 
@@ -473,7 +483,7 @@ pub extern "C" fn js_string_from_char_code(code: i32) -> *mut StringHeader {
 /// Print a string to stdout
 #[no_mangle]
 pub extern "C" fn js_string_print(s: *const StringHeader) {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         println!("");
         return;
     }
@@ -485,7 +495,7 @@ pub extern "C" fn js_string_print(s: *const StringHeader) {
 /// Print a string to stderr (console.error)
 #[no_mangle]
 pub extern "C" fn js_string_error(s: *const StringHeader) {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         eprintln!("");
         return;
     }
@@ -497,7 +507,7 @@ pub extern "C" fn js_string_error(s: *const StringHeader) {
 /// Print a string to stderr (console.warn)
 #[no_mangle]
 pub extern "C" fn js_string_warn(s: *const StringHeader) {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         eprintln!("");
         return;
     }
@@ -512,13 +522,13 @@ use crate::array::ArrayHeader;
 /// Returns an array of string pointers (stored as f64 bit patterns)
 #[no_mangle]
 pub extern "C" fn js_string_split(s: *const StringHeader, delimiter: *const StringHeader) -> *mut ArrayHeader {
-    if s.is_null() {
+    if !is_valid_string_ptr(s) {
         // Return empty array
         return crate::array::js_array_alloc(0);
     }
 
     let str_data = string_as_str(s);
-    let delim = if delimiter.is_null() {
+    let delim = if !is_valid_string_ptr(delimiter) {
         ""
     } else {
         string_as_str(delimiter)
@@ -570,8 +580,11 @@ pub extern "C" fn js_string_alloc_space() -> *mut StringHeader {
 /// str.padStart(targetLength, padString)
 #[no_mangle]
 pub extern "C" fn js_string_pad_start(s: *const StringHeader, target_length: u32, pad_string: *const StringHeader) -> *mut StringHeader {
+    if !is_valid_string_ptr(s) {
+        return js_string_from_bytes(ptr::null(), 0);
+    }
     let str_data = string_as_str(s);
-    let pad_data = string_as_str(pad_string);
+    let pad_data = if is_valid_string_ptr(pad_string) { string_as_str(pad_string) } else { " " };
 
     let current_len = str_data.chars().count();
     let target_len = target_length as usize;
@@ -604,8 +617,11 @@ pub extern "C" fn js_string_pad_start(s: *const StringHeader, target_length: u32
 /// str.padEnd(targetLength, padString)
 #[no_mangle]
 pub extern "C" fn js_string_pad_end(s: *const StringHeader, target_length: u32, pad_string: *const StringHeader) -> *mut StringHeader {
+    if !is_valid_string_ptr(s) {
+        return js_string_from_bytes(ptr::null(), 0);
+    }
     let str_data = string_as_str(s);
-    let pad_data = string_as_str(pad_string);
+    let pad_data = if is_valid_string_ptr(pad_string) { string_as_str(pad_string) } else { " " };
 
     let current_len = str_data.chars().count();
     let target_len = target_length as usize;
@@ -638,7 +654,7 @@ pub extern "C" fn js_string_pad_end(s: *const StringHeader, target_length: u32, 
 /// str.repeat(count)
 #[no_mangle]
 pub extern "C" fn js_string_repeat(s: *const StringHeader, count: i32) -> *mut StringHeader {
-    if s.is_null() || count <= 0 {
+    if !is_valid_string_ptr(s) || count <= 0 {
         // Return empty string
         return js_string_from_bytes("".as_ptr(), 0);
     }

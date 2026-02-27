@@ -9,10 +9,66 @@
 use crate::JSValue;
 use crate::ArrayHeader;
 use crate::arena::arena_alloc_gc;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::collections::HashMap;
 use std::sync::RwLock;
+
+/// Recursion depth guard for js_native_call_method to prevent stack overflow
+/// from circular module dependencies during initialization.
+thread_local! {
+    static CALL_METHOD_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+const MAX_CALL_METHOD_DEPTH: u32 = 512;
+
+struct CallMethodDepthGuard;
+impl CallMethodDepthGuard {
+    fn enter(method_name: &str) -> Option<Self> {
+        CALL_METHOD_DEPTH.with(|d| {
+            let v = d.get();
+            if v >= MAX_CALL_METHOD_DEPTH {
+                // Silently return null object to prevent stack overflow
+                None
+            } else {
+                // Debug logging disabled for production runs
+                // if v <= 10 || v % 50 == 0 {
+                //     eprintln!("[DEPTH GUARD] depth={} calling method '{}'", v, method_name);
+                // }
+                d.set(v + 1);
+                Some(CallMethodDepthGuard)
+            }
+        })
+    }
+}
+impl Drop for CallMethodDepthGuard {
+    fn drop(&mut self) {
+        CALL_METHOD_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
+/// Static "null object" used as a safe return value when the depth guard triggers.
+/// Instead of returning undefined (which callers may dereference as a null pointer),
+/// we return a pointer to this valid-but-empty object so downstream code doesn't crash.
+///
+/// Uses a raw byte array with matching layout to avoid Sync issues with raw pointers.
+#[repr(C, align(8))]
+struct NullObjectBytes {
+    object_type: u32,   // 1 = OBJECT_TYPE_REGULAR
+    class_id: u32,      // 0
+    parent_class_id: u32, // 0
+    field_count: u32,   // 0
+    keys_array: u64,    // 0 (null pointer as u64)
+}
+// Safety: this is a read-only zero-initialized struct with no interior mutability
+unsafe impl Sync for NullObjectBytes {}
+
+static NULL_OBJECT_BYTES: NullObjectBytes = NullObjectBytes {
+    object_type: 1,
+    class_id: 0,
+    parent_class_id: 0,
+    field_count: 0,
+    keys_array: 0,
+};
 
 thread_local! {
     static SHAPE_CACHE: RefCell<HashMap<u32, *mut ArrayHeader>> = RefCell::new(HashMap::new());
@@ -823,12 +879,24 @@ pub unsafe extern "C" fn js_native_call_method(
     args_ptr: *const f64,
     args_len: usize,
 ) -> f64 {
-    // Get the method name
+    // Get the method name (parsed early for depth guard logging)
     let method_name = if method_name_ptr.is_null() || method_name_len == 0 {
         ""
     } else {
         let bytes = std::slice::from_raw_parts(method_name_ptr as *const u8, method_name_len);
         std::str::from_utf8(bytes).unwrap_or("")
+    };
+
+    // RAII recursion depth guard: prevent stack overflow from circular module deps.
+    // The guard auto-decrements on drop, covering all ~20 return points in this function.
+    // When max depth is hit, return a pointer to a static empty object instead of undefined.
+    // This prevents crashes when callers NaN-unbox the result and dereference it as a pointer.
+    let _depth_guard = match CallMethodDepthGuard::enter(method_name) {
+        Some(g) => g,
+        None => {
+            let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+            return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
+        }
     };
 
     // Check if this is a JS handle (V8 object from JS runtime)
@@ -971,8 +1039,12 @@ pub unsafe extern "C" fn js_native_call_method(
         }
     }
 
-    // Method not found - return undefined
-    f64::from_bits(JSValue::undefined().bits())
+    // Method not found — return a safe "null object" pointer instead of undefined.
+    // The generated code often NaN-unboxes the result as a pointer and dereferences it
+    // without null-checking. Returning undefined (0x7FFC000000000001) unboxes to null,
+    // causing a SIGSEGV. A null object with field_count=0 is safe to dereference.
+    let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+    f64::from_bits(JSValue::pointer(null_obj_ptr).bits())
 }
 
 /// Dispatch a method call on a native module namespace object.
@@ -1092,38 +1164,207 @@ pub extern "C" fn js_create_native_module_namespace(module_name_ptr: *const u8, 
     crate::value::js_nanbox_pointer(obj as i64)
 }
 
-/// Create a bound method closure for a native module method.
-/// When called, the closure dispatches to js_native_call_method with the
-/// captured namespace object and method name.
-/// Returns the closure as a NaN-boxed f64 pointer.
+/// Access a property on a native module namespace object.
+/// For method references (e.g., `fs.existsSync`), creates a bound method closure.
+/// For constant properties (e.g., `path.sep`, `fs.constants`), returns the value directly.
 #[no_mangle]
 pub extern "C" fn js_native_module_bind_method(
     namespace_obj: f64,
-    method_name_ptr: *const u8,
-    method_name_len: usize,
+    property_name_ptr: *const u8,
+    property_name_len: usize,
 ) -> f64 {
-    // Heap-allocate a copy of the method name so it outlives the caller's stack frame.
-    // The caller passes a pointer to stack-allocated bytes which become invalid after return.
+    let property_name = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(property_name_ptr, property_name_len))
+    };
+
+    // Extract module name from the namespace object's first field
+    let module_name = unsafe { get_module_name_from_namespace(namespace_obj) };
+
+    // Check for known constant properties first
+    if let Some(val) = unsafe { get_native_module_constant(module_name, property_name, namespace_obj) } {
+        return val;
+    }
+
+    // Not a constant — create a bound method closure
     let heap_name = unsafe {
-        let layout = std::alloc::Layout::from_size_align(method_name_len, 1).unwrap();
+        let layout = std::alloc::Layout::from_size_align(property_name_len, 1).unwrap();
         let ptr = std::alloc::alloc(layout);
-        std::ptr::copy_nonoverlapping(method_name_ptr, ptr, method_name_len);
+        std::ptr::copy_nonoverlapping(property_name_ptr, ptr, property_name_len);
         ptr
     };
 
-    // Allocate a closure with 3 captures:
-    //   [0] = namespace_obj (f64)
-    //   [1] = method_name_ptr (i64) — heap-allocated copy
-    //   [2] = method_name_len (i64)
     let closure = crate::closure::js_closure_alloc(
         crate::closure::BOUND_METHOD_FUNC_PTR,
         3,
     );
     crate::closure::js_closure_set_capture_f64(closure, 0, namespace_obj);
     crate::closure::js_closure_set_capture_ptr(closure, 1, heap_name as i64);
-    crate::closure::js_closure_set_capture_ptr(closure, 2, method_name_len as i64);
+    crate::closure::js_closure_set_capture_ptr(closure, 2, property_name_len as i64);
 
     crate::value::js_nanbox_pointer(closure as i64)
+}
+
+/// Extract the module name string from a native module namespace object.
+unsafe fn get_module_name_from_namespace(namespace_obj: f64) -> &'static str {
+    let jsval = JSValue::from_bits(namespace_obj.to_bits());
+    if !jsval.is_pointer() {
+        return "";
+    }
+    let obj = jsval.as_pointer::<ObjectHeader>();
+    if obj.is_null() || (obj as usize) < 0x1000 {
+        return "";
+    }
+    let module_field = js_object_get_field(obj as *mut _, 0);
+    if module_field.is_string() {
+        let str_ptr = module_field.as_pointer::<crate::StringHeader>();
+        let len = (*str_ptr).length as usize;
+        let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")
+    } else {
+        ""
+    }
+}
+
+/// Return constant (non-method) property values for native modules.
+/// Returns None for method names, which should create bound closures instead.
+unsafe fn get_native_module_constant(
+    module_name: &str,
+    property: &str,
+    namespace_obj: f64,
+) -> Option<f64> {
+    let str_val = |s: &str| -> f64 {
+        let ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+        f64::from_bits(JSValue::string_ptr(ptr).bits())
+    };
+
+    let o_nofollow: f64 = {
+        #[cfg(target_os = "macos")]
+        { 0x0100 as f64 }
+        #[cfg(target_os = "linux")]
+        { 0x20000 as f64 }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        { 0x0100 as f64 }
+    };
+
+    // Helper for fs constants — shared between "fs" and "fs.constants" modules.
+    // Using a nested match (module first, then property) instead of OR patterns
+    // on tuples, because rustc's match optimizer can miscompile tuple OR patterns
+    // by absorbing one alternative's entries into the other branch's decision tree.
+    let fs_const = |prop: &str| -> Option<f64> {
+        match prop {
+            "F_OK" => Some(0.0),
+            "R_OK" => Some(4.0),
+            "W_OK" => Some(2.0),
+            "X_OK" => Some(1.0),
+            "O_RDONLY" => Some(0.0),
+            "O_WRONLY" => Some(1.0),
+            "O_RDWR" => Some(2.0),
+            "O_NOFOLLOW" => Some(o_nofollow),
+            "O_CREAT" => Some(0x200 as f64),
+            "O_TRUNC" => Some(0x400 as f64),
+            "O_APPEND" => Some(0x8 as f64),
+            "O_EXCL" => Some(0x800 as f64),
+            "COPYFILE_EXCL" => Some(1.0),
+            "COPYFILE_FICLONE" => Some(2.0),
+            "COPYFILE_FICLONE_FORCE" => Some(4.0),
+            "S_IRUSR" => Some(0o400 as f64),
+            "S_IWUSR" => Some(0o200 as f64),
+            "S_IXUSR" => Some(0o100 as f64),
+            "S_IRGRP" => Some(0o040 as f64),
+            "S_IWGRP" => Some(0o020 as f64),
+            "S_IXGRP" => Some(0o010 as f64),
+            "S_IROTH" => Some(0o004 as f64),
+            "S_IWOTH" => Some(0o002 as f64),
+            "S_IXOTH" => Some(0o001 as f64),
+            _ => None,
+        }
+    };
+
+    match module_name {
+        "path" => match property {
+            "sep" => if cfg!(windows) { Some(str_val("\\")) } else { Some(str_val("/")) },
+            "delimiter" => if cfg!(windows) { Some(str_val(";")) } else { Some(str_val(":")) },
+            "posix" => Some(create_sub_namespace("path.posix")),
+            "win32" => Some(create_sub_namespace("path.win32")),
+            _ => None,
+        },
+        "path.posix" => match property {
+            "sep" => Some(str_val("/")),
+            "delimiter" => Some(str_val(":")),
+            _ => None,
+        },
+        "path.win32" => match property {
+            "sep" => Some(str_val("\\")),
+            "delimiter" => Some(str_val(";")),
+            _ => None,
+        },
+        "fs" => match property {
+            "constants" => Some(create_sub_namespace("fs.constants")),
+            _ => fs_const(property),
+        },
+        "fs.constants" => fs_const(property),
+        "os" => match property {
+            "EOL" => if cfg!(windows) { Some(str_val("\r\n")) } else { Some(str_val("\n")) },
+            "constants" => Some(create_sub_namespace("os.constants")),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Create a NativeModuleRef sub-namespace (e.g. "fs.constants", "path.posix").
+/// The compiled code treats the result as another NativeModuleRef, so chained
+/// property accesses like `fs.constants.O_RDONLY` work through the dispatch table.
+fn create_sub_namespace(name: &str) -> f64 {
+    js_create_native_module_namespace(name.as_ptr(), name.len())
+}
+
+/// Create (and cache) the fs.constants object with POSIX file system constants.
+unsafe fn create_fs_constants_object() -> f64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CACHED: AtomicU64 = AtomicU64::new(0);
+    let cached = CACHED.load(Ordering::Relaxed);
+    if cached != 0 {
+        return f64::from_bits(cached);
+    }
+
+    // POSIX file-access constants
+    let field_names: &[&str] = &[
+        "F_OK", "R_OK", "W_OK", "X_OK",
+        "O_RDONLY", "O_WRONLY", "O_RDWR",
+        "O_NOFOLLOW", "COPYFILE_EXCL",
+    ];
+    let o_nofollow: f64 = {
+        #[cfg(target_os = "macos")]
+        { 0x0100 as f64 }
+        #[cfg(target_os = "linux")]
+        { 0x20000 as f64 }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        { 0x0100 as f64 }
+    };
+    let field_values: &[f64] = &[
+        0.0, 4.0, 2.0, 1.0,   // F_OK, R_OK, W_OK, X_OK
+        0.0, 1.0, 2.0,        // O_RDONLY, O_WRONLY, O_RDWR
+        o_nofollow,            // O_NOFOLLOW
+        1.0,                   // COPYFILE_EXCL
+    ];
+
+    // Build null-separated packed keys: "F_OK\0R_OK\0..."
+    let packed = field_names.join("\0");
+    let obj = js_object_alloc_with_shape(
+        0x7FFF_FF01, // unique shape_id for fs.constants
+        field_names.len() as u32,
+        packed.as_ptr(),
+        packed.len() as u32,
+    );
+
+    for (i, &val) in field_values.iter().enumerate() {
+        js_object_set_field(obj, i as u32, JSValue::number(val));
+    }
+
+    let result = crate::value::js_nanbox_pointer(obj as i64);
+    CACHED.store(result.to_bits(), Ordering::Relaxed);
+    result
 }
 
 #[cfg(test)]

@@ -79,7 +79,7 @@ fn as_raw_pointer(val: f64) -> *const u8 {
 
 /// Compare two strings by content
 unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool {
-    if a.is_null() || b.is_null() {
+    if a.is_null() || b.is_null() || (a as usize) < 0x1000 || (b as usize) < 0x1000 {
         return a == b;
     }
     let len_a = (*a).length;

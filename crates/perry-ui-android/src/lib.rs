@@ -6,6 +6,7 @@ pub mod file_dialog;
 pub mod jni_bridge;
 pub mod json;
 pub mod keychain;
+pub mod location;
 pub mod menu;
 pub mod sheet;
 pub mod state;
@@ -127,20 +128,7 @@ extern "C" {
     fn main();
 }
 
-// =============================================================================
-// Stdlib stubs — perry-stdlib can't be cross-compiled for Android (OpenSSL dep).
-// The codegen always emits calls to these at startup. Provide no-op versions.
-// =============================================================================
-
-/// No-op: native module dispatch isn't needed without perry-stdlib.
-#[no_mangle]
-pub extern "C" fn js_stdlib_init_dispatch() {}
-
-/// No-op: returns 0 (no pending events to process).
-#[no_mangle]
-pub extern "C" fn js_stdlib_process_pending() -> i32 {
-    0
-}
+// js_stdlib_init_dispatch and js_stdlib_process_pending — now provided by perry-runtime
 
 /// Called from the native thread to run the compiled TypeScript entry point.
 /// This wraps the compiler-generated `main()` function as a JNI method on PerryBridge,
@@ -832,4 +820,9 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_request_location(callback: f64) {
+    location::request_location(callback);
 }

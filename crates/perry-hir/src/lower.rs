@@ -231,7 +231,8 @@ impl LoweringContext {
     }
 
     fn lookup_func(&self, name: &str) -> Option<FuncId> {
-        self.functions.iter().find(|(n, _)| n == name).map(|(_, id)| *id)
+        // Reverse search so inner-scope functions shadow outer-scope same-name functions
+        self.functions.iter().rev().find(|(n, _)| n == name).map(|(_, id)| *id)
     }
 
     fn lookup_func_defaults(&self, func_id: FuncId) -> Option<(&[Option<Expr>], &[LocalId])> {
@@ -378,13 +379,14 @@ impl LoweringContext {
             .map(|(_, module, class)| (module.as_str(), class.as_str()))
     }
 
-    fn enter_scope(&self) -> (usize, usize) {
-        (self.locals.len(), self.native_instances.len())
+    fn enter_scope(&self) -> (usize, usize, usize) {
+        (self.locals.len(), self.native_instances.len(), self.functions.len())
     }
 
-    fn exit_scope(&mut self, mark: (usize, usize)) {
+    fn exit_scope(&mut self, mark: (usize, usize, usize)) {
         self.locals.truncate(mark.0);
         self.native_instances.truncate(mark.1);
+        self.functions.truncate(mark.2);
     }
 
 }
@@ -841,11 +843,10 @@ pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_f
                 continue;
             }
 
-            // Function has a body - register it (only once per name)
-            if ctx.lookup_func(&func_name).is_none() {
-                let func_id = ctx.fresh_func();
-                ctx.functions.push((func_name, func_id));
-            }
+            // Function has a body - each declaration gets a unique FuncId
+            // (inner-scope functions shadow outer-scope same-name functions via reverse lookup)
+            let func_id = ctx.fresh_func();
+            ctx.functions.push((func_name, func_id));
         }
     }
 
@@ -5622,12 +5623,15 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
             }
         }
         ast::Expr::Member(member) => {
-            // Check if this is process.argv access
+            // Check if this is process.* property access
             if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                 if obj_ident.sym.as_ref() == "process" {
                     if let ast::MemberProp::Ident(prop_ident) = &member.prop {
-                        if prop_ident.sym.as_ref() == "argv" {
-                            return Ok(Expr::ProcessArgv);
+                        match prop_ident.sym.as_ref() {
+                            "argv" => return Ok(Expr::ProcessArgv),
+                            "platform" => return Ok(Expr::OsPlatform),
+                            "arch" => return Ok(Expr::OsArch),
+                            _ => {}
                         }
                     }
                 }

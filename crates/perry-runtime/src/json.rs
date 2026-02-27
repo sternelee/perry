@@ -14,7 +14,7 @@ use std::fmt::Write as FmtWrite;
 
 #[inline]
 unsafe fn str_from_header<'a>(ptr: *const StringHeader) -> Option<&'a str> {
-    if ptr.is_null() {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
     let len = (*ptr).length as usize;

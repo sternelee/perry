@@ -26,6 +26,12 @@ pub struct RegExpHeader {
     pub multiline: bool,
 }
 
+/// Check if a pointer is valid (not null and not a small invalid value from bad NaN-unboxing)
+#[inline]
+fn is_valid_ptr<T>(p: *const T) -> bool {
+    !p.is_null() && (p as usize) >= 0x1000
+}
+
 /// Internal helper: Get string data from StringHeader
 fn string_as_str<'a>(s: *const StringHeader) -> &'a str {
     unsafe {
@@ -45,8 +51,8 @@ fn js_string_from_str(s: &str) -> *mut StringHeader {
 /// Returns a pointer to RegExpHeader
 #[no_mangle]
 pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const StringHeader) -> *mut RegExpHeader {
-    let pattern_str = if pattern.is_null() { "" } else { string_as_str(pattern) };
-    let flags_str = if flags.is_null() { "" } else { string_as_str(flags) };
+    let pattern_str = if is_valid_ptr(pattern) { string_as_str(pattern) } else { "" };
+    let flags_str = if is_valid_ptr(flags) { string_as_str(flags) } else { "" };
 
     // Parse flags
     let case_insensitive = flags_str.contains('i');
@@ -68,9 +74,9 @@ pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const Stri
     let regex = match Regex::new(&regex_pattern) {
         Ok(r) => r,
         Err(_) => {
-            // Return a dummy regex that matches nothing on error
-            // In production, this should throw an exception
-            Regex::new("(?!.*)").unwrap()
+            // Return a dummy regex that matches nothing on error.
+            // [^\s\S] is a character class excluding all characters (impossible to match).
+            Regex::new(r"[^\s\S]").unwrap()
         }
     };
 
@@ -99,7 +105,7 @@ pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const Stri
 /// regex.test(string) -> boolean
 #[no_mangle]
 pub extern "C" fn js_regexp_test(re: *const RegExpHeader, s: *const StringHeader) -> i32 {
-    if re.is_null() || s.is_null() {
+    if !is_valid_ptr(re) || !is_valid_ptr(s) {
         return 0;
     }
 
@@ -115,7 +121,7 @@ pub extern "C" fn js_regexp_test(re: *const RegExpHeader, s: *const StringHeader
 /// string.match(regex) -> string[] | null (returns array pointer, null if no match)
 #[no_mangle]
 pub extern "C" fn js_string_match(s: *const StringHeader, re: *const RegExpHeader) -> *mut ArrayHeader {
-    if s.is_null() || re.is_null() {
+    if !is_valid_ptr(s) || !is_valid_ptr(re) {
         return ptr::null_mut();
     }
 
@@ -181,14 +187,14 @@ pub extern "C" fn js_string_replace_regex(
     re: *const RegExpHeader,
     replacement: *const StringHeader,
 ) -> *mut StringHeader {
-    if s.is_null() {
+    if !is_valid_ptr(s) {
         return js_string_from_str("");
     }
 
     let str_data = string_as_str(s);
-    let repl_str = if replacement.is_null() { "undefined" } else { string_as_str(replacement) };
+    let repl_str = if is_valid_ptr(replacement) { string_as_str(replacement) } else { "undefined" };
 
-    if re.is_null() {
+    if !is_valid_ptr(re) {
         // If regex is null, return original string
         return js_string_from_str(str_data);
     }
@@ -217,13 +223,13 @@ pub extern "C" fn js_string_replace_string(
     pattern: *const StringHeader,
     replacement: *const StringHeader,
 ) -> *mut StringHeader {
-    if s.is_null() {
+    if !is_valid_ptr(s) {
         return js_string_from_str("");
     }
 
     let str_data = string_as_str(s);
-    let pattern_str = if pattern.is_null() { "" } else { string_as_str(pattern) };
-    let repl_str = if replacement.is_null() { "undefined" } else { string_as_str(replacement) };
+    let pattern_str = if is_valid_ptr(pattern) { string_as_str(pattern) } else { "" };
+    let repl_str = if is_valid_ptr(replacement) { string_as_str(replacement) } else { "undefined" };
 
     // String.replace with a string pattern only replaces the first occurrence
     let result = str_data.replacen(pattern_str, repl_str, 1);

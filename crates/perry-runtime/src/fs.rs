@@ -7,12 +7,14 @@ use crate::string::{js_string_from_bytes, StringHeader};
 use crate::value::POINTER_MASK;
 
 /// Extract a string pointer from a NaN-boxed f64 value
-/// Handles both NaN-boxed strings (with STRING_TAG) and raw pointers
+/// Handles both NaN-boxed strings (with STRING_TAG) and raw pointers.
+/// Returns null for invalid/small pointers (e.g. from TAG_UNDEFINED extraction).
 #[inline]
 fn extract_string_ptr(value: f64) -> *const StringHeader {
     let bits = value.to_bits();
     // Mask off the tag bits to get the raw pointer
-    (bits & POINTER_MASK) as *const StringHeader
+    let ptr = (bits & POINTER_MASK) as usize;
+    if ptr < 0x1000 { std::ptr::null() } else { ptr as *const StringHeader }
 }
 
 /// Read a file synchronously and return its contents as a string

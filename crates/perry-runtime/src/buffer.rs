@@ -53,7 +53,7 @@ fn buffer_data_mut(buf: *mut BufferHeader) -> *mut u8 {
 /// encoding: 0 = utf8 (default), 1 = hex, 2 = base64
 #[no_mangle]
 pub extern "C" fn js_buffer_from_string(str_ptr: *const StringHeader, encoding: i32) -> *mut BufferHeader {
-    if str_ptr.is_null() {
+    if str_ptr.is_null() || (str_ptr as usize) < 0x1000 {
         return buffer_alloc(0);
     }
 
@@ -194,7 +194,7 @@ pub extern "C" fn js_buffer_is_buffer(ptr: i64) -> i32 {
 /// Get the byte length of a string (when encoded to UTF-8)
 #[no_mangle]
 pub extern "C" fn js_buffer_byte_length(str_ptr: *const StringHeader) -> i32 {
-    if str_ptr.is_null() {
+    if str_ptr.is_null() || (str_ptr as usize) < 0x1000 {
         return 0;
     }
     unsafe {

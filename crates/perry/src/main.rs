@@ -56,6 +56,9 @@ enum Commands {
 
     /// Explain an error code
     Explain(commands::explain::ExplainArgs),
+
+    /// Build, sign, package and publish your app
+    Publish(commands::publish::PublishArgs),
 }
 
 /// Check if the first non-flag argument looks like a TypeScript file
@@ -72,7 +75,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "help"
         ) {
             return false;
         }
@@ -128,6 +131,9 @@ fn main() -> Result<()> {
         }
         Commands::Explain(args) => {
             commands::explain::run(args, cli.format, use_color)
+        }
+        Commands::Publish(args) => {
+            commands::publish::run(args, cli.format, use_color, cli.verbose)
         }
     }
 }

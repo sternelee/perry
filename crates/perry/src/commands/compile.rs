@@ -83,6 +83,8 @@ pub struct CompilationContext {
     pub needs_stdlib: bool,
     /// Project root (where we start looking for node_modules)
     pub project_root: PathBuf,
+    /// External native libraries discovered from package dependencies
+    pub native_libraries: Vec<NativeLibraryManifest>,
 }
 
 impl CompilationContext {
@@ -96,8 +98,40 @@ impl CompilationContext {
             needs_plugins: false,
             needs_stdlib: false,
             project_root,
+            native_libraries: Vec::new(),
         }
     }
+}
+
+/// External native library manifest parsed from package.json `perry.nativeLibrary` field
+#[derive(Debug, Clone)]
+pub struct NativeLibraryManifest {
+    /// Package module name (e.g., "@honeide/editor")
+    pub module: String,
+    /// Resolved package directory path
+    pub package_dir: PathBuf,
+    /// FFI function declarations
+    pub functions: Vec<NativeFunctionDecl>,
+    /// Target-specific build configuration
+    pub target_config: Option<TargetNativeConfig>,
+}
+
+/// An FFI function declaration from a native library manifest
+#[derive(Debug, Clone)]
+pub struct NativeFunctionDecl {
+    pub name: String,
+    pub params: Vec<String>,
+    pub returns: String,
+}
+
+/// Target-specific native library build configuration
+#[derive(Debug, Clone)]
+pub struct TargetNativeConfig {
+    pub crate_path: PathBuf,
+    pub lib_name: String,
+    pub frameworks: Vec<String>,
+    pub libs: Vec<String>,
+    pub pkg_config: Vec<String>,
 }
 
 /// Get the Rust target triple for a given perry target string
@@ -177,6 +211,107 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
         _ => "libperry_ui_macos.a",
     };
     find_library(lib_name, target)
+}
+
+/// Check if a package directory has a perry.nativeLibrary field in its package.json
+fn has_perry_native_library(package_dir: &Path) -> bool {
+    let package_json = package_dir.join("package.json");
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+            return pkg.get("perry")
+                .and_then(|p| p.get("nativeLibrary"))
+                .is_some();
+        }
+    }
+    false
+}
+
+/// Parse a native library manifest from a package's package.json
+fn parse_native_library_manifest(
+    package_dir: &Path,
+    module_name: &str,
+    target: Option<&str>,
+) -> Option<NativeLibraryManifest> {
+    let package_json = package_dir.join("package.json");
+    let content = fs::read_to_string(&package_json).ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let native_lib = pkg.get("perry")?.get("nativeLibrary")?;
+
+    // Parse functions
+    let functions: Vec<NativeFunctionDecl> = native_lib.get("functions")?
+        .as_array()?
+        .iter()
+        .filter_map(|f| {
+            Some(NativeFunctionDecl {
+                name: f.get("name")?.as_str()?.to_string(),
+                params: f.get("params")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                    .collect(),
+                returns: f.get("returns")?.as_str()?.to_string(),
+            })
+        })
+        .collect();
+
+    // Parse target config
+    let target_key = match target {
+        Some("ios-simulator") | Some("ios") => "ios",
+        Some("android") => "android",
+        Some("linux") => "linux",
+        Some("windows") => "windows",
+        Some("web") => "web",
+        _ => "macos",
+    };
+
+    let target_config = native_lib.get("targets")
+        .and_then(|t| t.get(target_key))
+        .map(|tc| {
+            TargetNativeConfig {
+                crate_path: package_dir.join(
+                    tc.get("crate").and_then(|c| c.as_str()).unwrap_or("")
+                ),
+                lib_name: tc.get("lib").and_then(|l| l.as_str())
+                    .unwrap_or("").to_string(),
+                frameworks: tc.get("frameworks")
+                    .and_then(|f| f.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                libs: tc.get("libs")
+                    .and_then(|l| l.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                pkg_config: tc.get("pkgConfig")
+                    .and_then(|p| p.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+            }
+        });
+
+    Some(NativeLibraryManifest {
+        module: module_name.to_string(),
+        package_dir: package_dir.to_path_buf(),
+        functions,
+        target_config,
+    })
+}
+
+/// Check if a file path is inside a package with perry.nativeLibrary
+fn is_in_perry_native_package(path: &Path) -> bool {
+    let mut current = path.parent();
+    while let Some(dir) = current {
+        let pkg_json = dir.join("package.json");
+        if pkg_json.exists() {
+            return has_perry_native_library(dir);
+        }
+        // Stop at node_modules boundary
+        if dir.file_name().map(|n| n == "node_modules").unwrap_or(false) {
+            break;
+        }
+        current = dir.parent();
+    }
+    false
 }
 
 /// Find node_modules directory starting from a given path
@@ -470,7 +605,11 @@ fn resolve_import(
             let package_dir = node_modules.join(&package_name);
             if package_dir.is_dir() {
                 if let Some(entry) = resolve_package_entry(&package_dir, subpath.as_deref()) {
-                    // For node_modules packages, always treat as Interpreted
+                    // Packages with perry.nativeLibrary are compiled natively
+                    if has_perry_native_library(&package_dir) {
+                        return Some((entry.canonicalize().ok()?, ModuleKind::NativeCompiled));
+                    }
+                    // For other node_modules packages, treat as Interpreted
                     // Even .ts files in node_modules are library source code,
                     // not user code to be compiled. V8 will handle them at runtime.
                     return Some((entry.canonicalize().ok()?, ModuleKind::Interpreted));
@@ -568,6 +707,7 @@ fn collect_modules(
     visited: &mut HashSet<PathBuf>,
     enable_js_runtime: bool,
     format: OutputFormat,
+    target: Option<&str>,
     next_class_id: &mut perry_hir::ClassId,
     skip_transforms: bool,
 ) -> Result<()> {
@@ -584,10 +724,11 @@ fn collect_modules(
     // This includes: JS files, declaration files (.d.ts), JSON files, or any file in node_modules when JS runtime is enabled
     let is_json = canonical.extension().and_then(|e| e.to_str()) == Some("json");
     let is_in_node_modules = canonical.to_string_lossy().contains("node_modules");
+    let is_perry_native = is_in_node_modules && is_in_perry_native_package(&canonical);
     let should_use_js_runtime = is_js_file(&canonical)
         || is_declaration_file(&canonical)
         || is_json
-        || (enable_js_runtime && is_in_node_modules);
+        || (enable_js_runtime && is_in_node_modules && !is_perry_native);
 
     // Skip JSON files — they're data, not code (imported via `with { type: "json" }`)
     if is_json {
@@ -676,8 +817,32 @@ fn collect_modules(
 
             match kind {
                 ModuleKind::NativeCompiled => {
+                    // Check if this is from a node_modules package with perry.nativeLibrary
+                    if resolved_path.to_string_lossy().contains("node_modules") {
+                        let module_name = &import.source;
+                        if !ctx.native_libraries.iter().any(|nl| nl.module == *module_name) {
+                            // Walk up to find the package directory
+                            let mut pkg_dir = resolved_path.parent();
+                            while let Some(dir) = pkg_dir {
+                                if dir.join("package.json").exists() && has_perry_native_library(dir) {
+                                    if let Some(manifest) = parse_native_library_manifest(dir, module_name, target) {
+                                        match format {
+                                            OutputFormat::Text => println!("  Native library: {} ({} FFI functions)", manifest.module, manifest.functions.len()),
+                                            OutputFormat::Json => {}
+                                        }
+                                        ctx.native_libraries.push(manifest);
+                                    }
+                                    break;
+                                }
+                                if dir.file_name().map(|n| n == "node_modules").unwrap_or(false) {
+                                    break;
+                                }
+                                pkg_dir = dir.parent();
+                            }
+                        }
+                    }
                     // Recursively collect TypeScript modules
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
                 }
                 ModuleKind::Interpreted => {
                     // Skip declaration files (.d.ts) - they only contain type information
@@ -701,7 +866,7 @@ fn collect_modules(
                     }
 
                     // Collect JS module
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
                 }
                 ModuleKind::NativeRust => {
                     // Native Rust modules are handled by stdlib
@@ -732,11 +897,11 @@ fn collect_modules(
             if let Some((resolved_path, kind)) = resolve_import(src, &canonical, &ctx.project_root) {
                 match kind {
                     ModuleKind::NativeCompiled => {
-                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
+                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
                     }
                     ModuleKind::Interpreted => {
                         if enable_js_runtime {
-                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, next_class_id, skip_transforms)?;
+                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
                         }
                     }
                     ModuleKind::NativeRust => {}
@@ -915,7 +1080,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
     let skip_transforms = args.target.as_deref() == Some("web");
 
-    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, &mut next_class_id, skip_transforms)?;
+    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms)?;
 
     // Bundle extensions if --bundle-extensions specified
     let mut bundled_extensions: Vec<(PathBuf, String)> = Vec::new();
@@ -931,7 +1096,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 OutputFormat::Json => {}
             }
             collect_modules(entry_path, &mut ctx, &mut visited,
-                           args.enable_js_runtime, format, &mut next_class_id, skip_transforms)?;
+                           args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms)?;
             bundled_extensions.push((entry_path.canonicalize()?, plugin_id.clone()));
         }
     }
@@ -1698,6 +1863,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         // Tell codegen whether stdlib functions are available
         compiler.set_needs_stdlib(ctx.needs_stdlib);
 
+        // Pass external native library FFI functions to codegen
+        if !ctx.native_libraries.is_empty() {
+            let ffi_functions: Vec<(String, Vec<String>, String)> = ctx.native_libraries.iter()
+                .flat_map(|lib| lib.functions.iter().map(|f| {
+                    (f.name.clone(), f.params.clone(), f.returns.clone())
+                }))
+                .collect();
+            compiler.set_native_library_functions(ffi_functions);
+        }
+
         // If we need JS runtime, tell the compiler to generate init code
         if ctx.needs_js_runtime {
             compiler.set_needs_js_runtime(true);
@@ -2299,6 +2474,91 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             return Err(anyhow!(
                 "perry/ui imported but {} not found. Build with: {}", lib_name, build_cmd
             ));
+        }
+    }
+
+    // Build and link external native libraries from perry.nativeLibrary manifests
+    for native_lib in &ctx.native_libraries {
+        if let Some(ref target_config) = native_lib.target_config {
+            match format {
+                OutputFormat::Text => println!("Building native library: {} ...", native_lib.module),
+                OutputFormat::Json => {}
+            }
+
+            // Build the Rust crate
+            let cargo_toml = target_config.crate_path.join("Cargo.toml");
+            if cargo_toml.exists() {
+                let mut cargo_cmd = Command::new("cargo");
+                cargo_cmd.arg("build").arg("--release")
+                    .arg("--manifest-path").arg(&cargo_toml);
+
+                if let Some(triple) = rust_target_triple(target.as_deref()) {
+                    cargo_cmd.arg("--target").arg(triple);
+                }
+
+                let cargo_status = cargo_cmd.status()?;
+                if !cargo_status.success() {
+                    return Err(anyhow!(
+                        "Failed to build native library crate for {}: {}",
+                        native_lib.module,
+                        target_config.crate_path.display()
+                    ));
+                }
+            }
+
+            // Find and link the static library
+            let lib_name = &target_config.lib_name;
+            if !lib_name.is_empty() {
+                // Search in the crate's target directory first, then standard paths
+                let mut lib_path = None;
+                let crate_target_dir = target_config.crate_path.join("target");
+                if let Some(triple) = rust_target_triple(target.as_deref()) {
+                    let candidate = crate_target_dir.join(triple).join("release").join(lib_name);
+                    if candidate.exists() {
+                        lib_path = Some(candidate);
+                    }
+                } else {
+                    let candidate = crate_target_dir.join("release").join(lib_name);
+                    if candidate.exists() {
+                        lib_path = Some(candidate);
+                    }
+                }
+
+                if let Some(lib) = lib_path {
+                    cmd.arg(&lib);
+                    match format {
+                        OutputFormat::Text => println!("Linking native library: {}", lib.display()),
+                        OutputFormat::Json => {}
+                    }
+                } else {
+                    return Err(anyhow!(
+                        "Native library {} not found after building {} crate",
+                        lib_name, native_lib.module
+                    ));
+                }
+            }
+
+            // Add platform frameworks
+            for framework in &target_config.frameworks {
+                cmd.arg("-framework").arg(framework);
+            }
+
+            // Add platform libraries
+            for lib in &target_config.libs {
+                cmd.arg(format!("-l{}", lib));
+            }
+
+            // Add pkg-config libraries
+            for pkg in &target_config.pkg_config {
+                if let Ok(output) = Command::new("pkg-config").args(["--libs", pkg]).output() {
+                    if output.status.success() {
+                        let libs = String::from_utf8_lossy(&output.stdout);
+                        for flag in libs.trim().split_whitespace() {
+                            cmd.arg(flag);
+                        }
+                    }
+                }
+            }
         }
     }
 

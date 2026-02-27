@@ -2,6 +2,7 @@ pub mod app;
 pub mod clipboard;
 pub mod file_dialog;
 pub mod keychain;
+pub mod location;
 pub mod menu;
 pub mod notifications;
 pub mod state;
@@ -896,6 +897,16 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) {
     crate::notifications::send(title_ptr as *const u8, body_ptr as *const u8);
+}
+
+// =============================================================================
+// Location (perry/system) — stub on macOS, iOS only
+// =============================================================================
+
+/// Request one-shot location.
+#[no_mangle]
+pub extern "C" fn perry_system_request_location(callback: f64) {
+    location::request_location(callback);
 }
 
 // =============================================================================

@@ -21,9 +21,11 @@ pub mod server;
 pub mod request;
 pub mod response;
 pub mod json;
+pub mod multipart;
 
 // Re-export main types
 pub use server::*;
 pub use request::*;
 pub use response::*;
 pub use json::*;
+pub use multipart::*;

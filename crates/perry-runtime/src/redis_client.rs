@@ -25,7 +25,7 @@ lazy_static::lazy_static! {
 
 /// Extract a Rust string from a Perry StringHeader pointer
 unsafe fn extract_string(str_ptr: *const StringHeader) -> Option<String> {
-    if str_ptr.is_null() {
+    if str_ptr.is_null() || (str_ptr as usize) < 0x1000 {
         return None;
     }
     let len = (*str_ptr).length as usize;

@@ -13,7 +13,11 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// Global counter for assigning unique init guard IDs to non-entry modules.
+/// Each non-entry module gets a sequential ID used with perry_init_guard_check_and_set().
+static INIT_MODULE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Thread-local tracking of the current function being compiled (for self-recursive call optimization)
 thread_local! {
@@ -428,7 +432,7 @@ fn try_compile_index_as_i32(
             } else if info.is_integer {
                 // Safe conversion: f64 -> i64 -> i32 (avoids ARM64 SIGILL on large values)
                 let f64_val = builder.use_var(info.var);
-                let i64_val = builder.ins().fcvt_to_sint(types::I64, f64_val);
+                let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
                 Some(builder.ins().ireduce(types::I32, i64_val))
             } else {
                 None
@@ -606,6 +610,8 @@ pub struct Compiler {
     output_type: String,
     /// Bundled extensions: (canonical_source_path, module_prefix) for static plugin registration
     bundled_extensions: Vec<(String, String)>,
+    /// External native library FFI function declarations: function_name -> (params, returns)
+    native_library_functions: Vec<(String, Vec<String>, String)>,
 }
 
 impl Compiler {
@@ -715,6 +721,7 @@ impl Compiler {
             static_field_runtime_inits: Vec::new(),
             output_type: "executable".to_string(),
             bundled_extensions: Vec::new(),
+            native_library_functions: Vec::new(),
         })
     }
 
@@ -769,6 +776,12 @@ impl Compiler {
     /// Used to resolve types for await expressions on cross-module async function calls.
     pub fn register_imported_func_return_type(&mut self, func_name: String, return_type: perry_types::Type) {
         self.imported_func_return_types.insert(func_name, return_type);
+    }
+
+    /// Register external native library FFI functions from package manifests.
+    /// These will be declared as extern imports during codegen initialization.
+    pub fn set_native_library_functions(&mut self, functions: Vec<(String, Vec<String>, String)>) {
+        self.native_library_functions = functions;
     }
 
     /// Set the module symbol prefix for scoping cross-module symbols.
@@ -1408,6 +1421,18 @@ impl Compiler {
         // Declare external runtime functions
         self.declare_runtime_functions()?;
 
+        // Map empty-body functions (from `declare function`) to extern FFI functions.
+        // When a TypeScript file has `declare function hone_editor_create(...)`, the lowering
+        // produces a Function with empty body. If the function name matches an extern FFI
+        // function from a native library manifest, remap the func_id to the extern function.
+        for func in &hir.functions {
+            if func.body.is_empty() {
+                if let Some(extern_id) = self.extern_funcs.get(&func.name) {
+                    self.func_ids.insert(func.id, *extern_id);
+                }
+            }
+        }
+
         // Collect closures from ALL sources: functions, classes, and init statements
         // This MUST happen BEFORE compiling class methods that may contain closures
         // Tuple: (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class)
@@ -1667,11 +1692,11 @@ impl Compiler {
         // Second pass: compile all functions
         // Note: create_module_var_globals and analyze_module_var_types were already called
         // before compiling closures/methods above
-        // Deduplicate by name to handle TypeScript function overloads (multiple declarations share a name)
-        let mut compiled_func_names = std::collections::HashSet::new();
+        // Deduplicate by FuncId (not name) so same-name functions at different scopes each get compiled
+        let mut compiled_func_ids = std::collections::HashSet::new();
         for func in &hir.functions {
-            if !compiled_func_names.insert(func.name.clone()) {
-                continue; // Skip duplicate overload declarations
+            if !compiled_func_ids.insert(func.id) {
+                continue; // Skip duplicate declarations with the same FuncId
             }
             self.compile_function(func)?;
         }
@@ -11352,6 +11377,14 @@ impl Compiler {
             self.extern_funcs.insert("perry_system_preferences_get".to_string(), func_id);
         }
 
+        // perry_system_request_location(callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // callback (NaN-boxed closure)
+            let func_id = self.module.declare_function("perry_system_request_location", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_system_request_location".to_string(), func_id);
+        }
+
         // perry_system_keychain_save(key: i64, value: i64)
         {
             let mut sig = self.module.make_signature();
@@ -11812,7 +11845,34 @@ impl Compiler {
             self.extern_funcs.insert("perry_resolve_static_plugin".to_string(), func_id);
         }
 
+        // ============================================
+        // External native library FFI functions
+        // ============================================
+        // Declared from perry.nativeLibrary manifests in package.json
+        for (func_name, params, returns) in &self.native_library_functions {
+            let mut sig = self.module.make_signature();
+            for param_type in params {
+                sig.params.push(AbiParam::new(Self::parse_cranelift_type(param_type)));
+            }
+            if returns != "void" {
+                sig.returns.push(AbiParam::new(Self::parse_cranelift_type(returns)));
+            }
+            let func_id = self.module.declare_function(func_name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(func_name.clone(), func_id);
+        }
+
         Ok(())
+    }
+
+    /// Parse a Cranelift type string from a native library manifest
+    fn parse_cranelift_type(type_str: &str) -> types::Type {
+        match type_str {
+            "i32" => types::I32,
+            "i64" => types::I64,
+            "f32" => types::F32,
+            "f64" => types::F64,
+            _ => types::F64, // Default to f64 (NaN-boxed values)
+        }
     }
 
     fn declare_function(&mut self, func: &Function) -> Result<()> {
@@ -12127,8 +12187,8 @@ impl Compiler {
                             builder.declare_var(shadow, types::I32);
                             let f64_val = builder.use_var(info.var);
                             // Safe conversion: f64 -> i64 -> i32 (ireduce won't trap)
-                            // Direct fcvt_to_sint(I32) traps on ARM64 if value > i32::MAX
-                            let i64_val = builder.ins().fcvt_to_sint(types::I64, f64_val);
+                            // Direct fcvt_to_sint_sat(I32) traps on ARM64 if value > i32::MAX
+                            let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
                             let i32_val = builder.ins().ireduce(types::I32, i64_val);
                             builder.def_var(shadow, i32_val);
                             info.i32_shadow = Some(shadow);
@@ -12472,7 +12532,7 @@ impl Compiler {
                         let global_val = self.module.declare_data_in_func(*data_id, builder.func);
                         let ptr = builder.ins().global_value(types::I64, global_val);
                         let f64_val = builder.ins().load(types::F64, MemFlags::new(), ptr, 0);
-                        let i64_val = builder.ins().fcvt_to_sint(types::I64, f64_val);
+                        let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
                         builder.def_var(var, i64_val);
                         param_vars.insert(*local_id, var);
                     }
@@ -12525,7 +12585,7 @@ impl Compiler {
             let mut i64_args = Vec::new();
             for i in 0..func.params.len() {
                 let f64_val = builder.block_params(entry_block)[i];
-                let i64_val = builder.ins().fcvt_to_sint(types::I64, f64_val);
+                let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
                 i64_args.push(i64_val);
             }
 
@@ -13962,7 +14022,7 @@ impl Compiler {
                 let this_f64 = builder.inst_results(call)[0];
 
                 // `this` is stored as f64 (bitcast of i64 pointer), convert back to i64
-                let this_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), this_f64);
+                let this_ptr = ensure_i64(&mut builder, this_f64);
 
                 // Store in a variable
                 let var = Variable::new(next_var);
@@ -13989,7 +14049,7 @@ impl Compiler {
                     let var = Variable::new(next_var);
                     next_var += 1;
                     builder.declare_var(var, types::I64);
-                    let box_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val_f64);
+                    let box_ptr = ensure_i64(&mut builder, val_f64);
                     builder.def_var(var, box_ptr);
 
                     // Preserve type info from the original module-level variable
@@ -14343,7 +14403,7 @@ impl Compiler {
                         call_args.push(builder.inst_results(call)[0]);
                     } else {
                         // Fallback to bitcast if js_nanbox_get_pointer not available
-                        let converted = builder.ins().bitcast(types::I64, MemFlags::new(), wrapper_param);
+                        let converted = ensure_i64(&mut builder, wrapper_param);
                         call_args.push(converted);
                     }
                 } else {
@@ -14366,7 +14426,8 @@ impl Compiler {
                         let expected_type = actual_sig.signature.params[i].value_type;
                         let actual_type = builder.func.dfg.value_type(val);
                         if expected_type == types::I64 && actual_type == types::F64 {
-                            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                            // Strip NaN-box tag bits to get raw pointer
+                            ensure_i64(&mut builder, val)
                         } else if expected_type == types::F64 && actual_type == types::I64 {
                             // i64 pointer -> f64: NaN-box with POINTER_TAG
                             inline_nanbox_pointer(&mut builder, val)
@@ -14654,6 +14715,17 @@ impl Compiler {
             None
         };
 
+        // For non-entry modules, use a runtime init guard to prevent re-entrant
+        // initialization from circular module dependencies (stack overflow).
+        // We call perry_init_guard_check_and_set(module_id) which atomically checks
+        // and sets a bit in a runtime bitset. This is an external function call that
+        // Cranelift cannot optimize away (unlike a local data flag).
+        let init_guard_module_id = if !self.is_entry_module {
+            Some(INIT_MODULE_COUNTER.fetch_add(1, Ordering::SeqCst))
+        } else {
+            None
+        };
+
         // Use fresh FunctionBuilderContext to avoid variable ID conflicts
         // The shared self.func_ctx accumulates variable declarations across functions
         let mut init_func_ctx = FunctionBuilderContext::new();
@@ -14666,6 +14738,40 @@ impl Compiler {
                 builder.append_block_params_for_function_params(entry_block);
             }
             builder.switch_to_block(entry_block);
+
+            // Re-entrancy guard for non-entry modules: call perry_init_guard_check_and_set()
+            // in the runtime. Returns 1 if already initializing (skip), 0 to proceed.
+            // Using an external function call prevents Cranelift from optimizing the guard away.
+            if let Some(module_id) = init_guard_module_id {
+                eprintln!("[CODEGEN] Emitting init guard for module_id={} (module: {})", module_id, module_name);
+                let mut guard_sig = self.module.make_signature();
+                guard_sig.params.push(AbiParam::new(types::I64));
+                guard_sig.returns.push(AbiParam::new(types::I32));
+                let guard_func_id = self.module.declare_function(
+                    "perry_init_guard_check_and_set", Linkage::Import, &guard_sig
+                )?;
+                let guard_func_ref = self.module.declare_func_in_func(guard_func_id, builder.func);
+                let id_val = builder.ins().iconst(types::I64, module_id as i64);
+                let call = builder.ins().call(guard_func_ref, &[id_val]);
+                let already_init = builder.inst_results(call)[0];
+
+                let init_block = builder.create_block();
+                let early_ret_block = builder.create_block();
+                let zero = builder.ins().iconst(types::I32, 0);
+                let skip = builder.ins().icmp(IntCC::NotEqual, already_init, zero);
+                builder.ins().brif(skip, early_ret_block, &[], init_block, &[]);
+
+                // Early return block: return 0 (success) without re-initializing
+                builder.switch_to_block(early_ret_block);
+                builder.seal_block(early_ret_block);
+                let ret_val = builder.ins().iconst(types::I32, 0);
+                builder.ins().return_(&[ret_val]);
+
+                // Continue with actual initialization
+                builder.switch_to_block(init_block);
+                builder.seal_block(init_block);
+            }
+
             builder.seal_block(entry_block);
 
             // For dylib plugins, skip GC/dispatch init — the host handles those.
@@ -14807,7 +14913,7 @@ impl Compiler {
                                     } else if local_info.is_union {
                                         // Union-typed F64 value that's actually a pointer (bitcast from I64)
                                         // Extract the raw pointer bits and NaN-box properly
-                                        let i64_val = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                                        let i64_val = ensure_i64(&mut builder, val);
                                         let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
                                             .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                                         let nanbox_ref = self.module.declare_func_in_func(*nanbox_func_id, builder.func);
@@ -16020,7 +16126,7 @@ fn compile_stmt(
                             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, init_expr, this_ctx)?;
                             // Safe conversion: f64 -> i64 -> i32 (avoids ARM64 SIGILL on large values)
                             let val_f64 = ensure_f64(builder, val);
-                            let i64_val = builder.ins().fcvt_to_sint(types::I64, val_f64);
+                            let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, val_f64);
                             builder.ins().ireduce(types::I32, i64_val)
                         }
                     };
@@ -16038,7 +16144,7 @@ fn compile_stmt(
                     let val = if is_typed_union && is_string_expr(init_expr, locals) {
                         // String expression returns f64 (bitcast from i64 pointer)
                         // Convert back to i64 and wrap with NaN-boxing using STRING_TAG
-                        let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                        let ptr = ensure_i64(builder, val);
                         let nanbox_func = extern_funcs.get("js_nanbox_string")
                             .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                         let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -16098,7 +16204,7 @@ fn compile_stmt(
                                 builder.inst_results(call)[0]
                             } else {
                                 // Regular bitcast for values that are already raw pointers
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                ensure_i64(builder, val)
                             }
                         } else {
                             // Value is not F64 - need to convert to I64
@@ -16131,7 +16237,7 @@ fn compile_stmt(
                             builder.ins().sextend(types::I64, val)
                         } else if val_type == types::F64 && var_type == types::I64 {
                             // F64 (NaN-boxed) to I64 (raw pointer) - extract pointer from NaN-boxed value
-                            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                            ensure_i64(builder, val)
                         } else {
                             val
                         }
@@ -16265,14 +16371,14 @@ fn compile_stmt(
                     let val_type = builder.func.dfg.value_type(val);
                     let val = if ret_type == types::I64 && val_type == types::F64 {
                         // Expression returned f64, need i64 - bitcast
-                        builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        ensure_i64(builder, val)
                     } else if ret_type == types::F64 && val_type == types::I64 {
                         // Expression returned i64 (pointer), NaN-box it for function returning f64
                         // This happens when closures return pointers (e.g., new Object())
                         inline_nanbox_pointer(builder, val)
                     } else if ret_type == types::I32 && val_type == types::F64 {
                         // Expression returned f64, need i32 - safe truncate via i64
-                        let i64_val = builder.ins().fcvt_to_sint(types::I64, val);
+                        let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, val);
                         builder.ins().ireduce(types::I32, i64_val)
                     } else if ret_type == types::I32 && val_type == types::I64 {
                         // Expression returned i64, need i32 - truncate
@@ -16425,7 +16531,7 @@ fn compile_stmt(
                                     let limit_val = builder.use_var(limit_info.var);
                                     // Safe conversion: f64 -> i64 -> i32 (avoids ARM64 SIGILL)
                                     let limit_f64 = ensure_f64(builder, limit_val);
-                                    let i64_val = builder.ins().fcvt_to_sint(types::I64, limit_f64);
+                                    let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, limit_f64);
                                     Some(builder.ins().ireduce(types::I32, i64_val))
                                 }
                             } else { None }
@@ -16452,7 +16558,7 @@ fn compile_stmt(
                                 // Safe conversion: f64 -> i64 -> i32 (avoids ARM64 SIGILL)
                                 let counter_val = builder.use_var(counter_info.var);
                                 let counter_f64 = ensure_f64(builder, counter_val);
-                                let counter_i64 = builder.ins().fcvt_to_sint(types::I64, counter_f64);
+                                let counter_i64 = builder.ins().fcvt_to_sint_sat(types::I64, counter_f64);
                                 let counter_i32 = builder.ins().ireduce(types::I32, counter_i64);
                                 builder.def_var(i32_var, counter_i32);
 
@@ -17137,7 +17243,7 @@ fn compile_stmt(
                                         // Safe conversion: f64 -> i64 -> i32 (avoids ARM64 SIGILL)
                                         let limit_val = builder.use_var(limit_info.var);
                                         let limit_f64 = ensure_f64(builder, limit_val);
-                                        let i64_val = builder.ins().fcvt_to_sint(types::I64, limit_f64);
+                                        let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, limit_f64);
                                         Some(builder.ins().ireduce(types::I32, i64_val))
                                     } else { None }
                                 } else { None }
@@ -17180,7 +17286,7 @@ fn compile_stmt(
                                 // Safe conversion: f64 -> i64 -> i32 (avoids ARM64 SIGILL)
                                 let idx_val = builder.use_var(idx_v);
                                 let idx_f64 = ensure_f64(builder, idx_val);
-                                let idx_i64 = builder.ins().fcvt_to_sint(types::I64, idx_f64);
+                                let idx_i64 = builder.ins().fcvt_to_sint_sat(types::I64, idx_f64);
                                 let idx_i32 = builder.ins().ireduce(types::I32, idx_i64);
                                 builder.def_var(i32_var, idx_i32);
 
@@ -17779,7 +17885,7 @@ fn compile_stmt(
                                         } else {
                                             // Safe conversion: f64 -> i64 -> i32
                                             let f64_val = builder.use_var(idx_info.var);
-                                            let i64_tmp = builder.ins().fcvt_to_sint(types::I64, f64_val);
+                                            let i64_tmp = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
                                             builder.ins().ireduce(types::I32, i64_tmp)
                                         }
                                     };
@@ -17917,7 +18023,7 @@ fn compile_stmt(
 
                         // Get the object pointer
                         let obj_f64 = builder.use_var(obj_info.var);
-                        let obj_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), obj_f64);
+                        let obj_ptr = ensure_i64(builder, obj_f64);
 
                         // Look up field offset from class metadata
                         if let Some(class_name) = &obj_info.class_name {
@@ -18313,7 +18419,7 @@ fn compile_stmt(
                                         } else {
                                             // Safe conversion: f64 -> i64 -> i32
                                             let f64_val = builder.use_var(idx_info.var);
-                                            let i64_tmp = builder.ins().fcvt_to_sint(types::I64, f64_val);
+                                            let i64_tmp = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
                                             builder.ins().ireduce(types::I32, i64_tmp)
                                         }
                                     };
@@ -18727,7 +18833,7 @@ fn compile_stmt(
                                     builder.ins().fcvt_from_sint(types::F64, val)
                                 }
                             } else if *slot_type == types::I64 && val_type == types::F64 {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                ensure_i64(builder, val)
                             } else if *slot_type == types::F64 && val_type == types::I64 {
                                 builder.ins().bitcast(types::F64, MemFlags::new(), val)
                             } else {
@@ -19800,7 +19906,7 @@ fn compile_expr(
                 let func_ref = module.declare_func_in_func(*func, builder.func);
 
                 // String value is already a pointer (bitcast from f64)
-                let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                let str_ptr = ensure_i64(builder, val);
                 let call = builder.ins().call(func_ref, &[str_ptr]);
                 let result_ptr = builder.inst_results(call)[0];
                 Ok(inline_nanbox_string(builder, result_ptr))
@@ -19989,7 +20095,7 @@ fn compile_expr(
             // Convert to i32 (character code)
             let code_val_type = builder.func.dfg.value_type(code_val);
             let code_i32 = if code_val_type == types::F64 {
-                builder.ins().fcvt_to_sint(types::I32, code_val)
+                builder.ins().fcvt_to_sint_sat(types::I32, code_val)
             } else if code_val_type == types::I64 {
                 builder.ins().ireduce(types::I32, code_val)
             } else {
@@ -20035,7 +20141,7 @@ fn compile_expr(
             // Compile data argument (string)
             let data_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, data_expr, this_ctx)?;
             // Convert f64 to i64 pointer for runtime call
-            let data_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), data_val);
+            let data_ptr = ensure_i64(builder, data_val);
             // Call js_crypto_sha256 runtime function
             let func = extern_funcs.get("js_crypto_sha256")
                 .ok_or_else(|| anyhow!("js_crypto_sha256 not declared"))?;
@@ -20049,7 +20155,7 @@ fn compile_expr(
             // Compile data argument (string)
             let data_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, data_expr, this_ctx)?;
             // Convert f64 to i64 pointer for runtime call
-            let data_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), data_val);
+            let data_ptr = ensure_i64(builder, data_val);
             // Call js_crypto_md5 runtime function
             let func = extern_funcs.get("js_crypto_md5")
                 .ok_or_else(|| anyhow!("js_crypto_md5 not declared"))?;
@@ -20202,12 +20308,12 @@ fn compile_expr(
         // Buffer operations
         Expr::BufferFrom { data, encoding } => {
             let data_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, data, this_ctx)?;
-            let data_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), data_val);
+            let data_ptr = ensure_i64(builder, data_val);
             // Encoding: 0=utf8, 1=hex, 2=base64
             let encoding_val = if let Some(enc_expr) = encoding {
                 let enc = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, enc_expr, this_ctx)?;
                 let enc_f64 = ensure_f64(builder, enc);
-                builder.ins().fcvt_to_sint(types::I32, enc_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, enc_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
@@ -20221,11 +20327,11 @@ fn compile_expr(
         Expr::BufferAlloc { size, fill } => {
             let size_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, size, this_ctx)?;
             let size_f64 = ensure_f64(builder, size_val);
-            let size_i32 = builder.ins().fcvt_to_sint(types::I32, size_f64);
+            let size_i32 = builder.ins().fcvt_to_sint_sat(types::I32, size_f64);
             let fill_val = if let Some(fill_expr) = fill {
                 let f = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, fill_expr, this_ctx)?;
                 let f_f64 = ensure_f64(builder, f);
-                builder.ins().fcvt_to_sint(types::I32, f_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, f_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
@@ -20239,7 +20345,7 @@ fn compile_expr(
         Expr::BufferAllocUnsafe(size) => {
             let size_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, size, this_ctx)?;
             let size_f64 = ensure_f64(builder, size_val);
-            let size_i32 = builder.ins().fcvt_to_sint(types::I32, size_f64);
+            let size_i32 = builder.ins().fcvt_to_sint_sat(types::I32, size_f64);
             let func = extern_funcs.get("js_buffer_alloc_unsafe")
                 .ok_or_else(|| anyhow!("js_buffer_alloc_unsafe not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20249,7 +20355,7 @@ fn compile_expr(
         }
         Expr::BufferConcat(list) => {
             let list_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, list, this_ctx)?;
-            let list_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), list_val);
+            let list_ptr = ensure_i64(builder, list_val);
             let func = extern_funcs.get("js_buffer_concat")
                 .ok_or_else(|| anyhow!("js_buffer_concat not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20259,7 +20365,7 @@ fn compile_expr(
         }
         Expr::BufferIsBuffer(obj) => {
             let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, obj, this_ctx)?;
-            let obj_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), obj_val);
+            let obj_ptr = ensure_i64(builder, obj_val);
             let func = extern_funcs.get("js_buffer_is_buffer")
                 .ok_or_else(|| anyhow!("js_buffer_is_buffer not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20270,7 +20376,7 @@ fn compile_expr(
         }
         Expr::BufferByteLength(string) => {
             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
-            let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), str_val);
+            let str_ptr = ensure_i64(builder, str_val);
             let func = extern_funcs.get("js_buffer_byte_length")
                 .ok_or_else(|| anyhow!("js_buffer_byte_length not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20280,11 +20386,11 @@ fn compile_expr(
         }
         Expr::BufferToString { buffer, encoding } => {
             let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
-            let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+            let buf_ptr = ensure_i64(builder, buf_val);
             let encoding_val = if let Some(enc_expr) = encoding {
                 let enc = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, enc_expr, this_ctx)?;
                 let enc_f64 = ensure_f64(builder, enc);
-                builder.ins().fcvt_to_sint(types::I32, enc_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, enc_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
@@ -20297,7 +20403,7 @@ fn compile_expr(
         }
         Expr::BufferLength(buffer) => {
             let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
-            let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+            let buf_ptr = ensure_i64(builder, buf_val);
             let func = extern_funcs.get("js_buffer_length")
                 .ok_or_else(|| anyhow!("js_buffer_length not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20307,18 +20413,18 @@ fn compile_expr(
         }
         Expr::BufferSlice { buffer, start, end } => {
             let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
-            let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+            let buf_ptr = ensure_i64(builder, buf_val);
             let start_val = if let Some(s) = start {
                 let sv = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, s, this_ctx)?;
                 let sv_f64 = ensure_f64(builder, sv);
-                builder.ins().fcvt_to_sint(types::I32, sv_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, sv_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
             let end_val = if let Some(e) = end {
                 let ev = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?;
                 let ev_f64 = ensure_f64(builder, ev);
-                builder.ins().fcvt_to_sint(types::I32, ev_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, ev_f64)
             } else {
                 builder.ins().iconst(types::I32, i32::MAX as i64)
             };
@@ -20331,27 +20437,27 @@ fn compile_expr(
         }
         Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
             let src_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, source, this_ctx)?;
-            let src_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), src_val);
+            let src_ptr = ensure_i64(builder, src_val);
             let dst_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, target, this_ctx)?;
-            let dst_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), dst_val);
+            let dst_ptr = ensure_i64(builder, dst_val);
             let ts = if let Some(t) = target_start {
                 let tv = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, t, this_ctx)?;
                 let tv_f64 = ensure_f64(builder, tv);
-                builder.ins().fcvt_to_sint(types::I32, tv_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, tv_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
             let ss = if let Some(s) = source_start {
                 let sv = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, s, this_ctx)?;
                 let sv_f64 = ensure_f64(builder, sv);
-                builder.ins().fcvt_to_sint(types::I32, sv_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, sv_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
             let se = if let Some(e) = source_end {
                 let ev = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?;
                 let ev_f64 = ensure_f64(builder, ev);
-                builder.ins().fcvt_to_sint(types::I32, ev_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, ev_f64)
             } else {
                 builder.ins().iconst(types::I32, -1)
             };
@@ -20364,20 +20470,20 @@ fn compile_expr(
         }
         Expr::BufferWrite { buffer, string, offset, encoding } => {
             let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
-            let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+            let buf_ptr = ensure_i64(builder, buf_val);
             let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
-            let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), str_val);
+            let str_ptr = ensure_i64(builder, str_val);
             let off = if let Some(o) = offset {
                 let ov = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, o, this_ctx)?;
                 let ov_f64 = ensure_f64(builder, ov);
-                builder.ins().fcvt_to_sint(types::I32, ov_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, ov_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
             let enc = if let Some(e) = encoding {
                 let ev = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, e, this_ctx)?;
                 let ev_f64 = ensure_f64(builder, ev);
-                builder.ins().fcvt_to_sint(types::I32, ev_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, ev_f64)
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
@@ -20390,9 +20496,9 @@ fn compile_expr(
         }
         Expr::BufferEquals { buffer, other } => {
             let buf1_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
-            let buf1_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf1_val);
+            let buf1_ptr = ensure_i64(builder, buf1_val);
             let buf2_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, other, this_ctx)?;
-            let buf2_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf2_val);
+            let buf2_ptr = ensure_i64(builder, buf2_val);
             let func = extern_funcs.get("js_buffer_equals")
                 .ok_or_else(|| anyhow!("js_buffer_equals not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20402,10 +20508,10 @@ fn compile_expr(
         }
         Expr::BufferIndexGet { buffer, index } => {
             let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
-            let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+            let buf_ptr = ensure_i64(builder, buf_val);
             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
             let idx_f64 = ensure_f64(builder, idx_val);
-            let idx_i32 = builder.ins().fcvt_to_sint(types::I32, idx_f64);
+            let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
             let func = extern_funcs.get("js_buffer_get")
                 .ok_or_else(|| anyhow!("js_buffer_get not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20415,13 +20521,13 @@ fn compile_expr(
         }
         Expr::BufferIndexSet { buffer, index, value } => {
             let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
-            let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+            let buf_ptr = ensure_i64(builder, buf_val);
             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
             let idx_f64 = ensure_f64(builder, idx_val);
-            let idx_i32 = builder.ins().fcvt_to_sint(types::I32, idx_f64);
+            let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
             let val_f64 = ensure_f64(builder, val);
-            let val_i32 = builder.ins().fcvt_to_sint(types::I32, val_f64);
+            let val_i32 = builder.ins().fcvt_to_sint_sat(types::I32, val_f64);
             let func = extern_funcs.get("js_buffer_set")
                 .ok_or_else(|| anyhow!("js_buffer_set not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20437,7 +20543,7 @@ fn compile_expr(
                 let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a, this_ctx)?;
                 // Check if arg is a number (allocate that size) or an array (convert from array)
                 // For now, treat it as an array and use buffer_from_array
-                let arg_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_val);
+                let arg_ptr = ensure_i64(builder, arg_val);
                 let func = extern_funcs.get("js_buffer_from_array")
                     .ok_or_else(|| anyhow!("js_buffer_from_array not declared"))?;
                 let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20459,7 +20565,7 @@ fn compile_expr(
         Expr::Uint8ArrayFrom(data) => {
             // Uint8Array.from(arrayLike) - same as buffer_from_array
             let data_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, data, this_ctx)?;
-            let data_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), data_val);
+            let data_ptr = ensure_i64(builder, data_val);
             let func = extern_funcs.get("js_buffer_from_array")
                 .ok_or_else(|| anyhow!("js_buffer_from_array not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20470,7 +20576,7 @@ fn compile_expr(
         Expr::Uint8ArrayLength(array) => {
             // Reuse buffer length
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
-            let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+            let arr_ptr = ensure_i64(builder, arr_val);
             let func = extern_funcs.get("js_buffer_length")
                 .ok_or_else(|| anyhow!("js_buffer_length not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20481,10 +20587,10 @@ fn compile_expr(
         Expr::Uint8ArrayGet { array, index } => {
             // Reuse buffer get
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
-            let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+            let arr_ptr = ensure_i64(builder, arr_val);
             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
             let idx_f64 = ensure_f64(builder, idx_val);
-            let idx_i32 = builder.ins().fcvt_to_sint(types::I32, idx_f64);
+            let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
             let func = extern_funcs.get("js_buffer_get")
                 .ok_or_else(|| anyhow!("js_buffer_get not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20495,13 +20601,13 @@ fn compile_expr(
         Expr::Uint8ArraySet { array, index, value } => {
             // Reuse buffer set
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
-            let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+            let arr_ptr = ensure_i64(builder, arr_val);
             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
             let idx_f64 = ensure_f64(builder, idx_val);
-            let idx_i32 = builder.ins().fcvt_to_sint(types::I32, idx_f64);
+            let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
             let val_f64 = ensure_f64(builder, val);
-            let val_i32 = builder.ins().fcvt_to_sint(types::I32, val_f64);
+            let val_i32 = builder.ins().fcvt_to_sint_sat(types::I32, val_f64);
             let func = extern_funcs.get("js_buffer_set")
                 .ok_or_else(|| anyhow!("js_buffer_set not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20511,10 +20617,10 @@ fn compile_expr(
         // Child Process operations
         Expr::ChildProcessExecSync { command, options } => {
             let cmd_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, command, this_ctx)?;
-            let cmd_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), cmd_val);
+            let cmd_ptr = ensure_i64(builder, cmd_val);
             let opts_ptr = if let Some(opts) = options {
                 let ov = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, opts, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), ov)
+                ensure_i64(builder, ov)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
@@ -20527,16 +20633,16 @@ fn compile_expr(
         }
         Expr::ChildProcessSpawnSync { command, args, options } => {
             let cmd_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, command, this_ctx)?;
-            let cmd_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), cmd_val);
+            let cmd_ptr = ensure_i64(builder, cmd_val);
             let args_ptr = if let Some(a) = args {
                 let av = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), av)
+                ensure_i64(builder, av)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
             let opts_ptr = if let Some(opts) = options {
                 let ov = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, opts, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), ov)
+                ensure_i64(builder, ov)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
@@ -20691,13 +20797,13 @@ fn compile_expr(
         Expr::NetCreateServer { options, connection_listener } => {
             let opts_ptr = if let Some(opts) = options {
                 let ov = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, opts, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), ov)
+                ensure_i64(builder, ov)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
             let listener_ptr = if let Some(l) = connection_listener {
                 let lv = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, l, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), lv)
+                ensure_i64(builder, lv)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
@@ -20710,16 +20816,16 @@ fn compile_expr(
         Expr::NetCreateConnection { port, host, connect_listener } | Expr::NetConnect { port, host, connect_listener } => {
             let port_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, port, this_ctx)?;
             let port_f64 = ensure_f64(builder, port_val);
-            let port_i32 = builder.ins().fcvt_to_sint(types::I32, port_f64);
+            let port_i32 = builder.ins().fcvt_to_sint_sat(types::I32, port_f64);
             let host_ptr = if let Some(h) = host {
                 let hv = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, h, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), hv)
+                ensure_i64(builder, hv)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
             let listener_ptr = if let Some(l) = connect_listener {
                 let lv = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, l, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), lv)
+                ensure_i64(builder, lv)
             } else {
                 builder.ins().iconst(types::I64, 0)
             };
@@ -20926,7 +21032,7 @@ fn compile_expr(
         }
         Expr::UrlGetHref(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_href")
                 .ok_or_else(|| anyhow!("js_url_get_href not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20936,7 +21042,7 @@ fn compile_expr(
         }
         Expr::UrlGetPathname(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_pathname")
                 .ok_or_else(|| anyhow!("js_url_get_pathname not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20946,7 +21052,7 @@ fn compile_expr(
         }
         Expr::UrlGetProtocol(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_protocol")
                 .ok_or_else(|| anyhow!("js_url_get_protocol not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20956,7 +21062,7 @@ fn compile_expr(
         }
         Expr::UrlGetHost(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_host")
                 .ok_or_else(|| anyhow!("js_url_get_host not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20966,7 +21072,7 @@ fn compile_expr(
         }
         Expr::UrlGetHostname(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_hostname")
                 .ok_or_else(|| anyhow!("js_url_get_hostname not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20976,7 +21082,7 @@ fn compile_expr(
         }
         Expr::UrlGetPort(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_port")
                 .ok_or_else(|| anyhow!("js_url_get_port not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20986,7 +21092,7 @@ fn compile_expr(
         }
         Expr::UrlGetSearch(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_search")
                 .ok_or_else(|| anyhow!("js_url_get_search not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -20996,7 +21102,7 @@ fn compile_expr(
         }
         Expr::UrlGetHash(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_hash")
                 .ok_or_else(|| anyhow!("js_url_get_hash not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -21006,7 +21112,7 @@ fn compile_expr(
         }
         Expr::UrlGetOrigin(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_origin")
                 .ok_or_else(|| anyhow!("js_url_get_origin not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -21016,7 +21122,7 @@ fn compile_expr(
         }
         Expr::UrlGetSearchParams(url_expr) => {
             let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, url_expr, this_ctx)?;
-            let url_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+            let url_ptr = ensure_i64(builder, url_val);
             let func = extern_funcs.get("js_url_get_search_params")
                 .ok_or_else(|| anyhow!("js_url_get_search_params not declared"))?;
             let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -21110,7 +21216,7 @@ fn compile_expr(
                 Some(init_expr) => {
                     // new URLSearchParams(init)
                     let init_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, init_expr, this_ctx)?;
-                    let init_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), init_val);
+                    let init_i64 = ensure_i64(builder, init_val);
 
                     let new_func = extern_funcs.get("js_url_search_params_new")
                         .ok_or_else(|| anyhow!("js_url_search_params_new not declared"))?;
@@ -21123,9 +21229,9 @@ fn compile_expr(
         }
         Expr::UrlSearchParamsGet { params, name } => {
             let params_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, params, this_ctx)?;
-            let params_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), params_val);
+            let params_ptr = ensure_i64(builder, params_val);
             let name_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, name, this_ctx)?;
-            let name_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), name_val);
+            let name_ptr = ensure_i64(builder, name_val);
 
             let func = extern_funcs.get("js_url_search_params_get")
                 .ok_or_else(|| anyhow!("js_url_search_params_get not declared"))?;
@@ -21137,9 +21243,9 @@ fn compile_expr(
         }
         Expr::UrlSearchParamsHas { params, name } => {
             let params_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, params, this_ctx)?;
-            let params_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), params_val);
+            let params_ptr = ensure_i64(builder, params_val);
             let name_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, name, this_ctx)?;
-            let name_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), name_val);
+            let name_ptr = ensure_i64(builder, name_val);
 
             let func = extern_funcs.get("js_url_search_params_has")
                 .ok_or_else(|| anyhow!("js_url_search_params_has not declared"))?;
@@ -21149,11 +21255,11 @@ fn compile_expr(
         }
         Expr::UrlSearchParamsSet { params, name, value } => {
             let params_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, params, this_ctx)?;
-            let params_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), params_val);
+            let params_ptr = ensure_i64(builder, params_val);
             let name_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, name, this_ctx)?;
-            let name_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), name_val);
+            let name_ptr = ensure_i64(builder, name_val);
             let value_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-            let value_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), value_val);
+            let value_ptr = ensure_i64(builder, value_val);
 
             let func = extern_funcs.get("js_url_search_params_set")
                 .ok_or_else(|| anyhow!("js_url_search_params_set not declared"))?;
@@ -21164,11 +21270,11 @@ fn compile_expr(
         }
         Expr::UrlSearchParamsAppend { params, name, value } => {
             let params_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, params, this_ctx)?;
-            let params_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), params_val);
+            let params_ptr = ensure_i64(builder, params_val);
             let name_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, name, this_ctx)?;
-            let name_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), name_val);
+            let name_ptr = ensure_i64(builder, name_val);
             let value_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-            let value_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), value_val);
+            let value_ptr = ensure_i64(builder, value_val);
 
             let func = extern_funcs.get("js_url_search_params_append")
                 .ok_or_else(|| anyhow!("js_url_search_params_append not declared"))?;
@@ -21179,9 +21285,9 @@ fn compile_expr(
         }
         Expr::UrlSearchParamsDelete { params, name } => {
             let params_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, params, this_ctx)?;
-            let params_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), params_val);
+            let params_ptr = ensure_i64(builder, params_val);
             let name_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, name, this_ctx)?;
-            let name_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), name_val);
+            let name_ptr = ensure_i64(builder, name_val);
 
             let func = extern_funcs.get("js_url_search_params_delete")
                 .ok_or_else(|| anyhow!("js_url_search_params_delete not declared"))?;
@@ -21192,7 +21298,7 @@ fn compile_expr(
         }
         Expr::UrlSearchParamsToString(params) => {
             let params_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, params, this_ctx)?;
-            let params_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), params_val);
+            let params_ptr = ensure_i64(builder, params_val);
 
             let func = extern_funcs.get("js_url_search_params_to_string")
                 .ok_or_else(|| anyhow!("js_url_search_params_to_string not declared"))?;
@@ -21204,9 +21310,9 @@ fn compile_expr(
         }
         Expr::UrlSearchParamsGetAll { params, name } => {
             let params_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, params, this_ctx)?;
-            let params_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), params_val);
+            let params_ptr = ensure_i64(builder, params_val);
             let name_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, name, this_ctx)?;
-            let name_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), name_val);
+            let name_ptr = ensure_i64(builder, name_val);
 
             let func = extern_funcs.get("js_url_search_params_get_all")
                 .ok_or_else(|| anyhow!("js_url_search_params_get_all not declared"))?;
@@ -21279,7 +21385,7 @@ fn compile_expr(
             let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
                 .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
             let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
-            let regex_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), regex_val);
+            let regex_ptr = ensure_i64(builder, regex_val);
             let string_f64 = ensure_f64(builder, string_val);
             let string_call = builder.ins().call(get_str_ref, &[string_f64]);
             let string_ptr = builder.inst_results(string_call)[0];
@@ -21312,7 +21418,7 @@ fn compile_expr(
             let string_f64 = ensure_f64(builder, string_val);
             let string_call = builder.ins().call(get_str_ref, &[string_f64]);
             let string_ptr = builder.inst_results(string_call)[0];
-            let regex_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), regex_val);
+            let regex_ptr = ensure_i64(builder, regex_val);
 
             // Call js_string_match
             let func = extern_funcs.get("js_string_match")
@@ -21347,7 +21453,7 @@ fn compile_expr(
 
             let result_ptr = if is_regex_pattern {
                 // Regex pattern: bitcast to I64 raw pointer for RegExpHeader
-                let pattern_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), pattern_val);
+                let pattern_ptr = ensure_i64(builder, pattern_val);
                 let func = extern_funcs.get("js_string_replace_regex")
                     .ok_or_else(|| anyhow!("js_string_replace_regex not declared"))?;
                 let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -21386,7 +21492,7 @@ fn compile_expr(
                 let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
                 let call = builder.ins().call(box_get_ref, &[box_ptr]);
                 let val_f64 = builder.inst_results(call)[0];
-                builder.ins().bitcast(types::I64, MemFlags::new(), val_f64)
+                ensure_i64(builder, val_f64)
             } else {
                 let arr_val = builder.use_var(info.var);
                 ensure_i64(builder, arr_val)
@@ -21425,7 +21531,7 @@ fn compile_expr(
                     Expr::JsonParse(_) | Expr::Closure { .. });
                 if is_pointer_expr {
                     // It's a pointer stored as f64 - bitcast to i64 and use jsvalue push
-                    let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    let val_i64 = ensure_i64(builder, val);
                     ("js_array_push_jsvalue", val_i64)
                 } else {
                     // Regular f64 value
@@ -21521,7 +21627,7 @@ fn compile_expr(
                 let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
                 let call = builder.ins().call(box_get_ref, &[box_ptr]);
                 let val_f64 = builder.inst_results(call)[0];
-                builder.ins().bitcast(types::I64, MemFlags::new(), val_f64)
+                ensure_i64(builder, val_f64)
             } else {
                 let arr_val = builder.use_var(info.var);
                 ensure_i64(builder, arr_val)
@@ -21555,7 +21661,7 @@ fn compile_expr(
                     Expr::New { .. } | Expr::MapNew | Expr::SetNew |
                     Expr::JsonParse(_) | Expr::Closure { .. });
                 if is_pointer_expr {
-                    let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    let val_i64 = ensure_i64(builder, val);
                     ("js_array_unshift_jsvalue", val_i64)
                 } else {
                     ("js_array_unshift_f64", val)
@@ -21631,7 +21737,7 @@ fn compile_expr(
             } else {
                 // Array indexOf
                 let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
-                let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+                let arr_ptr = ensure_i64(builder, arr_val);
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
                 // Use jsvalue comparison for string values (handles NaN-boxed strings)
@@ -21764,13 +21870,13 @@ fn compile_expr(
             // Compile start index and convert to i32
             let start_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, start, this_ctx)?;
             let start_f64 = ensure_f64(builder, start_val);
-            let start_i32 = builder.ins().fcvt_to_sint(types::I32, start_f64);
+            let start_i32 = builder.ins().fcvt_to_sint_sat(types::I32, start_f64);
 
             // Compile end index or use i32::MAX as sentinel for "no end"
             let end_i32 = if let Some(end_expr) = end {
                 let end_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, end_expr, this_ctx)?;
                 let end_f64 = ensure_f64(builder, end_val);
-                builder.ins().fcvt_to_sint(types::I32, end_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, end_f64)
             } else {
                 builder.ins().iconst(types::I32, i32::MAX as i64)
             };
@@ -21817,19 +21923,19 @@ fn compile_expr(
             } else if info.is_pointer && !info.is_union {
                 arr_val // Already i64
             } else {
-                builder.ins().bitcast(types::I64, MemFlags::new(), arr_val)
+                ensure_i64(builder, arr_val)
             };
 
             // Compile start index
             let start_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, start, this_ctx)?;
             let start_f64 = ensure_f64(builder, start_val);
-            let start_i32 = builder.ins().fcvt_to_sint(types::I32, start_f64);
+            let start_i32 = builder.ins().fcvt_to_sint_sat(types::I32, start_f64);
 
             // Compile delete count (default to i32::MAX if not provided, meaning delete to end)
             let delete_i32 = if let Some(dc_expr) = delete_count {
                 let dc_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, dc_expr, this_ctx)?;
                 let dc_f64 = ensure_f64(builder, dc_val);
-                builder.ins().fcvt_to_sint(types::I32, dc_f64)
+                builder.ins().fcvt_to_sint_sat(types::I32, dc_f64)
             } else {
                 builder.ins().iconst(types::I32, i32::MAX as i64)
             };
@@ -22193,15 +22299,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                        ensure_i64(builder, map_val)
                     }
                 } else {
                     let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                    ensure_i64(builder, map_val)
                 }
             } else {
                 let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                ensure_i64(builder, map_val)
             };
             let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key, this_ctx)?;
             let key_f64 = if builder.func.dfg.value_type(key_val) == types::I64 {
@@ -22229,15 +22335,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                        ensure_i64(builder, map_val)
                     }
                 } else {
                     let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                    ensure_i64(builder, map_val)
                 }
             } else {
                 let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                ensure_i64(builder, map_val)
             };
             let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key, this_ctx)?;
             let key_f64 = if builder.func.dfg.value_type(key_val) == types::I64 {
@@ -22266,15 +22372,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                        ensure_i64(builder, map_val)
                     }
                 } else {
                     let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                    ensure_i64(builder, map_val)
                 }
             } else {
                 let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                ensure_i64(builder, map_val)
             };
             let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, key, this_ctx)?;
             let key_f64 = if builder.func.dfg.value_type(key_val) == types::I64 {
@@ -22303,15 +22409,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                        ensure_i64(builder, map_val)
                     }
                 } else {
                     let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                    ensure_i64(builder, map_val)
                 }
             } else {
                 let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                ensure_i64(builder, map_val)
             };
 
             let size_func = extern_funcs.get("js_map_size")
@@ -22330,15 +22436,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                        ensure_i64(builder, map_val)
                     }
                 } else {
                     let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                    ensure_i64(builder, map_val)
                 }
             } else {
                 let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                ensure_i64(builder, map_val)
             };
 
             let clear_func = extern_funcs.get("js_map_clear")
@@ -22356,15 +22462,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                        ensure_i64(builder, map_val)
                     }
                 } else {
                     let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                    ensure_i64(builder, map_val)
                 }
             } else {
                 let map_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, map, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), map_val)
+                ensure_i64(builder, map_val)
             };
 
             // Determine which runtime function to call
@@ -22414,7 +22520,7 @@ fn compile_expr(
                 let box_get_ref = module.declare_func_in_func(*box_get_func, builder.func);
                 let call = builder.ins().call(box_get_ref, &[box_ptr]);
                 let val_f64 = builder.inst_results(call)[0];
-                builder.ins().bitcast(types::I64, MemFlags::new(), val_f64)
+                ensure_i64(builder, val_f64)
             } else {
                 let set_val = builder.use_var(info.var);
                 ensure_i64(builder, set_val)
@@ -22478,15 +22584,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                        ensure_i64(builder, set_val)
                     }
                 } else {
                     let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                    ensure_i64(builder, set_val)
                 }
             } else {
                 let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                ensure_i64(builder, set_val)
             };
             let value_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
@@ -22526,15 +22632,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                        ensure_i64(builder, set_val)
                     }
                 } else {
                     let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                    ensure_i64(builder, set_val)
                 }
             } else {
                 let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                ensure_i64(builder, set_val)
             };
             let value_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
@@ -22574,15 +22680,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                        ensure_i64(builder, set_val)
                     }
                 } else {
                     let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                    ensure_i64(builder, set_val)
                 }
             } else {
                 let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                ensure_i64(builder, set_val)
             };
 
             let size_func = extern_funcs.get("js_set_size")
@@ -22601,15 +22707,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                        ensure_i64(builder, set_val)
                     }
                 } else {
                     let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                    ensure_i64(builder, set_val)
                 }
             } else {
                 let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                ensure_i64(builder, set_val)
             };
 
             let clear_func = extern_funcs.get("js_set_clear")
@@ -22627,15 +22733,15 @@ fn compile_expr(
                         { let v = builder.use_var(info.var); ensure_i64(builder, v) }
                     } else {
                         let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                        builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                        ensure_i64(builder, set_val)
                     }
                 } else {
                     let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                    ensure_i64(builder, set_val)
                 }
             } else {
                 let set_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, set, this_ctx)?;
-                builder.ins().bitcast(types::I64, MemFlags::new(), set_val)
+                ensure_i64(builder, set_val)
             };
 
             let func = extern_funcs.get("js_set_to_array")
@@ -22668,7 +22774,7 @@ fn compile_expr(
                 // For pointer-type boxed variables, the global slot stores raw i64 bits.
                 // js_box_get returns them as f64; bitcast back to i64 for pointer operations.
                 if (info.is_pointer || info.is_array) && !info.is_string && !info.is_union {
-                    Ok(builder.ins().bitcast(types::I64, MemFlags::new(), val_f64))
+                    Ok(ensure_i64(builder, val_f64))
                 } else {
                     Ok(val_f64)
                 }
@@ -22751,7 +22857,7 @@ fn compile_expr(
                                             let current = builder.use_var(info.var);
                                             let rhs_val = builder.use_var(right_info.var);
                                             let rhs_f64 = ensure_f64(builder, rhs_val);
-                                            let rhs_i32 = builder.ins().fcvt_to_sint(types::I32, rhs_f64);
+                                            let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs_f64);
                                             let new_val = builder.ins().iadd(current, rhs_i32);
                                             builder.def_var(info.var, new_val);
                                             return Ok(builder.ins().fcvt_from_sint(types::F64, new_val));
@@ -22776,7 +22882,7 @@ fn compile_expr(
                 // Fallback: compile expression and convert to i32
                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
                 let val_f64 = ensure_f64(builder, val);
-                let i32_val = builder.ins().fcvt_to_sint(types::I32, val_f64);
+                let i32_val = builder.ins().fcvt_to_sint_sat(types::I32, val_f64);
                 builder.def_var(info.var, i32_val);
                 return Ok(val);
             }
@@ -22905,7 +23011,7 @@ fn compile_expr(
                 Ok(val)
             } else if info.is_union && is_string_expr_for_union(value, locals) {
                 // For union types with string values, NaN-box the pointer using STRING_TAG (inline, no FFI)
-                let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                let ptr = ensure_i64(builder, val);
                 let boxed_val = inline_nanbox_string(builder, ptr);
                 builder.def_var(info.var, boxed_val);
                 Ok(boxed_val)
@@ -22940,14 +23046,14 @@ fn compile_expr(
                         let result = builder.ins().bitcast(types::F64, MemFlags::new(), val);
                         result
                     } else if var_type == types::I64 && val_type == types::F64 {
-                        let result = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                        let result = ensure_i64(builder, val);
                         result
                     } else if val_type == types::I32 && var_type == types::F64 {
                         builder.ins().fcvt_from_sint(types::F64, val)
                     } else if val_type == types::I32 && var_type == types::I64 {
                         builder.ins().sextend(types::I64, val)
                     } else if var_type == types::I32 && val_type == types::F64 {
-                        builder.ins().fcvt_to_sint(types::I32, val)
+                        builder.ins().fcvt_to_sint_sat(types::I32, val)
                     } else {
                         val
                     }
@@ -22958,7 +23064,7 @@ fn compile_expr(
                 // OPTIMIZATION: Update i32 shadow for integer variables
                 if let Some(shadow_var) = info.i32_shadow {
                     let val_f64 = ensure_f64(builder, val);
-                    let i32_val = builder.ins().fcvt_to_sint(types::I32, val_f64);
+                    let i32_val = builder.ins().fcvt_to_sint_sat(types::I32, val_f64);
                     builder.def_var(shadow_var, i32_val);
                 }
                 Ok(val)
@@ -23054,7 +23160,7 @@ fn compile_expr(
 
                 // Store the new value - convert back to i64 if variable is stored as i64
                 let store_val = if info.is_pointer && !info.is_union {
-                    builder.ins().bitcast(types::I64, MemFlags::new(), new_val)
+                    ensure_i64(builder, new_val)
                 } else {
                     new_val
                 };
@@ -23653,26 +23759,26 @@ fn compile_expr(
                 // Bitwise operations - JavaScript works on 32-bit integers
                 // Convert f64 to i32, perform op, convert back to f64
                 BinaryOp::BitAnd => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint(types::I32, rhs);
+                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
+                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
                     let result = builder.ins().band(lhs_i32, rhs_i32);
                     builder.ins().fcvt_from_sint(types::F64, result)
                 }
                 BinaryOp::BitOr => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint(types::I32, rhs);
+                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
+                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
                     let result = builder.ins().bor(lhs_i32, rhs_i32);
                     builder.ins().fcvt_from_sint(types::F64, result)
                 }
                 BinaryOp::BitXor => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint(types::I32, rhs);
+                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
+                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
                     let result = builder.ins().bxor(lhs_i32, rhs_i32);
                     builder.ins().fcvt_from_sint(types::F64, result)
                 }
                 BinaryOp::Shl => {
-                    let lhs_i32 = builder.ins().fcvt_to_sint(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint(types::I32, rhs);
+                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
+                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
                     // JavaScript only uses the low 5 bits of the shift amount
                     let shift_mask = builder.ins().iconst(types::I32, 0x1f);
                     let shift_amt = builder.ins().band(rhs_i32, shift_mask);
@@ -23681,8 +23787,8 @@ fn compile_expr(
                 }
                 BinaryOp::Shr => {
                     // Signed right shift
-                    let lhs_i32 = builder.ins().fcvt_to_sint(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint(types::I32, rhs);
+                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
+                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
                     // JavaScript only uses the low 5 bits of the shift amount
                     let shift_mask = builder.ins().iconst(types::I32, 0x1f);
                     let shift_amt = builder.ins().band(rhs_i32, shift_mask);
@@ -23691,8 +23797,8 @@ fn compile_expr(
                 }
                 BinaryOp::UShr => {
                     // Unsigned right shift - returns unsigned result
-                    let lhs_i32 = builder.ins().fcvt_to_sint(types::I32, lhs);
-                    let rhs_i32 = builder.ins().fcvt_to_sint(types::I32, rhs);
+                    let lhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, lhs);
+                    let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs);
                     // JavaScript only uses the low 5 bits of the shift amount
                     let shift_mask = builder.ins().iconst(types::I32, 0x1f);
                     let shift_amt = builder.ins().band(rhs_i32, shift_mask);
@@ -23767,7 +23873,7 @@ fn compile_expr(
                 UnaryOp::BitNot => {
                     // Bitwise NOT: ~x
                     // Convert f64 to i32, apply bnot, convert back to f64
-                    let val_i32 = builder.ins().fcvt_to_sint(types::I32, val);
+                    let val_i32 = builder.ins().fcvt_to_sint_sat(types::I32, val);
                     let result = builder.ins().bnot(val_i32);
                     Ok(builder.ins().fcvt_from_sint(types::F64, result))
                 }
@@ -23916,11 +24022,11 @@ fn compile_expr(
                 let is_lhs_null = matches!(left.as_ref(), Expr::Null | Expr::Undefined);
                 let val_i64 = if is_lhs_null {
                     if rhs_type == types::I64 { rhs } else {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
+                        ensure_i64(builder, rhs)
                     }
                 } else {
                     if lhs_type == types::I64 { lhs } else {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), lhs)
+                        ensure_i64(builder, lhs)
                     }
                 };
 
@@ -23956,7 +24062,7 @@ fn compile_expr(
                 let is_lhs_null = matches!(left.as_ref(), Expr::Null | Expr::Undefined);
                 let value_f64 = if is_lhs_null { rhs_f64 } else { lhs_f64 };
 
-                let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), value_f64);
+                let val_i64 = ensure_i64(builder, value_f64);
 
                 // Check 1: value == TAG_NULL (0x7FFC_0000_0000_0002)
                 let null_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
@@ -24035,8 +24141,8 @@ fn compile_expr(
                         // Bitcast f64 to i64 and do integer comparison
                         let lhs_f64 = ensure_f64(builder, lhs);
                         let rhs_f64 = ensure_f64(builder, rhs);
-                        let lhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs_f64);
-                        let rhs_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), rhs_f64);
+                        let lhs_i64 = ensure_i64(builder, lhs_f64);
+                        let rhs_i64 = ensure_i64(builder, rhs_f64);
                         let icc = match op {
                             CompareOp::Eq => IntCC::Equal,
                             CompareOp::Ne => IntCC::NotEqual,
@@ -24108,7 +24214,7 @@ fn compile_expr(
                     // For i64->f64 conversion, we need to NaN-box the pointer to preserve type info
                     let rhs_type = builder.func.dfg.value_type(rhs);
                     let rhs_converted = if merge_type == types::I64 && rhs_type == types::F64 {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
+                        ensure_i64(builder, rhs)
                     } else if merge_type == types::I64 && rhs_type == types::I32 {
                         builder.ins().sextend(types::I64, rhs)
                     } else if merge_type == types::F64 && rhs_type == types::I64 {
@@ -24165,7 +24271,7 @@ fn compile_expr(
                     // For i64->f64 conversion, we need to NaN-box the pointer to preserve type info
                     let rhs_type = builder.func.dfg.value_type(rhs);
                     let rhs_converted = if lhs_type == types::I64 && rhs_type == types::F64 {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
+                        ensure_i64(builder, rhs)
                     } else if lhs_type == types::I64 && rhs_type == types::I32 {
                         builder.ins().sextend(types::I64, rhs)
                     } else if lhs_type == types::F64 && rhs_type == types::I64 {
@@ -24216,7 +24322,7 @@ fn compile_expr(
                     // Convert rhs to lhs_type if needed
                     let rhs_type = builder.func.dfg.value_type(rhs);
                     let rhs_converted = if lhs_type == types::I64 && rhs_type == types::F64 {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), rhs)
+                        ensure_i64(builder, rhs)
                     } else if lhs_type == types::I64 && rhs_type == types::I32 {
                         builder.ins().sextend(types::I64, rhs)
                     } else if lhs_type == types::F64 && rhs_type == types::I64 {
@@ -24336,7 +24442,7 @@ fn compile_expr(
 
                             if is_union_param && i < args.len() && is_string_arg_expr(&args[i], locals) {
                                 // String being passed to union-typed parameter: NaN-box with STRING_TAG
-                                let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                                let ptr = ensure_i64(builder, val);
                                 let nanbox_func = extern_funcs.get("js_nanbox_string")
                                     .expect("js_nanbox_string not declared");
                                 let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -24384,7 +24490,8 @@ fn compile_expr(
                                 let expected_type = actual_sig.signature.params[i].value_type;
                                 let actual_type = builder.func.dfg.value_type(val);
                                 if expected_type == types::I64 && actual_type == types::F64 {
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                    // Strip NaN-box tag bits to get raw pointer
+                                    ensure_i64(builder, val)
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
                                     // i64 pointer -> f64: NaN-box with POINTER_TAG, not just bitcast
                                     // Raw bitcast would produce tiny denormalized floats instead of proper NaN-boxed values
@@ -24484,7 +24591,7 @@ fn compile_expr(
                                                             Expr::JsonParse(_) | Expr::Closure { .. });
                                                         if is_pointer_expr {
                                                             // It's a pointer stored as f64 - bitcast to i64 and use jsvalue push
-                                                            let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                                                            let val_i64 = ensure_i64(builder, val);
                                                             (format!("js_array_{}_jsvalue", base_func), val_i64)
                                                         } else {
                                                             // Regular f64 value
@@ -24956,7 +25063,7 @@ fn compile_expr(
                                 let bigint_ptr = if builder.func.dfg.value_type(arg_vals[0]) == types::I64 {
                                     arg_vals[0]
                                 } else {
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0])
+                                    ensure_i64(builder, arg_vals[0])
                                 };
                                 builder.ins().call(func_ref, &[bigint_ptr]);
                                 return Ok(builder.ins().f64const(0.0));
@@ -24969,7 +25076,7 @@ fn compile_expr(
                                 let arr_ptr = if builder.func.dfg.value_type(arg_vals[0]) == types::I64 {
                                     arg_vals[0]
                                 } else {
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0])
+                                    ensure_i64(builder, arg_vals[0])
                                 };
                                 builder.ins().call(func_ref, &[arr_ptr]);
                                 return Ok(builder.ins().f64const(0.0));
@@ -25288,7 +25395,7 @@ fn compile_expr(
                                 let bigint_ptr = if builder.func.dfg.value_type(arg_vals[0]) == types::I64 {
                                     arg_vals[0]
                                 } else {
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0])
+                                    ensure_i64(builder, arg_vals[0])
                                 };
                                 builder.ins().call(func_ref, &[bigint_ptr]);
                                 return Ok(builder.ins().f64const(0.0));
@@ -25467,7 +25574,7 @@ fn compile_expr(
                                 let bigint_ptr = if builder.func.dfg.value_type(arg_vals[0]) == types::I64 {
                                     arg_vals[0]
                                 } else {
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0])
+                                    ensure_i64(builder, arg_vals[0])
                                 };
                                 builder.ins().call(func_ref, &[bigint_ptr]);
                                 return Ok(builder.ins().f64const(0.0));
@@ -25674,13 +25781,13 @@ fn compile_expr(
 
                                         let start = if arg_vals.len() > 0 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
                                         let end = if arg_vals.len() > 1 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             // Use a large value to mean "to end"
                                             builder.ins().iconst(types::I32, i32::MAX as i64)
@@ -25703,13 +25810,13 @@ fn compile_expr(
 
                                         let start = if arg_vals.len() > 0 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
                                         let end = if arg_vals.len() > 1 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             // Use a large value to mean "to end"
                                             builder.ins().iconst(types::I32, i32::MAX as i64)
@@ -25777,7 +25884,7 @@ fn compile_expr(
 
                                         let target_len = if !arg_vals.is_empty() {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
@@ -25815,7 +25922,7 @@ fn compile_expr(
 
                                         let target_len = if !arg_vals.is_empty() {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
@@ -25862,7 +25969,7 @@ fn compile_expr(
                                             let func_ref = module.declare_func_in_func(*index_of_func, builder.func);
                                             // Convert f64 fromIndex to i32
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            let from_index = builder.ins().fcvt_to_sint(types::I32, arg_f64);
+                                            let from_index = builder.ins().fcvt_to_sint_sat(types::I32, arg_f64);
                                             let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr, from_index]);
                                             builder.inst_results(call)[0]
                                         } else {
@@ -25917,7 +26024,7 @@ fn compile_expr(
 
                                             let (replace_func, pattern_ptr) = if is_regex {
                                                 // Regex pattern: bitcast to raw I64 pointer
-                                                let p = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                                let p = ensure_i64(builder, arg_vals[0]);
                                                 let f = extern_funcs.get("js_string_replace_regex")
                                                     .ok_or_else(|| anyhow!("js_string_replace_regex not declared"))?;
                                                 (f, p)
@@ -25951,7 +26058,7 @@ fn compile_expr(
                                             let func_ref = module.declare_func_in_func(*func, builder.func);
                                             let count = {
                                                 let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                                builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                                builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                             };
                                             let call = builder.ins().call(func_ref, &[str_ptr, count]);
                                             let result_ptr = builder.inst_results(call)[0];
@@ -25971,7 +26078,7 @@ fn compile_expr(
                                             let func_ref = module.declare_func_in_func(*func, builder.func);
                                             let index = {
                                                 let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                                builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                                builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                             };
                                             let call = builder.ins().call(func_ref, &[str_ptr, index]);
                                             let result_ptr = builder.inst_results(call)[0];
@@ -26024,7 +26131,7 @@ fn compile_expr(
                             // Handle buffer method calls
                             if info.is_buffer {
                                 let buf_val = builder.use_var(info.var);
-                                let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+                                let buf_ptr = ensure_i64(builder, buf_val);
 
                                 match property.as_str() {
                                     "toString" => {
@@ -26046,13 +26153,13 @@ fn compile_expr(
                                         // buf.slice(start?, end?)
                                         let start = if arg_vals.len() > 0 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
                                         let end = if arg_vals.len() > 1 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, i32::MAX as i64)
                                         };
@@ -26065,7 +26172,7 @@ fn compile_expr(
                                     }
                                     "equals" => {
                                         // buf.equals(other)
-                                        let other_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                        let other_ptr = ensure_i64(builder, arg_vals[0]);
                                         let func = extern_funcs.get("js_buffer_equals")
                                             .ok_or_else(|| anyhow!("js_buffer_equals not declared"))?;
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
@@ -26076,22 +26183,22 @@ fn compile_expr(
                                     }
                                     "copy" => {
                                         // buf.copy(target, targetStart?, sourceStart?, sourceEnd?)
-                                        let target_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                        let target_ptr = ensure_i64(builder, arg_vals[0]);
                                         let target_start = if arg_vals.len() > 1 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
                                         let source_start = if arg_vals.len() > 2 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[2]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
                                         let source_end = if arg_vals.len() > 3 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[3]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, i32::MAX as i64)
                                         };
@@ -26104,10 +26211,10 @@ fn compile_expr(
                                     }
                                     "write" => {
                                         // buf.write(string, offset?, encoding?)
-                                        let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                        let str_ptr = ensure_i64(builder, arg_vals[0]);
                                         let offset = if arg_vals.len() > 1 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
@@ -26371,7 +26478,7 @@ fn compile_expr(
                                         let event_f64 = ensure_f64(builder, arg_vals[0]);
                                         let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
                                         let event_ptr = builder.inst_results(event_call)[0];
-                                        let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                        let callback_ptr = ensure_i64(builder, arg_vals[1]);
 
                                         let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
                                         let _ = builder.inst_results(call)[0];
@@ -26389,7 +26496,7 @@ fn compile_expr(
                                         let event_f64 = ensure_f64(builder, arg_vals[0]);
                                         let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
                                         let event_ptr = builder.inst_results(event_call)[0];
-                                        let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                        let callback_ptr = ensure_i64(builder, arg_vals[1]);
 
                                         let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
                                         let _ = builder.inst_results(call)[0];
@@ -26469,7 +26576,8 @@ fn compile_expr(
                                                     let expected_type = actual_sig.signature.params[i].value_type;
                                                     let actual_type = builder.func.dfg.value_type(val);
                                                     if expected_type == types::I64 && actual_type == types::F64 {
-                                                        builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                                        // Strip NaN-box tag bits to get raw pointer
+                                                        ensure_i64(builder, val)
                                                     } else if expected_type == types::F64 && actual_type == types::I64 {
                                                         // i64 pointer -> f64: NaN-box with POINTER_TAG
                                                         inline_nanbox_pointer(builder, val)
@@ -26513,7 +26621,7 @@ fn compile_expr(
                                             let field_offset = builder.ins().iconst(types::I64, 16);
                                             let field_ptr = builder.ins().iadd(obj_ptr, field_offset);
                                             let handle_f64 = builder.ins().load(types::F64, MemFlags::new(), field_ptr, 0);
-                                            let handle = builder.ins().bitcast(types::I64, MemFlags::new(), handle_f64);
+                                            let handle = ensure_i64(builder, handle_f64);
 
                                             match property.as_str() {
                                                 "emit" => {
@@ -26526,7 +26634,7 @@ fn compile_expr(
                                                         .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                                                     let func_ref = module.declare_func_in_func(*emit_func, builder.func);
 
-                                                    let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                                    let event_ptr = ensure_i64(builder, arg_vals[0]);
                                                     let mut call_args = vec![handle, event_ptr];
                                                     if arg_vals.len() >= 2 {
                                                         // Ensure arg is f64 (objects/pointers need bitcast)
@@ -26541,8 +26649,8 @@ fn compile_expr(
                                                         .ok_or_else(|| anyhow!("js_event_emitter_on not declared"))?;
                                                     let func_ref = module.declare_func_in_func(*on_func, builder.func);
 
-                                                    let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
-                                                    let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                                    let event_ptr = ensure_i64(builder, arg_vals[0]);
+                                                    let callback_ptr = ensure_i64(builder, arg_vals[1]);
 
                                                     let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
                                                     let _ = builder.inst_results(call)[0];
@@ -26554,8 +26662,8 @@ fn compile_expr(
                                                         .ok_or_else(|| anyhow!("js_event_emitter_remove_listener not declared"))?;
                                                     let func_ref = module.declare_func_in_func(*remove_func, builder.func);
 
-                                                    let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
-                                                    let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                                    let event_ptr = ensure_i64(builder, arg_vals[0]);
+                                                    let callback_ptr = ensure_i64(builder, arg_vals[1]);
 
                                                     let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
                                                     let _ = builder.inst_results(call)[0];
@@ -26598,7 +26706,8 @@ fn compile_expr(
                                             let expected_type = actual_sig.signature.params[i].value_type;
                                             let actual_type = builder.func.dfg.value_type(val);
                                             if expected_type == types::I64 && actual_type == types::F64 {
-                                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                                // Strip NaN-box tag bits to get raw pointer
+                                                ensure_i64(builder, val)
                                             } else if expected_type == types::F64 && actual_type == types::I64 {
                                                 // i64 pointer -> f64: NaN-box with POINTER_TAG
                                                 inline_nanbox_pointer(builder, val)
@@ -26640,7 +26749,7 @@ fn compile_expr(
                                     let field_offset = builder.ins().iconst(types::I64, 16); // After ObjectHeader
                                     let field_ptr = builder.ins().iadd(this_ptr, field_offset);
                                     let handle_f64 = builder.ins().load(types::F64, MemFlags::new(), field_ptr, 0);
-                                    let handle = builder.ins().bitcast(types::I64, MemFlags::new(), handle_f64);
+                                    let handle = ensure_i64(builder, handle_f64);
 
                                     match property.as_str() {
                                         "emit" => {
@@ -26654,7 +26763,7 @@ fn compile_expr(
                                                 .ok_or_else(|| anyhow!("{} not declared", func_name))?;
                                             let func_ref = module.declare_func_in_func(*emit_func, builder.func);
 
-                                            let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                            let event_ptr = ensure_i64(builder, arg_vals[0]);
                                             let mut call_args = vec![handle, event_ptr];
                                             if arg_vals.len() >= 2 {
                                                 // Ensure arg is f64 (objects/pointers need bitcast)
@@ -26670,8 +26779,8 @@ fn compile_expr(
                                                 .ok_or_else(|| anyhow!("js_event_emitter_on not declared"))?;
                                             let func_ref = module.declare_func_in_func(*on_func, builder.func);
 
-                                            let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
-                                            let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                            let event_ptr = ensure_i64(builder, arg_vals[0]);
+                                            let callback_ptr = ensure_i64(builder, arg_vals[1]);
 
                                             let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
                                             // Return this for chaining
@@ -26684,8 +26793,8 @@ fn compile_expr(
                                                 .ok_or_else(|| anyhow!("js_event_emitter_remove_listener not declared"))?;
                                             let func_ref = module.declare_func_in_func(*remove_func, builder.func);
 
-                                            let event_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
-                                            let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                            let event_ptr = ensure_i64(builder, arg_vals[0]);
+                                            let callback_ptr = ensure_i64(builder, arg_vals[1]);
 
                                             let call = builder.ins().call(func_ref, &[handle, event_ptr, callback_ptr]);
                                             let _ = builder.inst_results(call)[0];
@@ -26714,7 +26823,7 @@ fn compile_expr(
                                                 let field_offset = 16 + (field_idx as i64 * 8);
                                                 let field_ptr = builder.ins().iadd_imm(this_ptr, field_offset);
                                                 let bigint_val = builder.ins().load(types::F64, MemFlags::new(), field_ptr, 0);
-                                                let bigint_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), bigint_val);
+                                                let bigint_ptr = ensure_i64(builder, bigint_val);
 
                                                 let to_string_func = extern_funcs.get("js_bigint_to_string")
                                                     .ok_or_else(|| anyhow!("js_bigint_to_string not declared"))?;
@@ -26769,7 +26878,7 @@ fn compile_expr(
 
                         // Compile the object expression to get the handle from the previous call
                         let handle = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
-                        let handle_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), handle);
+                        let handle_i64 = ensure_i64(builder, handle);
 
                         // Dispatch based on the native module
                         let func_name = match (native_module.as_str(), property.as_str()) {
@@ -26826,7 +26935,7 @@ fn compile_expr(
                             } else {
                                 for arg in &arg_vals {
                                     // Other modules (decimal etc) - simple bitcast
-                                    let arg_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), *arg);
+                                    let arg_i64 = ensure_i64(builder, *arg);
                                     call_args.push(arg_i64);
                                 }
                             }
@@ -26875,7 +26984,7 @@ fn compile_expr(
                             // Get start index
                             let start_i32 = if !arg_vals.is_empty() {
                                 let start_f64 = ensure_f64(builder, arg_vals[0]);
-                                builder.ins().fcvt_to_sint(types::I32, start_f64)
+                                builder.ins().fcvt_to_sint_sat(types::I32, start_f64)
                             } else {
                                 builder.ins().iconst(types::I32, 0)
                             };
@@ -26883,7 +26992,7 @@ fn compile_expr(
                             // Get end index
                             let end_i32 = if arg_vals.len() > 1 {
                                 let end_f64 = ensure_f64(builder, arg_vals[1]);
-                                builder.ins().fcvt_to_sint(types::I32, end_f64)
+                                builder.ins().fcvt_to_sint_sat(types::I32, end_f64)
                             } else {
                                 builder.ins().iconst(types::I32, i32::MAX as i64)
                             };
@@ -26933,13 +27042,13 @@ fn compile_expr(
 
                                     let start = if !arg_vals.is_empty() {
                                         let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                        builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                        builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                     } else {
                                         builder.ins().iconst(types::I32, 0)
                                     };
                                     let end = if arg_vals.len() > 1 {
                                         let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                        builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                        builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                     } else {
                                         builder.ins().iconst(types::I32, i32::MAX as i64)
                                     };
@@ -27007,7 +27116,7 @@ fn compile_expr(
                                                 .ok_or_else(|| anyhow!("js_string_index_of_from not declared"))?;
                                             let func_ref = module.declare_func_in_func(*index_of_func, builder.func);
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            let from_index = builder.ins().fcvt_to_sint(types::I32, arg_f64);
+                                            let from_index = builder.ins().fcvt_to_sint_sat(types::I32, arg_f64);
                                             let call = builder.ins().call(func_ref, &[str_ptr, needle_ptr, from_index]);
                                             builder.inst_results(call)[0]
                                         } else {
@@ -27111,7 +27220,7 @@ fn compile_expr(
                                         let is_regex = matches!(args.get(0), Some(Expr::RegExp { .. }));
                                         let (replace_func_name, pattern_ptr) = if is_regex {
                                             // Regex pattern: bitcast to raw I64 pointer
-                                            let p = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                            let p = ensure_i64(builder, arg_vals[0]);
                                             ("js_string_replace_regex", p)
                                         } else {
                                             // String pattern: extract string pointer via js_get_string_pointer_unified
@@ -27147,7 +27256,7 @@ fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
                                         let target_len = {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         };
                                         let pad_str = if arg_vals.len() > 1 {
                                             ensure_i64(builder, arg_vals[1])
@@ -27167,7 +27276,7 @@ fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
                                         let count = {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         };
                                         let call = builder.ins().call(func_ref, &[str_ptr, count]);
                                         let result_ptr = builder.inst_results(call)[0];
@@ -27186,7 +27295,7 @@ fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
                                         let index = {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         };
                                         let call = builder.ins().call(func_ref, &[str_ptr, index]);
                                         let result_ptr = builder.inst_results(call)[0];
@@ -27205,7 +27314,7 @@ fn compile_expr(
                                         let func_ref = module.declare_func_in_func(*func, builder.func);
                                         let index = {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         };
                                         let call = builder.ins().call(func_ref, &[str_ptr, index]);
                                         let result_f64 = builder.inst_results(call)[0];
@@ -27377,7 +27486,7 @@ fn compile_expr(
                             // Get start index
                             let start_i32 = if !arg_vals.is_empty() {
                                 let start_f64 = ensure_f64(builder, arg_vals[0]);
-                                builder.ins().fcvt_to_sint(types::I32, start_f64)
+                                builder.ins().fcvt_to_sint_sat(types::I32, start_f64)
                             } else {
                                 builder.ins().iconst(types::I32, 0)
                             };
@@ -27385,7 +27494,7 @@ fn compile_expr(
                             // Get end index
                             let end_i32 = if arg_vals.len() > 1 {
                                 let end_f64 = ensure_f64(builder, arg_vals[1]);
-                                builder.ins().fcvt_to_sint(types::I32, end_f64)
+                                builder.ins().fcvt_to_sint_sat(types::I32, end_f64)
                             } else {
                                 builder.ins().iconst(types::I32, i32::MAX as i64)
                             };
@@ -27622,8 +27731,8 @@ fn compile_expr(
                                 let expected_type = sig.params[i].value_type;
                                 let actual_type = builder.func.dfg.value_type(*arg_val);
                                 if expected_type == types::I64 && actual_type == types::F64 {
-                                    // Bitcast f64 to i64 (for handle/pointer arguments)
-                                    converted_args.push(builder.ins().bitcast(types::I64, MemFlags::new(), *arg_val));
+                                    // Strip NaN-box tag bits to get raw pointer
+                                    converted_args.push(ensure_i64(builder, *arg_val));
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
                                     // i64 -> f64: just bitcast, preserving NaN-box tags
                                     // (JS handles have JS_HANDLE_TAG, native ptrs handled by runtime fixup)
@@ -27830,13 +27939,13 @@ fn compile_expr(
 
                                         let start = if !arg_vals.is_empty() {
                                             let arg_f64 = ensure_f64(builder, arg_vals[0]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, 0)
                                         };
                                         let end = if arg_vals.len() > 1 {
                                             let arg_f64 = ensure_f64(builder, arg_vals[1]);
-                                            builder.ins().fcvt_to_sint(types::I32, arg_f64)
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
                                         } else {
                                             builder.ins().iconst(types::I32, i32::MAX as i64)
                                         };
@@ -28038,7 +28147,7 @@ fn compile_expr(
 
                         // Compile the spread array
                         let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
-                        let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+                        let arr_ptr = ensure_i64(builder, arr_val);
 
                         // Get array elements
                         let get_func = extern_funcs.get("js_array_get_f64")
@@ -28085,7 +28194,8 @@ fn compile_expr(
                                     let expected_type = actual_sig.signature.params[i].value_type;
                                     let actual_type = builder.func.dfg.value_type(val);
                                     if expected_type == types::I64 && actual_type == types::F64 {
-                                        builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                        // Strip NaN-box tag bits to get raw pointer
+                                        ensure_i64(builder, val)
                                     } else if expected_type == types::F64 && actual_type == types::I64 {
                                         // i64 pointer -> f64: NaN-box with POINTER_TAG
                                         inline_nanbox_pointer(builder, val)
@@ -28287,10 +28397,10 @@ fn compile_expr(
 
                         // Compile the spread array
                         let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
-                        let arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arr_val);
+                        let arr_ptr = ensure_i64(builder, arr_val);
 
                         // Get the method from the object
-                        let obj_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), obj_val);
+                        let obj_ptr = ensure_i64(builder, obj_val);
 
                         // Create a string for the method name
                         let method_bytes = property.as_bytes();
@@ -28408,7 +28518,7 @@ fn compile_expr(
                                 CallArg::Spread(spread_expr) => {
                                     // Spread argument - iterate and push each element
                                     let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
-                                    let spread_arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), spread_arr_val);
+                                    let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
 
                                     // Get length of spread array
                                     let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
@@ -28527,7 +28637,7 @@ fn compile_expr(
                                 }
                                 CallArg::Spread(spread_expr) => {
                                     let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
-                                    let spread_arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), spread_arr_val);
+                                    let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
 
                                     let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
                                     let spread_len = builder.inst_results(len_call)[0];
@@ -28625,7 +28735,7 @@ fn compile_expr(
             // NaN-box string values for proper dynamic type detection
             // Strings are compiled as bitcast(f64, i64_ptr), so we need to convert back and NaN-box
             let then_val_f64 = if then_is_string {
-                let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), then_val);
+                let ptr = ensure_i64(builder, then_val);
                 let nanbox_func = extern_funcs.get("js_nanbox_string")
                     .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                 let func_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -28641,7 +28751,7 @@ fn compile_expr(
             let else_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, else_expr, this_ctx)?;
             // NaN-box string values for proper dynamic type detection
             let else_val_f64 = if else_is_string {
-                let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), else_val);
+                let ptr = ensure_i64(builder, else_val);
                 let nanbox_func = extern_funcs.get("js_nanbox_string")
                     .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                 let func_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -28695,7 +28805,7 @@ fn compile_expr(
 
                 // Compile the executor closure argument
                 let executor_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
-                let executor_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), executor_val);
+                let executor_ptr = ensure_i64(builder, executor_val);
 
                 let new_func = extern_funcs.get("js_promise_new_with_executor")
                     .ok_or_else(|| anyhow!("js_promise_new_with_executor not declared"))?;
@@ -28732,7 +28842,7 @@ fn compile_expr(
                         _ => {
                             let len_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
                             let len_f64 = ensure_f64(builder, len_val);
-                            let len_i32 = builder.ins().fcvt_to_sint(types::I32, len_f64);
+                            let len_i32 = builder.ins().fcvt_to_sint_sat(types::I32, len_f64);
                             let call = builder.ins().call(func_ref, &[len_i32]);
                             let arr_ptr = builder.inst_results(call)[0];
                             return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), arr_ptr));
@@ -28831,7 +28941,7 @@ fn compile_expr(
                             let alloc_func = extern_funcs.get("js_buffer_alloc")
                                 .ok_or_else(|| anyhow!("js_buffer_alloc not declared"))?;
                             let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                            let size_i32 = builder.ins().fcvt_to_sint(types::I32, arg_f64);
+                            let size_i32 = builder.ins().fcvt_to_sint_sat(types::I32, arg_f64);
                             let zero_fill = builder.ins().iconst(types::I32, 0);
                             let call = builder.ins().call(func_ref, &[size_i32, zero_fill]);
                             let buf_ptr = builder.inst_results(call)[0];
@@ -28847,7 +28957,7 @@ fn compile_expr(
                     let alloc_func = extern_funcs.get("js_buffer_alloc")
                         .ok_or_else(|| anyhow!("js_buffer_alloc not declared"))?;
                     let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                    let size_i32 = builder.ins().fcvt_to_sint(types::I32, arg_f64);
+                    let size_i32 = builder.ins().fcvt_to_sint_sat(types::I32, arg_f64);
                     let zero_fill = builder.ins().iconst(types::I32, 0);
                     let call = builder.ins().call(func_ref, &[size_i32, zero_fill]);
                     let buf_ptr = builder.inst_results(call)[0];
@@ -28959,7 +29069,7 @@ fn compile_expr(
                 // Compile config argument if provided, otherwise pass null
                 let config_ptr = if !args.is_empty() {
                     let config_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
-                    builder.ins().bitcast(types::I64, MemFlags::new(), config_val)
+                    ensure_i64(builder, config_val)
                 } else {
                     builder.ins().iconst(types::I64, 0)
                 };
@@ -28993,7 +29103,7 @@ fn compile_expr(
                 // Compile the config argument
                 let config_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
                 // Bitcast f64 to i64 for the function call
-                let config_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), config_val);
+                let config_i64 = ensure_i64(builder, config_val);
 
                 let new_func = extern_funcs.get("js_pg_create_pool")
                     .ok_or_else(|| anyhow!("js_pg_create_pool not declared"))?;
@@ -29012,7 +29122,7 @@ fn compile_expr(
                 // Compile the URL argument
                 let url_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
                 // Bitcast f64 to i64 for the function call (url is a string pointer)
-                let url_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), url_val);
+                let url_i64 = ensure_i64(builder, url_val);
 
                 let new_func = extern_funcs.get("js_ws_connect")
                     .ok_or_else(|| anyhow!("js_ws_connect not declared"))?;
@@ -29060,7 +29170,7 @@ fn compile_expr(
                 // Compile the init argument (string, object, or iterable)
                 let init_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
                 // Bitcast f64 to i64 for the function call
-                let init_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), init_val);
+                let init_i64 = ensure_i64(builder, init_val);
 
                 let new_func = extern_funcs.get("js_url_search_params_new")
                     .ok_or_else(|| anyhow!("js_url_search_params_new not declared"))?;
@@ -29111,7 +29221,7 @@ fn compile_expr(
                         .ok_or_else(|| anyhow!("js_decimal_from_string not declared"))?;
                     let func_ref = module.declare_func_in_func(*new_func, builder.func);
                     // String is a pointer, need to bitcast f64 -> i64
-                    let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_val);
+                    let str_ptr = ensure_i64(builder, arg_val);
                     let call = builder.ins().call(func_ref, &[str_ptr]);
                     let handle = builder.inst_results(call)[0];
                     return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
@@ -29261,7 +29371,8 @@ fn compile_expr(
                                 let expected_type = actual_sig.signature.params[i].value_type;
                                 let actual_type = builder.func.dfg.value_type(val);
                                 if expected_type == types::I64 && actual_type == types::F64 {
-                                    builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                    // Strip NaN-box tag bits to get raw pointer
+                                    ensure_i64(builder, val)
                                 } else if expected_type == types::F64 && actual_type == types::I64 {
                                     // i64 pointer -> f64: NaN-box with POINTER_TAG
                                     inline_nanbox_pointer(builder, val)
@@ -29304,7 +29415,7 @@ fn compile_expr(
                         // If it is, use that; otherwise use obj_ptr
 
                         // Extract top 16 bits to check the NaN-box tag
-                        let return_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), return_val);
+                        let return_i64 = ensure_i64(builder, return_val);
                         let shift_48 = builder.ins().iconst(types::I64, 48);
                         let top16 = builder.ins().ushr(return_i64, shift_48);
 
@@ -29589,7 +29700,7 @@ fn compile_expr(
             let obj_ptr = if builder.func.dfg.value_type(obj_val) == types::I64 {
                 obj_val
             } else {
-                builder.ins().bitcast(types::I64, MemFlags::new(), obj_val)
+                ensure_i64(builder, obj_val)
             };
 
             // Create string for property name
@@ -29697,7 +29808,7 @@ fn compile_expr(
             let obj_ptr = if builder.func.dfg.value_type(obj_val) == types::I64 {
                 obj_val
             } else {
-                builder.ins().bitcast(types::I64, MemFlags::new(), obj_val)
+                ensure_i64(builder, obj_val)
             };
 
             // Create string for property name
@@ -29811,7 +29922,7 @@ fn compile_expr(
                 } else {
                     let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                     let idx_f64 = ensure_f64(builder, idx_val);
-                    builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                    builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                 };
 
                 // Get current value using js_array_get_f64
@@ -29937,7 +30048,7 @@ fn compile_expr(
                     if info.is_buffer && property == "length" {
                         let buf_val = builder.use_var(info.var);
                         // Buffer is stored as f64 (bitcasted from pointer)
-                        let buf_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), buf_val);
+                        let buf_ptr = ensure_i64(builder, buf_val);
                         let len_func = extern_funcs.get("js_buffer_length")
                             .ok_or_else(|| anyhow!("js_buffer_length not declared"))?;
                         let func_ref = module.declare_func_in_func(*len_func, builder.func);
@@ -29980,7 +30091,7 @@ fn compile_expr(
                     if info.class_name.as_deref() == Some("LRUCache") && property == "size" {
                         let cache_val = builder.use_var(info.var);
                         // LRUCache handles are stored as f64, bitcast to i64
-                        let handle = builder.ins().bitcast(types::I64, MemFlags::new(), cache_val);
+                        let handle = ensure_i64(builder, cache_val);
                         let size_func = extern_funcs.get("js_lru_cache_size")
                             .ok_or_else(|| anyhow!("js_lru_cache_size not declared"))?;
                         let func_ref = module.declare_func_in_func(*size_func, builder.func);
@@ -30401,7 +30512,8 @@ fn compile_expr(
                                         let expected_type = actual_sig.signature.params[i].value_type;
                                         let actual_type = builder.func.dfg.value_type(val);
                                         if expected_type == types::I64 && actual_type == types::F64 {
-                                            builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                            // Strip NaN-box tag bits to get raw pointer
+                                            ensure_i64(builder, val)
                                         } else if expected_type == types::F64 && actual_type == types::I64 {
                                             // i64 pointer -> f64: NaN-box with POINTER_TAG
                                             inline_nanbox_pointer(builder, val)
@@ -30670,7 +30782,7 @@ fn compile_expr(
                     ArrayElement::Spread(spread_expr) => {
                         // Spread element - iterate over source array and push each element
                         let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
-                        let spread_arr_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), spread_arr_val);
+                        let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
 
                         // Get length of spread array
                         let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
@@ -30787,7 +30899,7 @@ fn compile_expr(
 
                 let val_type = builder.func.dfg.value_type(val);
                 let final_val = if is_string {
-                    let str_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                    let str_ptr = ensure_i64(builder, val);
                     inline_nanbox_string(builder, str_ptr)
                 } else if val_type == types::I64 {
                     // Pointer value (closure, object, array) - NaN-box with POINTER_TAG
@@ -30848,7 +30960,7 @@ fn compile_expr(
                                     } else {
                                         let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                                         let idx_f64 = ensure_f64(builder, idx_val);
-                                        builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                                        builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                                     };
 
                                     // Call js_array_get_jsvalue to get the element
@@ -30905,13 +31017,13 @@ fn compile_expr(
                                 } else {
                                     let idx_val = builder.use_var(idx_info.var);
                                     let idx_f64 = ensure_f64(builder, idx_val);
-                                    builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                                    builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                                 }
                             } else {
                                 let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                                 let idx_vt = builder.func.dfg.value_type(idx_val);
                                 if idx_vt == types::I32 { idx_val }
-                                else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint(types::I32, idx_f64) }
+                                else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint_sat(types::I32, idx_f64) }
                             }
                         } else if let Some(i32_val) = try_compile_index_as_i32(builder, index, locals) {
                             i32_val
@@ -30919,7 +31031,7 @@ fn compile_expr(
                             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                             let idx_vt = builder.func.dfg.value_type(idx_val);
                             if idx_vt == types::I32 { idx_val }
-                            else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint(types::I32, idx_f64) }
+                            else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint_sat(types::I32, idx_f64) }
                         };
 
                         // Use safe js_array_get_jsvalue for:
@@ -30965,7 +31077,7 @@ fn compile_expr(
                         } else {
                             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                             let idx_f64 = ensure_f64(builder, idx_val);
-                            builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                            builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                         };
 
                         // Call js_string_char_at to get single-char string
@@ -31076,7 +31188,7 @@ fn compile_expr(
                     } else {
                         let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                         let idx_f64 = ensure_f64(builder, idx_val);
-                        builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                        builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                     };
 
                     // Call js_string_char_at to get single-char string
@@ -31144,7 +31256,7 @@ fn compile_expr(
                     builder.switch_to_block(integer_key_block);
                     builder.seal_block(integer_key_block);
                     let int_result = {
-                        let idx_i32 = builder.ins().fcvt_to_sint(types::I32, idx_f64);
+                        let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
                         let get_func = extern_funcs.get("js_dynamic_array_get")
                             .ok_or_else(|| anyhow!("js_dynamic_array_get not declared"))?;
                         let func_ref = module.declare_func_in_func(*get_func, builder.func);
@@ -31163,7 +31275,7 @@ fn compile_expr(
                     } else {
                         let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                         let idx_f64 = ensure_f64(builder, idx_val);
-                        builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                        builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                     };
 
                     // Use the unified dynamic array access that handles both JS handles and native arrays
@@ -31205,13 +31317,13 @@ fn compile_expr(
                                 } else {
                                     let idx_val = builder.use_var(idx_info.var);
                                     let idx_f64 = ensure_f64(builder, idx_val);
-                                    builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                                    builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                                 }
                             } else {
                                 let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                                 let idx_vt = builder.func.dfg.value_type(idx_val);
                                 if idx_vt == types::I32 { idx_val }
-                                else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint(types::I32, idx_f64) }
+                                else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint_sat(types::I32, idx_f64) }
                             }
                         } else if let Some(i32_val) = try_compile_index_as_i32(builder, index, locals) {
                             i32_val
@@ -31219,7 +31331,7 @@ fn compile_expr(
                             let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                             let idx_vt = builder.func.dfg.value_type(idx_val);
                             if idx_vt == types::I32 { idx_val }
-                            else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint(types::I32, idx_f64) }
+                            else { let idx_f64 = ensure_f64(builder, idx_val); builder.ins().fcvt_to_sint_sat(types::I32, idx_f64) }
                         };
 
                         if info.is_mixed_array {
@@ -31235,7 +31347,7 @@ fn compile_expr(
 
                             let jsvalue_bits = if is_string_value(value, locals) {
                                 // String pointer needs NaN-boxing with STRING_TAG
-                                let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                                let ptr = ensure_i64(builder, val);
                                 let nanbox_func = extern_funcs.get("js_nanbox_string")
                                     .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
                                 let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -31470,7 +31582,7 @@ fn compile_expr(
                     builder.switch_to_block(integer_key_block);
                     builder.seal_block(integer_key_block);
                     {
-                        let idx_i32 = builder.ins().fcvt_to_sint(types::I32, idx_f64);
+                        let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
                         let jsvalue_bits = builder.ins().bitcast(types::I64, MemFlags::new(), val);
                         let set_func = extern_funcs.get("js_array_set_jsvalue")
                             .ok_or_else(|| anyhow!("js_array_set_jsvalue not declared"))?;
@@ -31489,7 +31601,7 @@ fn compile_expr(
                     } else {
                         let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
                         let idx_f64 = ensure_f64(builder, idx_val);
-                        builder.ins().fcvt_to_sint(types::I32, idx_f64)
+                        builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                     };
 
                     // Convert value to JSValue bits (u64)
@@ -32528,7 +32640,7 @@ fn compile_expr(
                         // widgetSetHidden and widgetClearChildren take i64 args — convert f64 → i64
                         if method == "widgetSetHidden" {
                             let hidden_f64 = ensure_f64(builder, arg_vals[1]);
-                            let hidden_i64 = builder.ins().fcvt_to_sint(types::I64, hidden_f64);
+                            let hidden_i64 = builder.ins().fcvt_to_sint_sat(types::I64, hidden_f64);
                             builder.ins().call(func_ref, &[handle, hidden_i64]);
                         } else if method == "widgetClearChildren" || method == "textfieldFocus" {
                             builder.ins().call(func_ref, &[handle]);
@@ -33663,6 +33775,7 @@ fn compile_expr(
                 ("perry/system", false, "keychainGet") => "perry_system_keychain_get",
                 ("perry/system", false, "keychainDelete") => "perry_system_keychain_delete",
                 ("perry/system", false, "notificationSend") => "perry_system_notification_send",
+                ("perry/system", false, "requestLocation") => "perry_system_request_location",
 
                 // ========================================================================
                 // Perry Plugin System
@@ -33883,7 +33996,7 @@ fn compile_expr(
                     // Convert f64 response/connection ID to i64 using truncation
                     let obj_type = builder.func.dfg.value_type(obj_val);
                     if obj_type == types::F64 {
-                        builder.ins().fcvt_to_sint(types::I64, obj_val)
+                        builder.ins().fcvt_to_sint_sat(types::I64, obj_val)
                     } else {
                         obj_val
                     }
@@ -34101,7 +34214,7 @@ fn compile_expr(
                                 let event_f64 = ensure_f64(builder, arg_vals[0]);
                                 let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
                                 let event_ptr = builder.inst_results(event_call)[0];
-                                let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                let callback_ptr = ensure_i64(builder, arg_vals[1]);
                                 call_args.push(event_ptr);
                                 call_args.push(callback_ptr);
                             }
@@ -34129,7 +34242,7 @@ fn compile_expr(
                                 let event_f64 = ensure_f64(builder, arg_vals[0]);
                                 let event_call = builder.ins().call(get_str_ptr_ref, &[event_f64]);
                                 let event_ptr = builder.inst_results(event_call)[0];
-                                let callback_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[1]);
+                                let callback_ptr = ensure_i64(builder, arg_vals[1]);
                                 call_args.push(event_ptr);
                                 call_args.push(callback_ptr);
                             }
@@ -34281,7 +34394,7 @@ fn compile_expr(
                             // Binary operations - other is a Decimal handle or number
                             if !arg_vals.is_empty() {
                                 // Assume it's another Decimal handle for now
-                                let other_handle = builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]);
+                                let other_handle = ensure_i64(builder, arg_vals[0]);
                                 call_args.push(other_handle);
                             }
                         }
@@ -34312,7 +34425,7 @@ fn compile_expr(
                             if arg_vals.len() >= 2 {
                                 // Pass NaN-boxed path string as i64 bits (runtime extracts it)
                                 let path_f64 = ensure_f64(builder, arg_vals[0]);
-                                let path_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), path_f64);
+                                let path_i64 = ensure_i64(builder, path_f64);
                                 call_args.push(path_i64);
 
                                 // Handler closure - pass as i64
@@ -34324,12 +34437,12 @@ fn compile_expr(
                             if arg_vals.len() >= 3 {
                                 // Method string - NaN-boxed as i64 bits
                                 let method_f64 = ensure_f64(builder, arg_vals[0]);
-                                let method_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), method_f64);
+                                let method_i64 = ensure_i64(builder, method_f64);
                                 call_args.push(method_i64);
 
                                 // Path string - NaN-boxed as i64 bits
                                 let path_f64 = ensure_f64(builder, arg_vals[1]);
-                                let path_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), path_f64);
+                                let path_i64 = ensure_i64(builder, path_f64);
                                 call_args.push(path_i64);
 
                                 // Handler closure
@@ -34341,7 +34454,7 @@ fn compile_expr(
                             if arg_vals.len() >= 2 {
                                 // Hook name - NaN-boxed as i64 bits
                                 let name_f64 = ensure_f64(builder, arg_vals[0]);
-                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
+                                let name_i64 = ensure_i64(builder, name_f64);
                                 call_args.push(name_i64);
                                 call_args.push(ensure_i64(builder, arg_vals[1]));
                             }
@@ -34391,11 +34504,11 @@ fn compile_expr(
                             if arg_vals.len() >= 2 {
                                 // Pass NaN-boxed strings as i64 bits
                                 let name_f64 = ensure_f64(builder, arg_vals[0]);
-                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
+                                let name_i64 = ensure_i64(builder, name_f64);
                                 call_args.push(name_i64);
 
                                 let val_f64 = ensure_f64(builder, arg_vals[1]);
-                                let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val_f64);
+                                let val_i64 = ensure_i64(builder, val_f64);
                                 call_args.push(val_i64);
                             }
                         }
@@ -34421,7 +34534,7 @@ fn compile_expr(
                             if !arg_vals.is_empty() {
                                 // Pass NaN-boxed text as i64 bits
                                 let text_f64 = ensure_f64(builder, arg_vals[0]);
-                                let text_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), text_f64);
+                                let text_i64 = ensure_i64(builder, text_f64);
                                 call_args.push(text_i64);
                             }
                             if arg_vals.len() >= 2 {
@@ -34435,7 +34548,7 @@ fn compile_expr(
                             if !arg_vals.is_empty() {
                                 // Pass NaN-boxed URL as i64 bits
                                 let url_f64 = ensure_f64(builder, arg_vals[0]);
-                                let url_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), url_f64);
+                                let url_i64 = ensure_i64(builder, url_f64);
                                 call_args.push(url_i64);
                             }
                             if arg_vals.len() >= 2 {
@@ -34449,7 +34562,7 @@ fn compile_expr(
                             if !arg_vals.is_empty() {
                                 // Pass NaN-boxed name as i64 bits
                                 let name_f64 = ensure_f64(builder, arg_vals[0]);
-                                let name_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), name_f64);
+                                let name_i64 = ensure_i64(builder, name_f64);
                                 call_args.push(name_i64);
                             }
                         }
@@ -34632,12 +34745,12 @@ fn compile_expr(
 
                     arg_vals.iter().map(|&val| {
                         // Get the raw pointer as i64
-                        let ptr = builder.ins().bitcast(types::I64, MemFlags::new(), val);
+                        let ptr = ensure_i64(builder, val);
                         // NaN-box it using js_nanbox_pointer
                         let call = builder.ins().call(nanbox_ref, &[ptr]);
                         let nanboxed = builder.inst_results(call)[0];
                         // The result is f64, bitcast to i64 for the FFI call
-                        builder.ins().bitcast(types::I64, MemFlags::new(), nanboxed)
+                        ensure_i64(builder, nanboxed)
                     }).collect()
                 } else if native_module == "exponential-backoff" {
                     // backOff(callback, options) - callback is closure (I64), options is object (I64)
@@ -34663,7 +34776,7 @@ fn compile_expr(
                 } else if native_module == "uuid" && (method == "validate" || method == "version") {
                     // uuid.validate and uuid.version take a string pointer
                     arg_vals.iter().map(|&val| {
-                        builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                        ensure_i64(builder, val)
                     }).collect()
                 } else if native_module == "uuid" {
                     // uuid.v4, uuid.v1, uuid.v7 take no arguments
@@ -34675,7 +34788,7 @@ fn compile_expr(
                             // hash(password, saltRounds) - password is string, saltRounds is number
                             let mut args = Vec::new();
                             if !arg_vals.is_empty() {
-                                args.push(builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]));
+                                args.push(ensure_i64(builder, arg_vals[0]));
                             }
                             if arg_vals.len() > 1 {
                                 args.push(arg_vals[1]); // saltRounds as f64
@@ -34685,7 +34798,7 @@ fn compile_expr(
                         "compare" | "compareSync" => {
                             // compare(password, hash) - both strings
                             arg_vals.iter().map(|&val| {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                ensure_i64(builder, val)
                             }).collect()
                         }
                         "genSalt" => {
@@ -34696,7 +34809,7 @@ fn compile_expr(
                             // hashSync(password, saltRounds)
                             let mut args = Vec::new();
                             if !arg_vals.is_empty() {
-                                args.push(builder.ins().bitcast(types::I64, MemFlags::new(), arg_vals[0]));
+                                args.push(ensure_i64(builder, arg_vals[0]));
                             }
                             if arg_vals.len() > 1 {
                                 args.push(arg_vals[1]); // saltRounds as f64
@@ -34711,7 +34824,7 @@ fn compile_expr(
                         "sha256" | "md5" => {
                             // sha256(data), md5(data) - data is string
                             arg_vals.iter().map(|&val| {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                ensure_i64(builder, val)
                             }).collect()
                         }
                         "randomBytes" => {
@@ -34725,7 +34838,7 @@ fn compile_expr(
                         "hmacSha256" => {
                             // hmacSha256(data, key) - both strings
                             arg_vals.iter().map(|&val| {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                ensure_i64(builder, val)
                             }).collect()
                         }
                         _ => arg_vals.clone()
@@ -34736,7 +34849,7 @@ fn compile_expr(
                         "gzipSync" | "gunzipSync" | "deflateSync" | "inflateSync" | "gzip" | "gunzip" => {
                             // All take data buffer as argument
                             arg_vals.iter().map(|&val| {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                ensure_i64(builder, val)
                             }).collect()
                         }
                         _ => arg_vals.clone()
@@ -34990,7 +35103,7 @@ fn compile_expr(
                         "parse" => {
                             // parse(content) - content is string
                             arg_vals.iter().map(|&val| {
-                                builder.ins().bitcast(types::I64, MemFlags::new(), val)
+                                ensure_i64(builder, val)
                             }).collect()
                         }
                         _ => arg_vals.clone()
@@ -35242,6 +35355,16 @@ fn compile_expr(
                                 args.push(builder.inst_results(call)[0]);
                             }
                             args
+                        }
+                        "requestLocation" => {
+                            // requestLocation(callback) - callback is a closure (NaN-boxed f64)
+                            arg_vals.iter().map(|&val| {
+                                if builder.func.dfg.value_type(val) == types::I64 {
+                                    inline_nanbox_pointer(builder, val)
+                                } else {
+                                    val
+                                }
+                            }).collect()
                         }
                         _ => arg_vals.clone()
                     }
@@ -35855,7 +35978,7 @@ fn compile_expr(
             let prop_f64 = if is_string_property {
                 // String value - need to NaN-box it as a string
                 let prop_ptr = if builder.func.dfg.value_type(prop_val) == types::F64 {
-                    builder.ins().bitcast(types::I64, MemFlags::new(), prop_val)
+                    ensure_i64(builder, prop_val)
                 } else {
                     prop_val
                 };
@@ -35882,7 +36005,7 @@ fn compile_expr(
             // Ensure object is f64 (NaN-boxed pointer)
             let obj_f64 = if builder.func.dfg.value_type(obj_val) == types::F64 {
                 // Object literals return raw pointers bitcast to f64 - need to NaN-box
-                let obj_ptr = builder.ins().bitcast(types::I64, MemFlags::new(), obj_val);
+                let obj_ptr = ensure_i64(builder, obj_val);
                 let nanbox_func = extern_funcs.get("js_nanbox_pointer")
                     .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                 let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
@@ -36151,7 +36274,7 @@ fn compile_expr(
         Expr::JsGetExport { module_handle, export_name } => {
             // Compile module handle expression
             let handle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, module_handle, this_ctx)?;
-            let handle_i64 = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), handle_val);
+            let handle_i64 = ensure_i64(builder, handle_val);
 
             // Create string constant for export name
             let name_bytes = export_name.as_bytes();
@@ -36182,7 +36305,7 @@ fn compile_expr(
         Expr::JsCallFunction { module_handle, func_name, args } => {
             // Compile module handle expression
             let handle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, module_handle, this_ctx)?;
-            let handle_i64 = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), handle_val);
+            let handle_i64 = ensure_i64(builder, handle_val);
 
             // Create string constant for function name
             let name_bytes = func_name.as_bytes();
@@ -36236,7 +36359,7 @@ fn compile_expr(
 
                     // If argument is a string, NaN-box it with STRING_TAG for JS interop
                     let final_val = if is_string_js_arg(arg, locals) {
-                        let ptr = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), arg_val);
+                        let ptr = ensure_i64(builder, arg_val);
                         let call = builder.ins().call(nanbox_string_ref, &[ptr]);
                         builder.inst_results(call)[0]
                     } else {
@@ -36438,7 +36561,7 @@ fn compile_expr(
             // Compile module handle expression
             let handle_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, module_handle, this_ctx)?;
             // Convert f64 to i64 for module handle
-            let handle_i64 = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), handle_val);
+            let handle_i64 = ensure_i64(builder, handle_val);
 
             // Create string constant for class name
             let name_bytes = class_name.as_bytes();
@@ -36568,7 +36691,7 @@ fn compile_expr(
 
             // For now, return the closure as-is - the V8 callback will need to handle
             // calling back into native code through the trampoline
-            let func_ptr = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), closure_val);
+            let func_ptr = ensure_i64(builder, closure_val);
             let closure_env = builder.ins().iconst(types::I64, 0); // No environment for now
             let param_count_val = builder.ins().iconst(types::I64, *param_count as i64);
 

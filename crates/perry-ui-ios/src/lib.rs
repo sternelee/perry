@@ -1,6 +1,7 @@
 pub mod app;
 pub mod clipboard;
 pub mod file_dialog;
+pub mod location;
 pub mod menu;
 pub mod state;
 pub mod widgets;
@@ -551,6 +552,12 @@ pub extern "C" fn perry_system_open_url(url_ptr: i64) {
             let _: () = objc2::msg_send![app, openURL: url];
         }
     }
+}
+
+/// Request one-shot location. Callback receives (lat, lon) or (NaN, NaN) on error.
+#[no_mangle]
+pub extern "C" fn perry_system_request_location(callback: f64) {
+    location::request_location(callback);
 }
 
 /// Check if dark mode is active. Returns 1 if dark, 0 if light.

@@ -66,6 +66,13 @@ pub fn is_native_module(path: &str) -> bool {
     NATIVE_MODULES.contains(&normalized)
 }
 
+/// Check if a module path refers to a native module, including external native libraries.
+/// External modules are provided by packages with `perry.nativeLibrary` in package.json.
+pub fn is_native_module_with_externals(path: &str, externals: &[String]) -> bool {
+    let normalized = path.strip_prefix("node:").unwrap_or(path);
+    NATIVE_MODULES.contains(&normalized) || externals.iter().any(|ext| ext == normalized)
+}
+
 /// Modules that are handled by perry-runtime alone (no stdlib needed).
 /// These are Node.js builtins and perry-specific modules implemented in the runtime crate.
 const RUNTIME_ONLY_MODULES: &[&str] = &[

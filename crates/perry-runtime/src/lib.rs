@@ -70,3 +70,30 @@ pub use value::{js_set_handle_array_get, js_set_handle_array_length, js_set_hand
 pub use array::{js_array_push_f64};
 pub use object::js_object_set_field_by_name;
 pub use promise::{js_promise_run_microtasks, js_promise_state, js_is_promise, js_promise_value};
+
+// Module init guard for preventing circular dependency stack overflow.
+// Uses a simple bitset in the runtime so Cranelift cannot optimize it away.
+mod init_guard {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    // Support up to 2048 modules (256 bytes). Each bit = one module.
+    const GUARD_BYTES: usize = 256;
+    static INIT_GUARD: [AtomicU8; GUARD_BYTES] = {
+        const ZERO: AtomicU8 = AtomicU8::new(0);
+        [ZERO; GUARD_BYTES]
+    };
+
+    /// Check and set the init guard for a module. Returns 1 if already set (skip init),
+    /// 0 if not set (proceed with init). The guard is set atomically.
+    #[no_mangle]
+    pub extern "C" fn perry_init_guard_check_and_set(module_id: u64) -> i32 {
+        let byte_idx = (module_id as usize) / 8;
+        let bit_idx = (module_id as usize) % 8;
+        if byte_idx >= GUARD_BYTES {
+            return 0; // Out of range, don't guard
+        }
+        let mask = 1u8 << bit_idx;
+        let prev = INIT_GUARD[byte_idx].fetch_or(mask, Ordering::SeqCst);
+        if prev & mask != 0 { 1 } else { 0 }
+    }
+}

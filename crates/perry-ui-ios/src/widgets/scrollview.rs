@@ -14,6 +14,11 @@ pub fn create() -> i64 {
         // Disable touch delay to avoid iOS 26 crash in
         // UIGestureRecognizer _delayTouchesForEvent:inPhase:
         let _: () = msg_send![&*scroll, setDelaysContentTouches: false];
+        // Dismiss keyboard when user scrolls (UIScrollViewKeyboardDismissModeOnDrag = 1)
+        let _: () = msg_send![&*scroll, setKeyboardDismissMode: 1i64];
+        // Automatically adjust content inset for safe area (status bar, home indicator)
+        // UIScrollViewContentInsetAdjustmentAlways = 2
+        let _: () = msg_send![&*scroll, setContentInsetAdjustmentBehavior: 2i64];
 
         let view: Retained<UIView> = Retained::cast_unchecked(scroll);
         super::register_widget(view)

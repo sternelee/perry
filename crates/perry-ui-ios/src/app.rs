@@ -126,23 +126,21 @@ unsafe extern "C" fn scene_will_connect(
 
                 vc_view.addSubview(&root_view);
 
-                // Pin root widget to safe area layout guide
-                let safe_area: *const AnyObject = msg_send![&*vc_view, safeAreaLayoutGuide];
-
+                // Pin root widget to view edges (not safe area) for edge-to-edge layout
                 let root_leading: *const AnyObject = msg_send![&*root_view, leadingAnchor];
                 let root_trailing: *const AnyObject = msg_send![&*root_view, trailingAnchor];
                 let root_top: *const AnyObject = msg_send![&*root_view, topAnchor];
                 let root_bottom: *const AnyObject = msg_send![&*root_view, bottomAnchor];
 
-                let safe_leading: *const AnyObject = msg_send![safe_area, leadingAnchor];
-                let safe_trailing: *const AnyObject = msg_send![safe_area, trailingAnchor];
-                let safe_top: *const AnyObject = msg_send![safe_area, topAnchor];
-                let safe_bottom: *const AnyObject = msg_send![safe_area, bottomAnchor];
+                let view_leading: *const AnyObject = msg_send![&*vc_view, leadingAnchor];
+                let view_trailing: *const AnyObject = msg_send![&*vc_view, trailingAnchor];
+                let view_top: *const AnyObject = msg_send![&*vc_view, topAnchor];
+                let view_bottom: *const AnyObject = msg_send![&*vc_view, bottomAnchor];
 
-                let c1: Retained<AnyObject> = msg_send![root_leading, constraintEqualToAnchor: safe_leading];
-                let c2: Retained<AnyObject> = msg_send![root_trailing, constraintEqualToAnchor: safe_trailing];
-                let c3: Retained<AnyObject> = msg_send![root_top, constraintEqualToAnchor: safe_top];
-                let c4: Retained<AnyObject> = msg_send![root_bottom, constraintEqualToAnchor: safe_bottom];
+                let c1: Retained<AnyObject> = msg_send![root_leading, constraintEqualToAnchor: view_leading];
+                let c2: Retained<AnyObject> = msg_send![root_trailing, constraintEqualToAnchor: view_trailing];
+                let c3: Retained<AnyObject> = msg_send![root_top, constraintEqualToAnchor: view_top];
+                let c4: Retained<AnyObject> = msg_send![root_bottom, constraintEqualToAnchor: view_bottom];
 
                 let _: () = msg_send![&*c1, setActive: true];
                 let _: () = msg_send![&*c2, setActive: true];

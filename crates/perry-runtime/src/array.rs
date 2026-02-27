@@ -8,7 +8,7 @@
 use std::ptr;
 use crate::arena::arena_alloc_gc;
 
-/// Strip NaN-boxing tags from an array pointer (defensive guard).
+/// Strip NaN-boxing tags from an array pointer and guard against invalid values.
 #[inline(always)]
 fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
     let bits = arr as usize;
@@ -17,8 +17,11 @@ fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {
             return std::ptr::null();
         }
-        (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+        let cleaned = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
+        if (cleaned as usize) < 0x1000 { return std::ptr::null(); }
+        cleaned
     } else {
+        if bits < 0x1000 { return std::ptr::null(); }
         arr
     }
 }
@@ -146,6 +149,8 @@ pub extern "C" fn js_array_set_f64(arr: *mut ArrayHeader, index: u32, value: f64
 /// This mimics JavaScript's arr[i] = value behavior
 #[no_mangle]
 pub extern "C" fn js_array_set_f64_extend(arr: *mut ArrayHeader, index: u32, value: f64) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let length = (*arr).length;
 
@@ -182,6 +187,7 @@ pub extern "C" fn js_array_set_f64_extend(arr: *mut ArrayHeader, index: u32, val
 /// Returns a new pointer (the old one may be invalid after this)
 #[no_mangle]
 pub extern "C" fn js_array_grow(arr: *mut ArrayHeader, min_capacity: u32) -> *mut ArrayHeader {
+    if arr.is_null() || (arr as usize) < 0x1000 { return js_array_alloc(min_capacity); }
     unsafe {
         let old_capacity = (*arr).capacity;
         if min_capacity <= old_capacity {
@@ -208,6 +214,8 @@ pub extern "C" fn js_array_grow(arr: *mut ArrayHeader, min_capacity: u32) -> *mu
 /// Returns a pointer to the (possibly reallocated) array
 #[no_mangle]
 pub extern "C" fn js_array_push_f64(arr: *mut ArrayHeader, value: f64) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let length = (*arr).length;
         let capacity = (*arr).capacity;
@@ -229,6 +237,8 @@ pub extern "C" fn js_array_push_f64(arr: *mut ArrayHeader, value: f64) -> *mut A
 /// Returns the removed element (or NaN if empty)
 #[no_mangle]
 pub extern "C" fn js_array_pop_f64(arr: *mut ArrayHeader) -> f64 {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return f64::NAN; }
     unsafe {
         let length = (*arr).length;
         if length == 0 {
@@ -247,6 +257,8 @@ pub extern "C" fn js_array_pop_f64(arr: *mut ArrayHeader) -> f64 {
 /// Returns the removed element (or NaN if empty)
 #[no_mangle]
 pub extern "C" fn js_array_shift_f64(arr: *mut ArrayHeader) -> f64 {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return f64::NAN; }
     unsafe {
         let length = (*arr).length;
         if length == 0 {
@@ -267,6 +279,8 @@ pub extern "C" fn js_array_shift_f64(arr: *mut ArrayHeader) -> f64 {
 /// Returns a pointer to the (possibly reallocated) array
 #[no_mangle]
 pub extern "C" fn js_array_unshift_f64(arr: *mut ArrayHeader, value: f64) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let length = (*arr).length;
         let capacity = (*arr).capacity;
@@ -300,6 +314,8 @@ pub extern "C" fn js_array_unshift_jsvalue(arr: *mut ArrayHeader, value: u64) ->
 /// Returns -1 if not found
 #[no_mangle]
 pub extern "C" fn js_array_indexOf_f64(arr: *const ArrayHeader, value: f64) -> i32 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return -1; }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -316,6 +332,8 @@ pub extern "C" fn js_array_indexOf_f64(arr: *const ArrayHeader, value: f64) -> i
 /// indexOf for arrays, using jsvalue comparison (handles NaN-boxed strings correctly)
 #[no_mangle]
 pub extern "C" fn js_array_indexOf_jsvalue(arr: *const ArrayHeader, value: f64) -> i32 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return -1; }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -341,6 +359,8 @@ pub extern "C" fn js_array_includes_f64(arr: *const ArrayHeader, value: f64) -> 
 /// Returns 1 if found, 0 if not.
 #[no_mangle]
 pub extern "C" fn js_array_includes_jsvalue(arr: *const ArrayHeader, value: f64) -> i32 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return 0; }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -373,6 +393,11 @@ pub extern "C" fn js_array_splice(
     out_arr: *mut *mut ArrayHeader,
 ) -> *mut ArrayHeader {
     unsafe {
+        let arr = clean_arr_ptr_mut(arr);
+        if arr.is_null() {
+            if !out_arr.is_null() { *out_arr = js_array_alloc(0); }
+            return js_array_alloc(0);
+        }
         let len = (*arr).length as i32;
 
         // Normalize start index
@@ -444,6 +469,8 @@ pub extern "C" fn js_array_splice(
 /// If end is i32::MAX, slices to end of array
 #[no_mangle]
 pub extern "C" fn js_array_slice(arr: *const ArrayHeader, start: i32, end: i32) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let len = (*arr).length as i32;
 
@@ -553,6 +580,8 @@ pub extern "C" fn js_array_push_jsvalue(arr: *mut ArrayHeader, value: u64) -> *m
 /// Returns the (possibly reallocated) destination array pointer
 #[no_mangle]
 pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeader) -> *mut ArrayHeader {
+    let src = clean_arr_ptr(src);
+    if src.is_null() { return dest; }
     unsafe {
         let src_len = (*src).length;
         if src_len == 0 {
@@ -576,6 +605,7 @@ pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeade
 /// If the value is not a valid array pointer, returns an empty array.
 #[no_mangle]
 pub extern "C" fn js_array_clone(src: *const ArrayHeader) -> *mut ArrayHeader {
+    let src = clean_arr_ptr(src);
     if src.is_null() {
         return js_array_alloc(0);
     }
@@ -603,6 +633,8 @@ use crate::closure::{ClosureHeader, js_closure_call1, js_closure_call2};
 /// Returns nothing (void)
 #[no_mangle]
 pub extern "C" fn js_array_forEach(arr: *const ArrayHeader, callback: *const ClosureHeader) {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return; }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -620,6 +652,8 @@ pub extern "C" fn js_array_forEach(arr: *const ArrayHeader, callback: *const Clo
 /// Returns pointer to new array
 #[no_mangle]
 pub extern "C" fn js_array_map(arr: *const ArrayHeader, callback: *const ClosureHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -680,6 +714,8 @@ pub extern "C" fn js_array_sort_with_comparator(arr: *mut ArrayHeader, comparato
 /// Returns pointer to new array
 #[no_mangle]
 pub extern "C" fn js_array_filter(arr: *const ArrayHeader, callback: *const ClosureHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -706,6 +742,8 @@ pub extern "C" fn js_array_filter(arr: *const ArrayHeader, callback: *const Clos
 /// Returns the element as f64, or f64::NAN (undefined) if not found
 #[no_mangle]
 pub extern "C" fn js_array_find(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return f64::from_bits(crate::value::TAG_UNDEFINED); }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -728,6 +766,8 @@ pub extern "C" fn js_array_find(arr: *const ArrayHeader, callback: *const Closur
 /// Returns the index as i32, or -1 if not found
 #[no_mangle]
 pub extern "C" fn js_array_findIndex(arr: *const ArrayHeader, callback: *const ClosureHeader) -> i32 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return -1; }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -756,6 +796,8 @@ pub extern "C" fn js_array_reduce(
     has_initial: i32,
     initial: f64,
 ) -> f64 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return if has_initial != 0 { initial } else { f64::NAN }; }
     unsafe {
         let length = (*arr).length;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -792,6 +834,8 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
     use crate::string::{StringHeader, js_string_from_bytes};
     use crate::value::JSValue;
 
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return crate::string::js_string_from_bytes(b"".as_ptr(), 0); }
     unsafe {
         let length = (*arr).length;
 

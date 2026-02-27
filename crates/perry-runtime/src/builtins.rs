@@ -729,7 +729,7 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
 /// If the string cannot be parsed, returns NaN.
 #[no_mangle]
 pub extern "C" fn js_parse_int(str_ptr: *const StringHeader, radix: f64) -> f64 {
-    if str_ptr.is_null() {
+    if str_ptr.is_null() || (str_ptr as usize) < 0x1000 {
         return f64::NAN;
     }
 
@@ -794,7 +794,7 @@ pub extern "C" fn js_parse_int(str_ptr: *const StringHeader, radix: f64) -> f64 
 /// Parses a string and returns a floating-point number.
 #[no_mangle]
 pub extern "C" fn js_parse_float(str_ptr: *const StringHeader) -> f64 {
-    if str_ptr.is_null() {
+    if str_ptr.is_null() || (str_ptr as usize) < 0x1000 {
         return f64::NAN;
     }
 

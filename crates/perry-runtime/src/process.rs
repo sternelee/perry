@@ -36,7 +36,7 @@ pub extern "C" fn js_process_exit(code: f64) {
 #[no_mangle]
 pub extern "C" fn js_getenv(name_ptr: *const StringHeader) -> *mut StringHeader {
     unsafe {
-        if name_ptr.is_null() {
+        if name_ptr.is_null() || (name_ptr as usize) < 0x1000 {
             return std::ptr::null_mut();
         }
 
