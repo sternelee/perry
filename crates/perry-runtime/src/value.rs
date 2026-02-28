@@ -360,13 +360,7 @@ pub extern "C" fn js_nanbox_pointer(ptr: i64) -> f64 {
 #[no_mangle]
 pub extern "C" fn js_nanbox_string(ptr: i64) -> f64 {
     let jsval = JSValue::string_ptr(ptr as *mut crate::string::StringHeader);
-    let result = f64::from_bits(jsval.bits());
-    // Debug: trace string NaN-boxing
-    if ptr > 0x1000 && (ptr as u64) < 0x10000000000 {
-        // Only log for realistic heap pointers (not constants)
-        eprintln!("[nanbox_string] ptr={:#x} bits={:#018x} f64_bits={:#018x}", ptr, jsval.bits(), result.to_bits());
-    }
-    result
+    f64::from_bits(jsval.bits())
 }
 
 /// Create a NaN-boxed BigInt pointer value from an i64 raw pointer.
@@ -412,39 +406,22 @@ pub extern "C" fn js_nanbox_is_pointer(value: f64) -> bool {
 #[no_mangle]
 pub extern "C" fn js_nanbox_get_pointer(value: f64) -> i64 {
     let bits = value.to_bits();
-
     let jsval = JSValue::from_bits(bits);
 
-    // First check for properly NaN-boxed pointers (with POINTER_TAG)
     if jsval.is_pointer() {
         return jsval.as_pointer::<u8>() as i64;
     }
 
-    // Also check for string pointers (with STRING_TAG)
     if jsval.is_string() {
         return jsval.as_string_ptr() as i64;
     }
 
-    // Also check for BigInt pointers (with BIGINT_TAG 0x7FFA)
     if jsval.is_bigint() {
         return jsval.as_bigint_ptr() as i64;
     }
 
-    // Check for raw pointer bits (from bitcast, not NaN-boxed)
-    // Raw pointers on 64-bit systems typically:
-    // - Have non-zero value
-    // - Are in the range of valid heap addresses (positive, < 2^47)
-    // - Are NOT valid normal f64 numbers (their bit pattern as f64 gives tiny denormalized numbers)
-    //
-    // The key insight: if the bits represent a valid pointer-sized integer
-    // that doesn't match any NaN-box tag and is in valid pointer range,
-    // it's likely a raw pointer that was bitcast to f64.
     if bits != 0 && bits <= POINTER_MASK {
-        // Check if the upper bits don't match any NaN-box tag
         let upper = bits >> 48;
-        // Our NaN-box tags use 0x7FFC-0x7FFF
-        // Valid f64 NaN uses 0x7FF8
-        // If upper bits are 0 or a valid pointer address prefix, treat as raw pointer
         if upper == 0 || (upper > 0 && upper < 0x7FF0) {
             return bits as i64;
         }

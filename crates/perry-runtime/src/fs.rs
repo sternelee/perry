@@ -40,15 +40,9 @@ pub extern "C" fn js_fs_read_file_sync(path_value: f64) -> *mut StringHeader {
         match fs::read_to_string(path_str) {
             Ok(content) => {
                 let bytes = content.as_bytes();
-                let result = js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32);
-                eprintln!("[readFileSync] path={:?} content_len={} result_ptr={:p} ptr_as_i64={:#x}",
-                    path_str, bytes.len(), result, result as i64);
-                result
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
             }
-            Err(e) => {
-                eprintln!("[readFileSync] path={:?} ERROR: {}", path_str, e);
-                std::ptr::null_mut()
-            }
+            Err(_) => std::ptr::null_mut(),
         }
     }
 }

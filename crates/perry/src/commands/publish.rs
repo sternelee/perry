@@ -95,17 +95,6 @@ pub struct PublishArgs {
     #[arg(short, long, default_value = "dist")]
     pub output: PathBuf,
 
-    /// Register a new free license (requires --github-token)
-    #[arg(long)]
-    pub register: bool,
-
-    /// GitHub personal access token (for --register)
-    #[arg(long)]
-    pub github_token: Option<String>,
-
-    /// GitHub username (for --register)
-    #[arg(long)]
-    pub github_username: Option<String>,
 }
 
 // --- Config types matching perry.toml ---
@@ -312,16 +301,6 @@ pub fn run(args: PublishArgs, format: OutputFormat, use_color: bool, _verbose: u
 async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> Result<()> {
     let project_dir = args.project.canonicalize().unwrap_or(args.project.clone());
 
-    let server_url = args
-        .server
-        .clone()
-        .unwrap_or_else(|| "http://localhost:3456".into());
-
-    // Handle --register flow
-    if args.register {
-        return register_license(&args, &server_url, format).await;
-    }
-
     // Load saved config
     let mut saved = load_config();
     let interactive = is_interactive() && matches!(format, OutputFormat::Text);
@@ -478,18 +457,21 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
 
     let license_key = match license_key {
         Some(k) => k,
-        None if interactive => {
-            match prompt_input("  License key", None) {
-                Some(k) => k,
-                None => bail!(
-                    "No license key found. Register with:\n  perry publish --register --github-username <user> --github-token <token>\n\nOr set PERRY_LICENSE_KEY environment variable."
-                ),
-            }
-        }
         None => {
-            bail!(
-                "No license key found. Register with:\n  perry publish --register --github-username <user> --github-token <token>\n\nOr set PERRY_LICENSE_KEY environment variable."
-            );
+            // Auto-register a free license
+            if let OutputFormat::Text = format {
+                print!("  No license key found. Registering free license...");
+                std::io::stdout().flush().ok();
+            }
+            let key = auto_register_license(&server_url).await?;
+            if let OutputFormat::Text = format {
+                println!(" {}", style("done").green());
+                println!("  {} License: {}", style("✓").green().bold(), style(&key).bold());
+            }
+            // Save immediately
+            saved.license_key = Some(key.clone());
+            save_config(&saved).ok();
+            key
         }
     };
 
@@ -1099,86 +1081,20 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     Ok(())
 }
 
-async fn register_license(
-    args: &PublishArgs,
-    server_url: &str,
-    format: OutputFormat,
-) -> Result<()> {
-    let username = args
-        .github_username
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--github-username is required for --register"))?;
-    let token = args
-        .github_token
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--github-token is required for --register"))?;
-
-    if let OutputFormat::Text = format {
-        println!();
-        println!(
-            "  {} Registering license for @{username}...",
-            style("▶").cyan().bold()
-        );
-    }
-
+async fn auto_register_license(server_url: &str) -> Result<String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{server_url}/api/v1/license/register"))
-        .json(&serde_json::json!({
-            "github_username": username,
-            "github_token": token,
-        }))
+        .json(&serde_json::json!({}))
         .send()
         .await
-        .context("Failed to connect to build server")?;
-
+        .context("Failed to register license")?;
     if !resp.status().is_success() {
-        let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!("Registration failed ({status}): {body}");
+        bail!("License registration failed: {body}");
     }
-
     let reg: RegisterResponse = resp.json().await?;
-
-    // Save license key
-    save_license_key(&reg.license_key)?;
-
-    match format {
-        OutputFormat::Text => {
-            println!();
-            println!(
-                "  {} Licensed to @{username} ({} tier)",
-                style("✓").green().bold(),
-                reg.tier,
-            );
-            println!(
-                "  License key: {}",
-                style(&reg.license_key).bold()
-            );
-            println!(
-                "  Platforms:   {}",
-                reg.platforms.join(", ")
-            );
-            println!();
-            println!(
-                "  Saved to {}",
-                style(config_path().display()).dim()
-            );
-            println!();
-        }
-        OutputFormat::Json => {
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "license_key": reg.license_key,
-                    "tier": reg.tier,
-                    "platforms": reg.platforms,
-                }))?
-            );
-        }
-    }
-
-    Ok(())
+    Ok(reg.license_key)
 }
 
 fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
@@ -1334,13 +1250,6 @@ fn save_config(config: &PerryConfig) -> Result<()> {
         .context("Failed to serialize config")?;
     fs::write(&path, content)?;
     Ok(())
-}
-
-/// Backwards-compatible save for register flow
-fn save_license_key(key: &str) -> Result<()> {
-    let mut config = load_config();
-    config.license_key = Some(key.to_string());
-    save_config(&config)
 }
 
 fn is_interactive() -> bool {
