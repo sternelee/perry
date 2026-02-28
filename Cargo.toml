@@ -43,7 +43,7 @@ opt-level = 3
 version = "0.2.162"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/skelpo/perry"
+repository = "https://github.com/PerryTS/perry"
 
 [workspace.dependencies]
 # SWC for TypeScript parsing

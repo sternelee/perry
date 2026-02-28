@@ -79,7 +79,7 @@ Perry generates highly optimized native code that outperforms Node.js on most be
 
 ```bash
 # Clone the repository
-git clone https://github.com/aspect-build/perry.git
+git clone https://github.com/PerryTS/perry.git
 cd perry
 
 # Build in release mode

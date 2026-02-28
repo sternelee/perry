@@ -28,7 +28,7 @@ main();
 "#;
 
 const DEFAULT_CONFIG: &str = r#"# Perry configuration
-# https://github.com/skelpo/perry
+# https://github.com/PerryTS/perry
 
 [project]
 name = "{name}"
