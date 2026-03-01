@@ -1048,7 +1048,9 @@ impl JsEmitter {
             Expr::FsExistsSync(_) |
             Expr::FsMkdirSync(_) |
             Expr::FsUnlinkSync(_) |
-            Expr::FsAppendFileSync(_, _) => {
+            Expr::FsAppendFileSync(_, _) |
+            Expr::FsReadFileBinary(_) |
+            Expr::FsRmRecursive(_) => {
                 self.output.push_str("((() => { throw new Error('fs operations not available in browser'); })())");
             }
 
@@ -1303,7 +1305,10 @@ impl JsEmitter {
             Expr::ChildProcessExecSync { .. } |
             Expr::ChildProcessSpawnSync { .. } |
             Expr::ChildProcessSpawn { .. } |
-            Expr::ChildProcessExec { .. } => {
+            Expr::ChildProcessExec { .. } |
+            Expr::ChildProcessSpawnBackground { .. } |
+            Expr::ChildProcessGetProcessStatus(_) |
+            Expr::ChildProcessKillProcess(_) => {
                 self.output.push_str("((() => { throw new Error('child_process not available in browser'); })())");
             }
 
