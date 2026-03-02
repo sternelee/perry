@@ -125,6 +125,17 @@ pub fn app_run(_app_handle: i64) {
     });
 
     app.connect_activate(move |app| {
+        // Install the menu bar model on the app BEFORE creating windows,
+        // so that show_menubar(true) takes effect when the window is first presented.
+        let has_menubar = crate::menu::PENDING_MENUBAR.with(|p| p.borrow().is_some());
+        if has_menubar {
+            crate::menu::PENDING_MENUBAR.with(|p| {
+                if let Some(bar_handle) = *p.borrow() {
+                    crate::menu::install_menubar_on_app(app, bar_handle);
+                }
+            });
+        }
+
         APPS.with(|a| {
             let apps = a.borrow();
             for entry in apps.iter() {
@@ -153,21 +164,12 @@ pub fn app_run(_app_handle: i64) {
                 // Install keyboard shortcuts on this window
                 install_shortcuts_on_window(&window);
 
+                // Enable the menu bar on this window before presenting it
+                if has_menubar {
+                    window.set_show_menubar(true);
+                }
+
                 window.present();
-
-                // Install pending menu bar (show_menubar must be set per window)
-                crate::menu::PENDING_MENUBAR.with(|p| {
-                    if p.borrow().is_some() {
-                        window.set_show_menubar(true);
-                    }
-                });
-            }
-        });
-
-        // Install pending menu bar on the application
-        crate::menu::PENDING_MENUBAR.with(|p| {
-            if let Some(bar_handle) = *p.borrow() {
-                crate::menu::install_menubar_on_app(app, bar_handle);
             }
         });
 
