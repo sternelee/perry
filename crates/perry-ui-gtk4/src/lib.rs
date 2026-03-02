@@ -20,7 +20,8 @@ pub mod window;
 /// Returns app handle (i64).
 #[no_mangle]
 pub extern "C" fn perry_ui_app_create(title_ptr: i64, width: f64, height: f64) -> i64 {
-    app::app_create(title_ptr as *const u8, width, height)
+    let result = app::app_create(title_ptr as *const u8, width, height);
+    result
 }
 
 /// Set the root widget of an app.
@@ -96,6 +97,24 @@ pub extern "C" fn perry_ui_window_close(window_handle: i64) {
 // =============================================================================
 // Widget Creation
 // =============================================================================
+
+/// Embed an external GtkWidget (from a native FFI library) as a Perry widget.
+/// The ptr is a raw GtkWidget pointer (as returned by hone_editor_nsview).
+/// Returns a Perry widget handle usable with widgetAddChild, VStack, etc.
+#[no_mangle]
+pub extern "C" fn perry_ui_embed_nsview(ptr: i64) -> i64 {
+    eprintln!("[perry-ui] perry_ui_embed_nsview({:#x})", ptr);
+    if ptr == 0 {
+        eprintln!("[perry-ui] perry_ui_embed_nsview: null ptr, returning 0");
+        return 0;
+    }
+    let widget: gtk4::Widget = unsafe {
+        gtk4::glib::translate::from_glib_none(ptr as *mut gtk4::ffi::GtkWidget)
+    };
+    let handle = widgets::register_widget(widget);
+    eprintln!("[perry-ui] perry_ui_embed_nsview -> handle {}", handle);
+    handle
+}
 
 /// Create a Text label.
 #[no_mangle]
@@ -377,6 +396,12 @@ pub extern "C" fn perry_ui_button_set_title(handle: i64, title_ptr: i64) {
     widgets::button::set_title(handle, title_ptr as *const u8);
 }
 
+/// Set the text color of a button's label.
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_text_color(handle, r, g, b, a);
+}
+
 // =============================================================================
 // TextField Ops
 // =============================================================================
@@ -646,8 +671,20 @@ pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64
 }
 
 // =============================================================================
-// Layout
+// Layout — width and hugging (GTK4 equivalents of NSLayoutConstraint)
 // =============================================================================
+
+/// Set a fixed width constraint on a widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
+    widgets::set_width(handle, width);
+}
+
+/// Set content hugging priority: high (≥249) → resist hexpand; low → allow hexpand.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
+    widgets::set_hugging_priority(handle, priority);
+}
 
 /// Create a VStack with custom insets.
 #[no_mangle]
@@ -843,4 +880,80 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
 #[no_mangle]
 pub extern "C" fn perry_system_request_location(callback: f64) {
     location::request_location(callback);
+}
+
+// =============================================================================
+// Platform Detection — __wrapper_perry_* required by Perry codegen
+//
+// Perry codegen emits calls to __wrapper_perry_X for every `declare function
+// perry_X(...)` in TypeScript. These wrappers follow Perry's calling convention:
+//   first param: i64 closure_ptr (ignored for FFI wrappers)
+//   remaining params: f64 (NaN-boxed)
+//   return: f64 (NaN-boxed string, plain f64, or TAG_UNDEFINED)
+// =============================================================================
+
+extern "C" {
+    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+    fn js_nanbox_string(ptr: i64) -> f64;
+}
+
+/// TAG_UNDEFINED — returned by void-returning wrappers.
+const TAG_UNDEFINED: f64 = unsafe { std::mem::transmute(0x7FFC_0000_0000_0001_u64) };
+
+fn nanbox_static_str(s: &'static [u8]) -> f64 {
+    let ptr = unsafe { js_string_from_bytes(s.as_ptr(), s.len() as i64) };
+    unsafe { js_nanbox_string(ptr as i64) }
+}
+
+/// perry_get_platform() → "linux"
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_get_platform(_closure_ptr: i64) -> f64 {
+    nanbox_static_str(b"linux")
+}
+
+/// perry_get_screen_width() → 1920 (desktop default; layout mode computed once at startup)
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_get_screen_width(_closure_ptr: i64) -> f64 {
+    1920.0
+}
+
+/// perry_get_screen_height() → 1080 (desktop default)
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_get_screen_height(_closure_ptr: i64) -> f64 {
+    1080.0
+}
+
+/// perry_get_scale_factor() → 1.0 (non-HiDPI default)
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_get_scale_factor(_closure_ptr: i64) -> f64 {
+    1.0
+}
+
+/// perry_get_orientation() → "landscape" (desktop is always landscape)
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_get_orientation(_closure_ptr: i64) -> f64 {
+    nanbox_static_str(b"landscape")
+}
+
+/// perry_has_hardware_keyboard() → true (desktop always has a keyboard)
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_has_hardware_keyboard(_closure_ptr: i64) -> f64 {
+    1.0
+}
+
+thread_local! {
+    static RESIZE_CALLBACK: std::cell::RefCell<Option<f64>> = std::cell::RefCell::new(None);
+}
+
+/// perry_on_resize(callback) — store callback; called with (width, height) on resize.
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_on_resize(_closure_ptr: i64, callback: f64) -> f64 {
+    RESIZE_CALLBACK.with(|rc| { *rc.borrow_mut() = Some(callback); });
+    TAG_UNDEFINED
+}
+
+/// perry_on_orientation_change(callback) — no-op on desktop (orientation never changes).
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_on_orientation_change(_closure_ptr: i64, _callback: f64) -> f64 {
+    TAG_UNDEFINED
 }

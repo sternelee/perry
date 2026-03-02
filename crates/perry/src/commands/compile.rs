@@ -421,6 +421,8 @@ fn parse_native_library_manifest(
         Some("linux") => "linux",
         Some("windows") => "windows",
         Some("web") => "web",
+        None if cfg!(target_os = "linux") => "linux",
+        None if cfg!(target_os = "windows") => "windows",
         _ => "macos",
     };
 
@@ -1135,6 +1137,30 @@ fn collect_modules(
                             import.source,
                             resolved_path.display()
                         ));
+                    }
+
+                    // Even for Interpreted imports, collect native library manifest if
+                    // the resolved package has perry.nativeLibrary (handles symlinked packages
+                    // where has_perry_native_library returns false for the symlink path but the
+                    // canonical resolved path walks up to the correct package.json).
+                    let module_name = &import.source;
+                    if !module_name.starts_with('.') && !module_name.starts_with('/') {
+                        if !ctx.native_libraries.iter().any(|nl| nl.module == *module_name) {
+                            let mut pkg_dir = resolved_path.parent();
+                            while let Some(dir) = pkg_dir {
+                                if dir.join("package.json").exists() && has_perry_native_library(dir) {
+                                    if let Some(manifest) = parse_native_library_manifest(dir, module_name, target) {
+                                        match format {
+                                            OutputFormat::Text => println!("  Native library: {} ({} FFI functions)", manifest.module, manifest.functions.len()),
+                                            OutputFormat::Json => {}
+                                        }
+                                        ctx.native_libraries.push(manifest);
+                                    }
+                                    break;
+                                }
+                                pkg_dir = dir.parent();
+                            }
+                        }
                     }
 
                     match format {

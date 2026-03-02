@@ -272,6 +272,20 @@ pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
     }
 }
 
+/// Set a fixed width on a widget using set_size_request.
+pub fn set_width(handle: i64, width: f64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_size_request(width as i32, -1);
+    }
+}
+
+/// Set content hugging priority: high priority (≥249) → don't hexpand; low → do hexpand.
+pub fn set_hugging_priority(handle: i64, priority: f64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_hexpand(priority < 249.0);
+    }
+}
+
 /// Animate the position of a widget (via margin offset).
 pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
     use gtk4::glib;

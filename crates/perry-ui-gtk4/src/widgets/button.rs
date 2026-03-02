@@ -81,3 +81,17 @@ pub fn set_title(handle: i64, title_ptr: *const u8) {
         }
     }
 }
+
+/// Set the text color of a button's label via CSS.
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(widget) = super::get_widget(handle) {
+        let css = format!(
+            "button label {{ color: rgba({},{},{},{}); }}",
+            (r * 255.0) as u8,
+            (g * 255.0) as u8,
+            (b * 255.0) as u8,
+            a
+        );
+        super::apply_css(&widget, &css);
+    }
+}

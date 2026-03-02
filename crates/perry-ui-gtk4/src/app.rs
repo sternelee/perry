@@ -2,6 +2,7 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, EventControllerKey};
+use gtk4::gio;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -116,6 +117,7 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
 pub fn app_run(_app_handle: i64) {
     let app = Application::builder()
         .application_id("com.perry.app")
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
     GTK_APP.with(|ga| {
