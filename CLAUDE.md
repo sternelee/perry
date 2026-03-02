@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.164
+**Current Version:** 0.2.165
 
 ## Workflow Requirements
 
@@ -134,6 +134,12 @@ Declarative TypeScript compiles to AppKit/UIKit calls. 47 `perry_ui_*` FFI funct
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.165
+- Background process management: `child_process.spawnBackground(cmd, args, logFile, envJson?)` → `{pid, handleId}`, `getProcessStatus(handleId)` → `{alive, exitCode}`, `killProcess(handleId)` — non-blocking process spawning with global registry
+- Binary file read: `fs.readFileBuffer(path)` → Buffer (binary-safe, uses `fs::read()` not `read_to_string`)
+- Recursive directory removal: `fs.rmRecursive(path)` → boolean (uses `fs::remove_dir_all`)
+- `__platform__` compile-time constant: `declare const __platform__: number` in any module emits an i64 constant (0=macOS,1=iOS,2=Android,3=Windows,4=Linux) determined at compile time; Cranelift constant-folds comparisons and eliminates dead branches — enables zero-cost platform branching
 
 ### v0.2.164
 - `perry publish`: auto-register free license on first use (no `--register`/`--github-token` flags needed); sends empty JSON to `/api/v1/license/register`
