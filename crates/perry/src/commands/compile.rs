@@ -458,8 +458,26 @@ fn parse_native_library_manifest(
     })
 }
 
-/// Check if a file path is inside a package with perry.nativeLibrary
+/// Packages that Perry provides built-in native extensions for.
+/// These must never be loaded into V8 — Perry's codegen intercepts all imports
+/// from these packages and replaces them with native calls.
+const PERRY_NATIVE_EXTENSION_PACKAGES: &[&str] = &[
+    "ioredis", "ethers", "mysql2", "ws", "dotenv",
+];
+
+/// Check if a file path is inside a Perry native extension package (has built-in stdlib support)
+/// or a package that has perry.nativeLibrary in its package.json.
 fn is_in_perry_native_package(path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+    // Check hardcoded native extension packages first (fast path)
+    for pkg_name in PERRY_NATIVE_EXTENSION_PACKAGES {
+        let needle_slash = format!("node_modules/{}/", pkg_name);
+        let needle_end = format!("node_modules/{}", pkg_name);
+        if path_str.contains(&needle_slash) || path_str.ends_with(&needle_end) {
+            return true;
+        }
+    }
+    // Fall back to package.json perry.nativeLibrary check
     let mut current = path.parent();
     while let Some(dir) = current {
         let pkg_json = dir.join("package.json");
@@ -989,7 +1007,8 @@ fn collect_modules(
     let is_json = canonical.extension().and_then(|e| e.to_str()) == Some("json");
     let is_in_node_modules = canonical.to_string_lossy().contains("node_modules");
     let is_perry_native = is_in_node_modules && is_in_perry_native_package(&canonical);
-    let is_in_compiled_pkg = is_in_node_modules && is_in_compile_package(&canonical, &ctx.compile_packages);
+    let is_in_compiled_pkg = (is_in_node_modules && is_in_compile_package(&canonical, &ctx.compile_packages))
+        || ctx.compile_package_dirs.values().any(|dir| canonical.starts_with(dir));
     let should_use_js_runtime = (is_js_file(&canonical) && !is_in_compiled_pkg)
         || is_declaration_file(&canonical)
         || is_json
@@ -1010,6 +1029,12 @@ fn collect_modules(
 
         // Skip declaration files - they're just type information
         if is_declaration_file(&canonical) {
+            return Ok(());
+        }
+
+        // Perry native extension packages (ioredis, ethers, ws, mysql2, dotenv) are handled
+        // entirely by Perry's built-in stdlib — they must NOT be loaded into V8.
+        if is_perry_native {
             return Ok(());
         }
 
@@ -1097,6 +1122,17 @@ fn collect_modules(
                         if ctx.compile_packages.contains(&pkg_name) && !ctx.compile_package_dirs.contains_key(&pkg_name) {
                             if let Some(pkg_dir) = extract_compile_package_dir(&resolved_path, &pkg_name) {
                                 ctx.compile_package_dirs.insert(pkg_name, pkg_dir);
+                            } else {
+                                // Symlinked local package: canonical path is outside node_modules.
+                                // Walk up from resolved_path to find the package root (dir with package.json).
+                                let mut dir = resolved_path.parent();
+                                while let Some(d) = dir {
+                                    if d.join("package.json").exists() {
+                                        ctx.compile_package_dirs.insert(pkg_name, d.to_path_buf());
+                                        break;
+                                    }
+                                    dir = d.parent();
+                                }
                             }
                         }
                     }
@@ -1126,6 +1162,13 @@ fn collect_modules(
                     collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
                 }
                 ModuleKind::Interpreted => {
+                    // Perry native extension packages (ioredis, ethers, ws, mysql2, dotenv)
+                    // are handled entirely by Perry's built-in stdlib at codegen time.
+                    // They must NOT be loaded into V8 — skip them entirely.
+                    if is_in_perry_native_package(&resolved_path) {
+                        continue;
+                    }
+
                     // Skip declaration files (.d.ts) - they only contain type information
                     if is_declaration_file(&resolved_path) {
                         continue;
