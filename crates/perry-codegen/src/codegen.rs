@@ -915,7 +915,8 @@ impl Compiler {
     /// The class definition must have been exported from the source module.
     /// If `local_alias` is provided and differs from the class name, the class is also
     /// registered under the alias so it can be found when used with that name in the code.
-    pub fn register_imported_class(&mut self, class: &Class, local_alias: Option<&str>) -> Result<()> {
+    /// `source_prefix` is the module symbol prefix of the source module (used to qualify symbols).
+    pub fn register_imported_class(&mut self, class: &Class, local_alias: Option<&str>, source_prefix: &str) -> Result<()> {
         // Skip if already registered (e.g., if class is defined locally)
         if self.classes.contains_key(&class.name) {
             // If there's an alias that differs from the class name, also register under the alias
@@ -993,7 +994,7 @@ impl Compiler {
             }
             // Constructor returns void
 
-            let func_name = format!("{}_constructor", class.name);
+            let func_name = format!("{}__{}_constructor", source_prefix, class.name);
             let func_id = self.module.declare_function(&func_name, Linkage::Import, &sig)?;
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
@@ -1010,7 +1011,7 @@ impl Compiler {
             }
             sig.returns.push(AbiParam::new(types::F64));
 
-            let func_name = format!("{}_{}", class.name, method.name);
+            let func_name = format!("{}__{}_{}",source_prefix, class.name, method.name);
             let func_id = self.module.declare_function(&func_name, Linkage::Import, &sig)?;
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
@@ -2074,7 +2075,7 @@ impl Compiler {
             // Return type (f64 for now)
             sig.returns.push(AbiParam::new(types::F64));
 
-            let func_name = format!("{}_{}", class.name, method.name);
+            let func_name = format!("{}__{}_{}",self.module_symbol_prefix, class.name, method.name);
             let func_id = self.module.declare_function(&func_name, linkage, &sig)?;
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
@@ -2086,7 +2087,7 @@ impl Compiler {
     }
 
     fn compile_class_method(&mut self, class: &Class, method: &Function) -> Result<()> {
-        let func_name = format!("{}_{}", class.name, method.name);
+        let func_name = format!("{}__{}_{}",self.module_symbol_prefix, class.name, method.name);
         let func_id = self.classes.get(&class.name)
             .and_then(|m| m.method_ids.get(&method.name).copied())
             .ok_or_else(|| anyhow!("Method not declared: {}::{}", class.name, method.name))?;
@@ -2379,7 +2380,7 @@ impl Compiler {
             // Return type (f64 for now)
             sig.returns.push(AbiParam::new(types::F64));
 
-            let func_name = format!("{}_get_{}", class.name, prop_name);
+            let func_name = format!("{}__{}__get_{}", self.module_symbol_prefix, class.name, prop_name);
             let func_id = self.module.declare_function(&func_name, Linkage::Local, &sig)?;
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
@@ -2404,7 +2405,7 @@ impl Compiler {
             // Return type void (f64 for consistency)
             sig.returns.push(AbiParam::new(types::F64));
 
-            let func_name = format!("{}_set_{}", class.name, prop_name);
+            let func_name = format!("{}__{}__set_{}", self.module_symbol_prefix, class.name, prop_name);
             let func_id = self.module.declare_function(&func_name, Linkage::Local, &sig)?;
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
@@ -2743,7 +2744,7 @@ impl Compiler {
             // Return type (f64 for now)
             sig.returns.push(AbiParam::new(types::F64));
 
-            let func_name = format!("{}_{}_static", class.name, method.name);
+            let func_name = format!("{}__{}_{}__static", self.module_symbol_prefix, class.name, method.name);
             let func_id = self.module.declare_function(&func_name, Linkage::Local, &sig)?;
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
@@ -2756,7 +2757,7 @@ impl Compiler {
     fn declare_static_fields(&mut self, class: &Class) -> Result<()> {
         for field in &class.static_fields {
             // Static fields are global variables stored as 8 bytes (f64)
-            let data_name = format!("{}_{}_static_field", class.name, field.name);
+            let data_name = format!("{}__{}_{}__static_field", self.module_symbol_prefix, class.name, field.name);
             let data_id = self.module.declare_data(&data_name, Linkage::Local, true, false)?;
 
             if let Some(meta) = self.classes.get_mut(&class.name) {
@@ -2767,7 +2768,7 @@ impl Compiler {
     }
 
     fn compile_static_method(&mut self, class: &Class, method: &Function) -> Result<()> {
-        let func_name = format!("{}_{}_static", class.name, method.name);
+        let func_name = format!("{}__{}_{}__static", self.module_symbol_prefix, class.name, method.name);
         let func_id = self.classes.get(&class.name)
             .and_then(|m| m.static_method_ids.get(&method.name).copied())
             .ok_or_else(|| anyhow!("Static method not declared: {}::{}", class.name, method.name))?;
@@ -2977,7 +2978,7 @@ impl Compiler {
             }
             // Constructor returns void - the object is passed in
 
-            let func_name = format!("{}_constructor", class.name);
+            let func_name = format!("{}__{}_constructor", self.module_symbol_prefix, class.name);
             // Export constructors for exported classes so other modules can call them
             let linkage = if class.is_exported { Linkage::Export } else { Linkage::Local };
             let func_id = self.module.declare_function(&func_name, linkage, &sig)?;
@@ -2990,7 +2991,7 @@ impl Compiler {
     }
 
     fn compile_class_constructor(&mut self, class: &Class, ctor: &Function) -> Result<()> {
-        let func_name = format!("{}_constructor", class.name);
+        let func_name = format!("{}__{}_constructor", self.module_symbol_prefix, class.name);
         let func_id = self.classes.get(&class.name)
             .and_then(|m| m.constructor_id)
             .ok_or_else(|| anyhow!("Constructor not declared for class {}", class.name))?;

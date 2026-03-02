@@ -2272,7 +2272,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
                                 // Register imported classes
                                 if let Some(class) = exported_classes.get(&key) {
-                                    compiler.register_imported_class(class, None)?;
+                                    compiler.register_imported_class(class, None, &origin_prefix)?;
                                 }
 
                                 // Register imported enums
@@ -2292,13 +2292,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     perry_hir::ImportSpecifier::Namespace { .. } => unreachable!(),
                 };
 
-                // Check if this import is a class from another module
                 let key = (resolved_path_str.clone(), exported_name.clone());
-                if let Some(class) = exported_classes.get(&key) {
-                    // Register this class as an import in the current compiler
-                    // Pass the local_name as an alias so the class can be found when used with that name
-                    compiler.register_imported_class(class, Some(&local_name))?;
-                }
 
                 // Resolve through re-export chains to find the origin module prefix.
                 // When importing from a barrel file (e.g., lib.ts with `export * from "./lib/db.js"`),
@@ -2317,6 +2311,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 } else {
                     source_module_prefix.clone()
                 };
+
+                // Check if this import is a class from another module
+                if let Some(class) = exported_classes.get(&key) {
+                    // Register this class as an import in the current compiler
+                    // Pass the local_name as an alias so the class can be found when used with that name
+                    // effective_prefix resolves through re-export chains to the origin module
+                    compiler.register_imported_class(class, Some(&local_name), &effective_prefix)?;
+                }
 
                 // Check if this import is a function from another module
                 // Register its param count, return type, and pre-declare the scoped wrapper
