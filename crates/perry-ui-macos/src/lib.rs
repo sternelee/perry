@@ -343,6 +343,42 @@ pub extern "C" fn perry_ui_widget_set_context_menu(widget_handle: i64, menu_hand
     menu::set_context_menu(widget_handle, menu_handle);
 }
 
+/// Add a menu item with a keyboard shortcut.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_ptr: i64, callback: f64, shortcut_ptr: i64) {
+    menu::add_item_with_shortcut(menu_handle, title_ptr as *const u8, callback, shortcut_ptr as *const u8);
+}
+
+/// Add a separator to a menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_separator(menu_handle: i64) {
+    menu::add_separator(menu_handle);
+}
+
+/// Add a submenu to a menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_submenu(menu_handle: i64, title_ptr: i64, submenu_handle: i64) {
+    menu::add_submenu(menu_handle, title_ptr as *const u8, submenu_handle);
+}
+
+/// Create a menu bar. Returns bar handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_create() -> i64 {
+    menu::menubar_create()
+}
+
+/// Add a menu to a menu bar with a title.
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_add_menu(bar_handle: i64, title_ptr: i64, menu_handle: i64) {
+    menu::menubar_add_menu(bar_handle, title_ptr as *const u8, menu_handle);
+}
+
+/// Attach a menu bar to the application.
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_attach(bar_handle: i64) {
+    menu::menubar_attach(bar_handle);
+}
+
 /// Open a file dialog. Calls callback with selected path or undefined if cancelled.
 #[no_mangle]
 pub extern "C" fn perry_ui_open_file_dialog(callback: f64) {
@@ -406,6 +442,32 @@ pub extern "C" fn perry_ui_widget_set_background_color(
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_corner_radius(handle: i64, radius: f64) {
     widgets::set_corner_radius(handle, radius);
+}
+
+/// Set border color on any widget via its CALayer.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::set_border_color(handle, r, g, b, a);
+}
+
+/// Set border width on any widget via its CALayer.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_border_width(handle: i64, width: f64) {
+    widgets::set_border_width(handle, width);
+}
+
+/// Set edge insets (padding) on an NSStackView widget. No-op for other widget types.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_edge_insets(
+    handle: i64, top: f64, left: f64, bottom: f64, right: f64,
+) {
+    widgets::set_edge_insets(handle, top, left, bottom, right);
+}
+
+/// Set view opacity in [0.0, 1.0].
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_opacity(handle: i64, alpha: f64) {
+    widgets::set_opacity(handle, alpha);
 }
 
 /// Create a Canvas widget for custom drawing.

@@ -249,6 +249,30 @@ pub fn set_corner_radius(handle: i64, radius: f64) {
     }
 }
 
+/// Set a fixed width constraint on a widget.
+pub fn set_width(handle: i64, width: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let width_anchor: Retained<AnyObject> = objc2::msg_send![&*view, widthAnchor];
+            let constraint: Retained<AnyObject> = objc2::msg_send![
+                &*width_anchor, constraintEqualToConstant: width
+            ];
+            let _: () = objc2::msg_send![&*constraint, setActive: true];
+        }
+    }
+}
+
+/// Set the content hugging priority for both axes.
+pub fn set_hugging_priority(handle: i64, priority: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            // UILayoutConstraintAxis: 0 = Horizontal, 1 = Vertical
+            let _: () = objc2::msg_send![&*view, setContentHuggingPriority: priority as f32, forAxis: 0i64];
+            let _: () = objc2::msg_send![&*view, setContentHuggingPriority: priority as f32, forAxis: 1i64];
+        }
+    }
+}
+
 // =============================================================================
 // Cross-cutting: Enabled, Hover, DoubleClick, Animations, Tooltip, ControlSize
 // =============================================================================

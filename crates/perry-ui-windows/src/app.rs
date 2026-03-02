@@ -79,6 +79,20 @@ thread_local! {
     static ON_TERMINATE_CALLBACK: RefCell<Option<*const u8>> = RefCell::new(None);
 }
 
+/// Get the HWND of the first (main) app window.
+#[cfg(target_os = "windows")]
+pub fn get_main_hwnd() -> Option<HWND> {
+    APPS.with(|apps| {
+        let apps = apps.borrow();
+        apps.first().map(|a| a.hwnd)
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn get_main_hwnd() -> Option<isize> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()

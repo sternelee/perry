@@ -525,6 +525,42 @@ pub extern "C" fn perry_ui_menu_add_item(menu_handle: i64, title_ptr: i64, callb
     menu::add_item(menu_handle, title_ptr as *const u8, callback);
 }
 
+/// Add a menu item with a keyboard shortcut.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_ptr: i64, callback: f64, shortcut_ptr: i64) {
+    menu::add_item_with_shortcut(menu_handle, title_ptr as *const u8, callback, shortcut_ptr as *const u8);
+}
+
+/// Add a separator to a menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_separator(menu_handle: i64) {
+    menu::add_separator(menu_handle);
+}
+
+/// Add a submenu to a menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_submenu(menu_handle: i64, title_ptr: i64, submenu_handle: i64) {
+    menu::add_submenu(menu_handle, title_ptr as *const u8, submenu_handle);
+}
+
+/// Create a menu bar. Returns bar handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_create() -> i64 {
+    menu::menubar_create()
+}
+
+/// Add a menu to a menu bar with a title.
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_add_menu(bar_handle: i64, title_ptr: i64, menu_handle: i64) {
+    menu::menubar_add_menu(bar_handle, title_ptr as *const u8, menu_handle);
+}
+
+/// Attach a menu bar to the application.
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_attach(bar_handle: i64) {
+    menu::menubar_attach(bar_handle);
+}
+
 // =============================================================================
 // Clipboard
 // =============================================================================

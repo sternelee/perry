@@ -10950,6 +10950,61 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_widget_set_context_menu".to_string(), func_id);
         }
 
+        // perry_ui_menu_add_item_with_shortcut(menu: i64, title: i64, cb: f64, shortcut: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            sig.params.push(AbiParam::new(types::I64)); // title string ptr
+            sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
+            sig.params.push(AbiParam::new(types::I64)); // shortcut string ptr
+            let func_id = self.module.declare_function("perry_ui_menu_add_item_with_shortcut", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menu_add_item_with_shortcut".to_string(), func_id);
+        }
+
+        // perry_ui_menu_add_separator(menu: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            let func_id = self.module.declare_function("perry_ui_menu_add_separator", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menu_add_separator".to_string(), func_id);
+        }
+
+        // perry_ui_menu_add_submenu(menu: i64, title: i64, submenu: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            sig.params.push(AbiParam::new(types::I64)); // title string ptr
+            sig.params.push(AbiParam::new(types::I64)); // submenu handle
+            let func_id = self.module.declare_function("perry_ui_menu_add_submenu", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menu_add_submenu".to_string(), func_id);
+        }
+
+        // perry_ui_menubar_create() -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64)); // bar handle
+            let func_id = self.module.declare_function("perry_ui_menubar_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menubar_create".to_string(), func_id);
+        }
+
+        // perry_ui_menubar_add_menu(bar: i64, title: i64, menu: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // bar handle
+            sig.params.push(AbiParam::new(types::I64)); // title string ptr
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            let func_id = self.module.declare_function("perry_ui_menubar_add_menu", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menubar_add_menu".to_string(), func_id);
+        }
+
+        // perry_ui_menubar_attach(bar: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // bar handle
+            let func_id = self.module.declare_function("perry_ui_menubar_attach", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menubar_attach".to_string(), func_id);
+        }
+
         // perry_ui_open_file_dialog(callback: f64)
         {
             let mut sig = self.module.make_signature();
@@ -33503,7 +33558,7 @@ fn compile_expr(
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
                     "menuAddItem" => {
-                        // (menuHandle, title, callback) — extract menu handle, title string, pass callback
+                        // (menuHandle, title, callback[, shortcut]) — extract menu handle, title string, pass callback
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
                         let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
@@ -33520,10 +33575,108 @@ fn compile_expr(
 
                         let callback = ensure_f64(builder, arg_vals[2]);
 
-                        let func = extern_funcs.get("perry_ui_menu_add_item")
-                            .ok_or_else(|| anyhow!("perry_ui_menu_add_item not declared"))?;
+                        if arg_vals.len() >= 4 {
+                            // 4th arg = shortcut string
+                            let shortcut_f64 = ensure_f64(builder, arg_vals[3]);
+                            let shortcut_call = builder.ins().call(get_str_ref, &[shortcut_f64]);
+                            let shortcut_ptr = builder.inst_results(shortcut_call)[0];
+
+                            let func = extern_funcs.get("perry_ui_menu_add_item_with_shortcut")
+                                .ok_or_else(|| anyhow!("perry_ui_menu_add_item_with_shortcut not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            builder.ins().call(func_ref, &[menu_handle, title_ptr, callback, shortcut_ptr]);
+                        } else {
+                            let func = extern_funcs.get("perry_ui_menu_add_item")
+                                .ok_or_else(|| anyhow!("perry_ui_menu_add_item not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            builder.ins().call(func_ref, &[menu_handle, title_ptr, callback]);
+                        }
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "menuAddSeparator" => {
+                        // (menuHandle) — extract menu handle
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let h_f64 = ensure_f64(builder, arg_vals[0]);
+                        let h_call = builder.ins().call(get_ptr_ref, &[h_f64]);
+                        let menu_handle = builder.inst_results(h_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_menu_add_separator")
+                            .ok_or_else(|| anyhow!("perry_ui_menu_add_separator not declared"))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
-                        builder.ins().call(func_ref, &[menu_handle, title_ptr, callback]);
+                        builder.ins().call(func_ref, &[menu_handle]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "menuAddSubmenu" => {
+                        // (menuHandle, title, submenuHandle)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let h_f64 = ensure_f64(builder, arg_vals[0]);
+                        let h_call = builder.ins().call(get_ptr_ref, &[h_f64]);
+                        let menu_handle = builder.inst_results(h_call)[0];
+
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                        let title_f64 = ensure_f64(builder, arg_vals[1]);
+                        let str_call = builder.ins().call(get_str_ref, &[title_f64]);
+                        let title_ptr = builder.inst_results(str_call)[0];
+
+                        let sub_f64 = ensure_f64(builder, arg_vals[2]);
+                        let sub_call = builder.ins().call(get_ptr_ref, &[sub_f64]);
+                        let submenu_handle = builder.inst_results(sub_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_menu_add_submenu")
+                            .ok_or_else(|| anyhow!("perry_ui_menu_add_submenu not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[menu_handle, title_ptr, submenu_handle]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "menuBarAddMenu" => {
+                        // (barHandle, title, menuHandle)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let bar_f64 = ensure_f64(builder, arg_vals[0]);
+                        let bar_call = builder.ins().call(get_ptr_ref, &[bar_f64]);
+                        let bar_handle = builder.inst_results(bar_call)[0];
+
+                        let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                            .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                        let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                        let title_f64 = ensure_f64(builder, arg_vals[1]);
+                        let str_call = builder.ins().call(get_str_ref, &[title_f64]);
+                        let title_ptr = builder.inst_results(str_call)[0];
+
+                        let menu_f64 = ensure_f64(builder, arg_vals[2]);
+                        let menu_call = builder.ins().call(get_ptr_ref, &[menu_f64]);
+                        let menu_handle = builder.inst_results(menu_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_menubar_add_menu")
+                            .ok_or_else(|| anyhow!("perry_ui_menubar_add_menu not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[bar_handle, title_ptr, menu_handle]);
+                        const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+                        return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "menuBarAttach" => {
+                        // (barHandle)
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let bar_f64 = ensure_f64(builder, arg_vals[0]);
+                        let bar_call = builder.ins().call(get_ptr_ref, &[bar_f64]);
+                        let bar_handle = builder.inst_results(bar_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_menubar_attach")
+                            .ok_or_else(|| anyhow!("perry_ui_menubar_attach not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        builder.ins().call(func_ref, &[bar_handle]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
@@ -34449,6 +34602,7 @@ fn compile_expr(
                 ("perry/ui", false, "Divider") => "perry_ui_divider_create",
                 ("perry/ui", false, "ScrollView") => "perry_ui_scrollview_create",
                 ("perry/ui", false, "menuCreate") => "perry_ui_menu_create",
+                ("perry/ui", false, "menuBarCreate") => "perry_ui_menubar_create",
                 // VStack/HStack with insets — 5 f64 args
                 ("perry/ui", false, "VStackWithInsets") => "perry_ui_vstack_create_with_insets",
                 ("perry/ui", false, "HStackWithInsets") => "perry_ui_hstack_create_with_insets",

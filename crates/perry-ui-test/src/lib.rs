@@ -174,8 +174,14 @@ pub const FEATURES: &[Feature] = &[
     Feature { name: "perry_ui_canvas_fill_gradient", category: Canvas, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
 
     // ── Menu ─────────────────────────────────────────────────────────────
-    Feature { name: "perry_ui_menu_create",   category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
-    Feature { name: "perry_ui_menu_add_item", category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menu_create",                category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menu_add_item",              category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menu_add_item_with_shortcut", category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menu_add_separator",         category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menu_add_submenu",           category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menubar_create",             category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menubar_add_menu",           category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_ui_menubar_attach",             category: Menu, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
 
     // ── Clipboard ────────────────────────────────────────────────────────
     Feature { name: "perry_ui_clipboard_read",  category: Clipboard, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },

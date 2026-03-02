@@ -252,6 +252,61 @@ pub fn set_background_gradient(
     }
 }
 
+/// Set the border color on any widget via its layer.
+pub fn set_border_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setWantsLayer: true];
+            let layer: *mut AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                let cg_color = CGColorCreateGenericRGB(r, g, b, a);
+                let _: () = objc2::msg_send![layer, setBorderColor: cg_color];
+                CGColorRelease(cg_color);
+            }
+        }
+    }
+}
+
+/// Set the border width on any widget via its layer.
+pub fn set_border_width(handle: i64, width: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setWantsLayer: true];
+            let layer: *mut AnyObject = objc2::msg_send![&*view, layer];
+            if !layer.is_null() {
+                let _: () = objc2::msg_send![layer, setBorderWidth: width];
+            }
+        }
+    }
+}
+
+/// Set edge insets (internal padding) on an NSStackView widget.
+/// No-op for non-stack widgets.
+pub fn set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {
+    if let Some(view) = get_widget(handle) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            view.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&view) as *const NSStackView) };
+            unsafe {
+                stack.setEdgeInsets(objc2_foundation::NSEdgeInsets { top, left, bottom, right });
+            }
+        }
+    }
+}
+
+/// Set the view's alpha (opacity) in [0.0, 1.0].
+pub fn set_opacity(handle: i64, alpha: f64) {
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            let _: () = objc2::msg_send![&*view, setAlphaValue: alpha];
+        }
+    }
+}
+
 /// Set corner radius on any widget via its layer.
 pub fn set_corner_radius(handle: i64, radius: f64) {
     if let Some(view) = get_widget(handle) {

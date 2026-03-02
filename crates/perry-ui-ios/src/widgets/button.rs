@@ -138,6 +138,23 @@ pub fn set_bordered(handle: i64, bordered: bool) {
     }
 }
 
+/// Set the text color of a button.
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let color: Retained<AnyObject> = msg_send![
+                objc2::runtime::AnyClass::get(c"UIColor").unwrap(),
+                colorWithRed: r,
+                green: g,
+                blue: b,
+                alpha: a
+            ];
+            // setTitleColor:forState: UIControlStateNormal = 0
+            let _: () = msg_send![&*view, setTitleColor: &*color, forState: 0u64];
+        }
+    }
+}
+
 /// Set the title text of a button.
 pub fn set_title(handle: i64, title_ptr: *const u8) {
     let title = str_from_header(title_ptr);

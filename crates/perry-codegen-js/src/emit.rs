@@ -2114,6 +2114,14 @@ impl JsEmitter {
             "setFont" | "canvas_set_font" => "perry_ui_canvas_set_font",
             // App lifecycle
             "run" | "app_run" => "perry_ui_app_run",
+            // Menu
+            "menuCreate" | "menu_create" => "perry_ui_menu_create",
+            "menuAddItem" | "menu_add_item" => "perry_ui_menu_add_item",
+            "menuAddSeparator" | "menu_add_separator" => "perry_ui_menu_add_separator",
+            "menuAddSubmenu" | "menu_add_submenu" => "perry_ui_menu_add_submenu",
+            "menuBarCreate" | "menubar_create" => "perry_ui_menubar_create",
+            "menuBarAddMenu" | "menubar_add_menu" => "perry_ui_menubar_add_menu",
+            "menuBarAttach" | "menubar_attach" => "perry_ui_menubar_attach",
             // Default
             _ => {
                 // Fallback: try to emit as __perry function

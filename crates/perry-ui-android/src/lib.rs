@@ -424,6 +424,36 @@ pub extern "C" fn perry_ui_widget_set_context_menu(widget_handle: i64, menu_hand
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_menu_add_item_with_shortcut(_menu_handle: i64, _title_ptr: i64, _callback: f64, _shortcut_ptr: i64) {
+    // No-op on Android — no menu bar on mobile
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_separator(_menu_handle: i64) {
+    // No-op on Android
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_submenu(_menu_handle: i64, _title_ptr: i64, _submenu_handle: i64) {
+    // No-op on Android
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_create() -> i64 {
+    0 // Stub — no menu bar on Android
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_add_menu(_bar_handle: i64, _title_ptr: i64, _menu_handle: i64) {
+    // No-op on Android
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_attach(_bar_handle: i64) {
+    // No-op on Android
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_open_file_dialog(callback: f64) {
     file_dialog::open_dialog(callback);
 }

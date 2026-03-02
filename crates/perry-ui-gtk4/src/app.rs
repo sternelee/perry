@@ -152,6 +152,20 @@ pub fn app_run(_app_handle: i64) {
                 install_shortcuts_on_window(&window);
 
                 window.present();
+
+                // Install pending menu bar (show_menubar must be set per window)
+                crate::menu::PENDING_MENUBAR.with(|p| {
+                    if p.borrow().is_some() {
+                        window.set_show_menubar(true);
+                    }
+                });
+            }
+        });
+
+        // Install pending menu bar on the application
+        crate::menu::PENDING_MENUBAR.with(|p| {
+            if let Some(bar_handle) = *p.borrow() {
+                crate::menu::install_menubar_on_app(app, bar_handle);
             }
         });
 

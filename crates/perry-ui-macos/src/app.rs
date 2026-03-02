@@ -138,30 +138,62 @@ pub fn app_set_body(app_handle: i64, root_handle: i64) {
     });
 }
 
-/// Create a standard macOS menu bar with Quit (Cmd+Q) support.
+/// Create a standard macOS menu bar with Quit (Cmd+Q) support,
+/// OR install the user-provided menu bar from menuBarAttach().
 fn setup_menu_bar(app: &NSApplication, mtm: MainThreadMarker) {
+    // Check if the user already attached a custom menu bar via menuBarAttach()
+    let user_bar = crate::menu::PENDING_USER_MENUBAR.with(|p| p.borrow_mut().take());
+    let has_user_bar = user_bar.is_some();
+    if has_user_bar {
+        let count: usize = unsafe { msg_send![&*user_bar.as_ref().unwrap(), numberOfItems] };
+        eprintln!("[perry/ui] Using user menu bar ({} items)", count);
+    } else {
+        eprintln!("[perry/ui] No user menu bar, using default");
+    }
+
     unsafe {
-        // Main menu bar
-        let menu_bar = NSMenu::new(mtm);
+        let menu_bar = if let Some(bar) = user_bar {
+            // User provided a menu bar — prepend the app menu (with Quit) as the first item
+            let app_menu_item = NSMenuItem::new(mtm);
+            let app_menu = NSMenu::new(mtm);
 
-        // App menu (the first menu, shown as the app name)
-        let app_menu_item = NSMenuItem::new(mtm);
-        let app_menu = NSMenu::new(mtm);
+            let quit_title = NSString::from_str("Quit");
+            let quit_key = NSString::from_str("q");
+            let quit_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &quit_title,
+                Some(Sel::register(c"terminate:")),
+                &quit_key,
+            );
+            quit_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+            app_menu.addItem(&quit_item);
+            app_menu_item.setSubmenu(Some(&app_menu));
 
-        // Quit menu item: "Quit" with Cmd+Q
-        let quit_title = NSString::from_str("Quit");
-        let quit_key = NSString::from_str("q");
-        let quit_item = NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &quit_title,
-            Some(Sel::register(c"terminate:")),
-            &quit_key,
-        );
-        quit_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
-        app_menu.addItem(&quit_item);
+            // Insert app menu at position 0 (before user menus)
+            bar.insertItem_atIndex(&app_menu_item, 0);
+            bar
+        } else {
+            // No user menu bar — create default with just Quit
+            let menu_bar = NSMenu::new(mtm);
 
-        app_menu_item.setSubmenu(Some(&app_menu));
-        menu_bar.addItem(&app_menu_item);
+            let app_menu_item = NSMenuItem::new(mtm);
+            let app_menu = NSMenu::new(mtm);
+
+            let quit_title = NSString::from_str("Quit");
+            let quit_key = NSString::from_str("q");
+            let quit_item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &quit_title,
+                Some(Sel::register(c"terminate:")),
+                &quit_key,
+            );
+            quit_item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+            app_menu.addItem(&quit_item);
+
+            app_menu_item.setSubmenu(Some(&app_menu));
+            menu_bar.addItem(&app_menu_item);
+            menu_bar
+        };
 
         app.setMainMenu(Some(&menu_bar));
     }
@@ -191,6 +223,24 @@ pub fn app_run(_app_handle: i64) {
     // Activate the app (bring to front)
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
+
+    // Set up a recurring timer pump to drive setTimeout/setInterval callbacks.
+    // Without this, TypeScript timer-based loops (event polling, animation) never fire.
+    // ~8ms interval (120Hz) ensures responsive callback delivery.
+    unsafe {
+        let target = PerryPumpTarget::new();
+        let sel = Sel::register(c"pump:");
+        let _: Retained<AnyObject> = msg_send![
+            objc2::class!(NSTimer),
+            scheduledTimerWithTimeInterval: 0.008f64,
+            target: &*target,
+            selector: sel,
+            userInfo: std::ptr::null::<AnyObject>(),
+            repeats: true
+        ];
+        // Keep the target alive for the duration of the app
+        std::mem::forget(target);
+    }
 
     app.run();
 }
@@ -340,6 +390,15 @@ fn install_keyboard_shortcut(key_ptr: *const u8, modifiers: f64, callback: f64, 
 
 /// Flush any keyboard shortcuts that were registered before the menu bar existed.
 fn flush_pending_shortcuts(mtm: MainThreadMarker) {
+    flush_pending_shortcuts_inner(mtm);
+}
+
+/// Public entry point for flushing pending shortcuts (called from menu::menubar_attach).
+pub fn flush_pending_shortcuts_pub(mtm: MainThreadMarker) {
+    flush_pending_shortcuts_inner(mtm);
+}
+
+fn flush_pending_shortcuts_inner(mtm: MainThreadMarker) {
     PENDING_SHORTCUTS.with(|ps| {
         let pending: Vec<PendingShortcut> = ps.borrow_mut().drain(..).collect();
         for shortcut in pending {
@@ -359,6 +418,8 @@ thread_local! {
 extern "C" {
     fn js_stdlib_process_pending();
     fn js_promise_run_microtasks() -> i32;
+    fn js_callback_timer_tick() -> i32;
+    fn js_interval_timer_tick() -> i32;
 }
 
 pub struct PerryTimerTargetIvars {
@@ -393,6 +454,41 @@ define_class!(
         }
     }
 );
+
+// ============================================
+// Timer Pump — drives setTimeout/setInterval callbacks
+// ============================================
+
+// Separate target class for the run loop pump timer.
+// Only calls timer tick functions from perry-runtime (always linked).
+// Does NOT call js_stdlib_process_pending (which may not be linked in
+// pure UI apps that don't use --enable-js-runtime).
+pub struct PerryPumpTargetIvars;
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryPumpTarget"]
+    #[ivars = PerryPumpTargetIvars]
+    pub struct PerryPumpTarget;
+
+    impl PerryPumpTarget {
+        #[unsafe(method(pump:))]
+        fn pump(&self, _sender: &AnyObject) {
+            unsafe {
+                js_callback_timer_tick();
+                js_interval_timer_tick();
+                js_promise_run_microtasks();
+            }
+        }
+    }
+);
+
+impl PerryPumpTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryPumpTargetIvars);
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 impl PerryTimerTarget {
     fn new() -> Retained<Self> {

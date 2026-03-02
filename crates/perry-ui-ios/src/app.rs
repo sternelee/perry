@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 
 use crate::widgets;
+use crate::menu;
 
 thread_local! {
     static PENDING_CONFIG: RefCell<Option<AppConfig>> = RefCell::new(None);
@@ -104,11 +105,11 @@ unsafe extern "C" fn scene_will_connect(
     let window_raw: *mut AnyObject = msg_send![window_alloc, initWithWindowScene: scene];
     let window: Retained<UIWindow> = Retained::cast_unchecked(Retained::retain(window_raw as *mut AnyObject).unwrap());
 
-    // Create root UIViewController
-    let vc: Retained<UIViewController> = msg_send![
-        AnyClass::get(c"UIViewController").unwrap(),
-        new
-    ];
+    // Create root PerryViewController (custom subclass with menu bar support).
+    // Falls back to UIViewController if PerryViewController isn't registered yet.
+    let vc_cls = AnyClass::get(c"PerryViewController")
+        .unwrap_or_else(|| AnyClass::get(c"UIViewController").unwrap());
+    let vc: Retained<UIViewController> = msg_send![vc_cls, new];
 
     // Set white background
     let white: Retained<AnyObject> = msg_send![
@@ -156,6 +157,20 @@ unsafe extern "C" fn scene_will_connect(
     APPS.with(|a| {
         a.borrow_mut().push(AppEntry { window });
     });
+
+    // Start the timer pump to drive setInterval/setTimeout callbacks (8ms ≈ 120Hz).
+    // Without this, js_interval_timer_tick() is never called and setInterval never fires.
+    let pump_target = PerryPumpTarget::new();
+    let pump_sel = Sel::register(c"pump:");
+    let _: Retained<AnyObject> = msg_send![
+        objc2::class!(NSTimer),
+        scheduledTimerWithTimeInterval: 0.008f64,
+        target: &*pump_target,
+        selector: pump_sel,
+        userInfo: std::ptr::null::<AnyObject>(),
+        repeats: true
+    ];
+    std::mem::forget(pump_target);
 }
 
 // Raw ObjC runtime FFI for dynamic class registration
@@ -204,6 +219,84 @@ fn register_scene_delegate() {
     }
 }
 
+// ─── PerryViewController ─────────────────────────────────────────────────────
+// A custom UIViewController subclass that overrides:
+//   - buildMenuWithBuilder: — populates the iPadOS menu bar via UIMenuBuilder
+//   - perryMenuAction:      — dispatches UICommand/UIKeyCommand taps to JS callbacks
+
+/// buildMenuWithBuilder: callback — forwards to menu::build_menubar_for_builder.
+unsafe extern "C" fn vc_build_menu(
+    _this: *mut AnyObject,
+    _sel: *const std::ffi::c_void,
+    builder: *mut AnyObject,
+) {
+    // Call super first so UIKit fills in system menus
+    // (we can't easily call [super buildMenuWithBuilder:] from raw FFI,
+    //  but UIViewController's default impl is a no-op, so skipping is fine.)
+    menu::build_menubar_for_builder(builder);
+}
+
+/// perryMenuAction: callback — dispatches to menu::dispatch_menu_action.
+unsafe extern "C" fn vc_perry_menu_action(
+    _this: *mut AnyObject,
+    _sel: *const std::ffi::c_void,
+    sender: *mut AnyObject,
+) {
+    menu::dispatch_menu_action(sender);
+}
+
+/// canPerformAction:withSender: — return YES for perryMenuAction: so UIKit routes commands here.
+unsafe extern "C" fn vc_can_perform_action(
+    _this: *mut AnyObject,
+    _sel: *const std::ffi::c_void,
+    action: *const std::ffi::c_void,
+    _sender: *mut AnyObject,
+) -> bool {
+    let perry_sel = sel_registerName(c"perryMenuAction:".as_ptr());
+    action == perry_sel
+}
+
+/// Register the PerryViewController class dynamically at runtime.
+fn register_view_controller() {
+    unsafe {
+        let superclass = objc_getClass(c"UIViewController".as_ptr());
+        let cls = objc_allocateClassPair(superclass, c"PerryViewController".as_ptr(), 0);
+        if cls.is_null() {
+            // Already registered
+            return;
+        }
+
+        // buildMenuWithBuilder: — type encoding: v@:@ (void, self, _cmd, builder)
+        let sel_build = sel_registerName(c"buildMenuWithBuilder:".as_ptr());
+        class_addMethod(
+            cls,
+            sel_build,
+            vc_build_menu as *const std::ffi::c_void,
+            c"v@:@".as_ptr(),
+        );
+
+        // perryMenuAction: — type encoding: v@:@ (void, self, _cmd, sender)
+        let sel_action = sel_registerName(c"perryMenuAction:".as_ptr());
+        class_addMethod(
+            cls,
+            sel_action,
+            vc_perry_menu_action as *const std::ffi::c_void,
+            c"v@:@".as_ptr(),
+        );
+
+        // canPerformAction:withSender: — type encoding: B@::@ (BOOL, self, _cmd, action, sender)
+        let sel_can = sel_registerName(c"canPerformAction:withSender:".as_ptr());
+        class_addMethod(
+            cls,
+            sel_can,
+            vc_can_perform_action as *const std::ffi::c_void,
+            c"B@::@".as_ptr(),
+        );
+
+        objc_registerClassPair(cls);
+    }
+}
+
 /// Run the iOS app event loop (calls UIApplicationMain, blocks forever).
 pub fn app_run(_app_handle: i64) {
     // Force PerryAppDelegate class registration (define_class! registers it lazily)
@@ -211,6 +304,9 @@ pub fn app_run(_app_handle: i64) {
 
     // Register PerrySceneDelegate dynamically before UIApplicationMain
     register_scene_delegate();
+
+    // Register PerryViewController (UIViewController + menu bar support)
+    register_view_controller();
 
     unsafe {
         let argc = 0i32;
@@ -260,6 +356,39 @@ extern "C" {
     fn js_promise_run_microtasks() -> i32;
     fn js_nanbox_get_pointer(value: f64) -> i64;
     fn js_closure_call0(closure: *const u8) -> f64;
+    fn js_callback_timer_tick() -> i32;
+    fn js_interval_timer_tick() -> i32;
+}
+
+// ============================================
+// Timer Pump — drives setTimeout/setInterval callbacks
+// ============================================
+
+pub struct PerryPumpTargetIvars;
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryPumpTarget"]
+    #[ivars = PerryPumpTargetIvars]
+    pub struct PerryPumpTarget;
+
+    impl PerryPumpTarget {
+        #[unsafe(method(pump:))]
+        fn pump(&self, _sender: &AnyObject) {
+            unsafe {
+                js_callback_timer_tick();
+                js_interval_timer_tick();
+                js_promise_run_microtasks();
+            }
+        }
+    }
+);
+
+impl PerryPumpTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryPumpTargetIvars);
+        unsafe { msg_send![super(this), init] }
+    }
 }
 
 pub struct PerryTimerTargetIvars {

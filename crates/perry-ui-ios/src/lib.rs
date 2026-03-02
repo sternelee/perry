@@ -236,6 +236,21 @@ pub extern "C" fn perry_ui_button_set_title(handle: i64, title_ptr: i64) {
     widgets::button::set_title(handle, title_ptr as *const u8);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_text_color(handle, r, g, b, a);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_width(handle: i64, width: f64) {
+    widgets::set_width(handle, width);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
+    widgets::set_hugging_priority(handle, priority);
+}
+
 // =============================================================================
 // Phase A.4: Focus & Scroll-To
 // =============================================================================
@@ -277,6 +292,36 @@ pub extern "C" fn perry_ui_menu_add_item(menu_handle: i64, title_ptr: i64, callb
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_context_menu(widget_handle: i64, menu_handle: i64) {
     menu::set_context_menu(widget_handle, menu_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_item_with_shortcut(menu_handle: i64, title_ptr: i64, callback: f64, shortcut_ptr: i64) {
+    menu::add_item_with_shortcut(menu_handle, title_ptr as *const u8, callback, shortcut_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_separator(menu_handle: i64) {
+    menu::add_separator(menu_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_submenu(menu_handle: i64, title_ptr: i64, submenu_handle: i64) {
+    menu::add_submenu(menu_handle, title_ptr as *const u8, submenu_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_create() -> i64 {
+    menu::menubar_create()
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_add_menu(bar_handle: i64, title_ptr: i64, menu_handle: i64) {
+    menu::menubar_add_menu(bar_handle, title_ptr as *const u8, menu_handle);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_menubar_attach(bar_handle: i64) {
+    menu::menubar_attach(bar_handle);
 }
 
 #[no_mangle]

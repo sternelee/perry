@@ -1,0 +1,17 @@
+{
+  "name": "perry-styling",
+  "version": "0.1.0",
+  "description": "Typed design system bridge for Perry UI — design token codegen + ergonomic styling helpers",
+  "main": "src/index.ts",
+  "bin": {
+    "perry-styling": "./dist/cli"
+  },
+  "perry": {
+    "nativeModule": true
+  },
+  "scripts": {
+    "build:cli": "perry compile src/cli.ts -o dist/cli"
+  },
+  "keywords": ["perry", "ui", "design-tokens", "theming"],
+  "license": "MIT"
+}
