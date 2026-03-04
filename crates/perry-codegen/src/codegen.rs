@@ -11190,6 +11190,53 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_open_file_dialog".to_string(), func_id);
         }
 
+        // perry_ui_open_folder_dialog(callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
+            let func_id = self.module.declare_function("perry_ui_open_folder_dialog", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_open_folder_dialog".to_string(), func_id);
+        }
+
+        // perry_ui_button_set_image(handle: i64, name_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::I64)); // image name string ptr
+            let func_id = self.module.declare_function("perry_ui_button_set_image", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_button_set_image".to_string(), func_id);
+        }
+
+        // perry_ui_button_set_image_position(handle: i64, position: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // position
+            let func_id = self.module.declare_function("perry_ui_button_set_image_position", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_button_set_image_position".to_string(), func_id);
+        }
+
+        // perry_ui_button_set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // r
+            sig.params.push(AbiParam::new(types::F64)); // g
+            sig.params.push(AbiParam::new(types::F64)); // b
+            sig.params.push(AbiParam::new(types::F64)); // a
+            let func_id = self.module.declare_function("perry_ui_button_set_content_tint_color", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_button_set_content_tint_color".to_string(), func_id);
+        }
+
+        // perry_ui_widget_remove_child(parent: i64, child: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // parent handle
+            sig.params.push(AbiParam::new(types::I64)); // child handle
+            let func_id = self.module.declare_function("perry_ui_widget_remove_child", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_widget_remove_child".to_string(), func_id);
+        }
+
         // perry_ui_app_set_min_size(app_handle: i64, w: f64, h: f64)
         {
             let mut sig = self.module.make_signature();
@@ -34200,7 +34247,7 @@ fn compile_expr(
                     // ============================================================
                     // Phase A: Handle-extracting widget mutation functions
                     // ============================================================
-                    "textSetString" | "buttonSetTitle" | "textfieldSetString" | "textSetFontFamily" => {
+                    "textSetString" | "buttonSetTitle" | "textfieldSetString" | "textSetFontFamily" | "buttonSetImage" => {
                         // (handle, text) — extract handle via js_nanbox_get_pointer, text via js_get_string_pointer_unified
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -34221,6 +34268,7 @@ fn compile_expr(
                             "buttonSetTitle" => "perry_ui_button_set_title",
                             "textfieldSetString" => "perry_ui_textfield_set_string",
                             "textSetFontFamily" => "perry_ui_text_set_font_family",
+                            "buttonSetImage" => "perry_ui_button_set_image",
                             _ => unreachable!(),
                         };
                         let func = extern_funcs.get(ffi_name)
@@ -34249,7 +34297,7 @@ fn compile_expr(
                     }
                     "widgetSetHidden" | "textSetFontSize" | "textSetSelectable" |
                     "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" |
-                    "widgetSetWidth" | "widgetSetHugging" => {
+                    "widgetSetWidth" | "widgetSetHugging" | "buttonSetImagePosition" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -34267,6 +34315,7 @@ fn compile_expr(
                             "widgetClearChildren" => "perry_ui_widget_clear_children",
                             "widgetSetWidth" => "perry_ui_widget_set_width",
                             "widgetSetHugging" => "perry_ui_widget_set_hugging",
+                            "buttonSetImagePosition" => "perry_ui_button_set_image_position",
                             _ => unreachable!(),
                         };
 
@@ -34291,7 +34340,7 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "textSetColor" | "buttonSetTextColor" => {
+                    "textSetColor" | "buttonSetTextColor" | "buttonSetContentTintColor" => {
                         // (handle, r, g, b, a) — extract handle, pass 4 f64 args
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -34307,6 +34356,8 @@ fn compile_expr(
 
                         let ffi_name = if method == "buttonSetTextColor" {
                             "perry_ui_button_set_text_color"
+                        } else if method == "buttonSetContentTintColor" {
+                            "perry_ui_button_set_content_tint_color"
                         } else {
                             "perry_ui_text_set_color"
                         };
@@ -34561,11 +34612,16 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "openFileDialog" => {
+                    "openFileDialog" | "openFolderDialog" => {
                         // (callback) — pass callback as f64
                         let callback = ensure_f64(builder, arg_vals[0]);
-                        let func = extern_funcs.get("perry_ui_open_file_dialog")
-                            .ok_or_else(|| anyhow!("perry_ui_open_file_dialog not declared"))?;
+                        let ffi_name = if method == "openFolderDialog" {
+                            "perry_ui_open_folder_dialog"
+                        } else {
+                            "perry_ui_open_file_dialog"
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         builder.ins().call(func_ref, &[callback]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
@@ -34685,7 +34741,7 @@ fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetAddChild" => {
+                    "widgetAddChild" | "widgetRemoveChild" => {
                         // (parent, child) — extract 2 handles
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -34699,8 +34755,13 @@ fn compile_expr(
                         let c_call = builder.ins().call(get_ptr_ref, &[c_f64]);
                         let child = builder.inst_results(c_call)[0];
 
-                        let func = extern_funcs.get("perry_ui_widget_add_child")
-                            .ok_or_else(|| anyhow!("perry_ui_widget_add_child not declared"))?;
+                        let ffi_name = if method == "widgetRemoveChild" {
+                            "perry_ui_widget_remove_child"
+                        } else {
+                            "perry_ui_widget_add_child"
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         builder.ins().call(func_ref, &[parent, child]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;

@@ -146,6 +146,56 @@ pub fn set_title(handle: i64, title_ptr: *const u8) {
     }
 }
 
+/// Set button image by SF Symbol name. On Windows, maps known names to Unicode/text fallbacks.
+pub fn set_image(handle: i64, name_ptr: *const u8) {
+    let name = str_from_header(name_ptr);
+    let fallback = match name {
+        "doc.on.doc" | "doc.on.doc.fill" => "\u{1F4C4}",
+        "magnifyingglass" => "\u{1F50D}",
+        "arrow.triangle.branch" => "\u{2442}",
+        "ladybug" | "ladybug.fill" => "\u{1F41B}",
+        "puzzlepiece.extension" | "puzzlepiece.extension.fill" => "\u{1F9E9}",
+        "gearshape" | "gearshape.fill" | "gear" => "\u{2699}",
+        "folder" | "folder.fill" => "\u{1F4C1}",
+        "doc.text" | "doc.text.fill" => "\u{1F4C4}",
+        "xmark" => "\u{2715}",
+        "chevron.right" => "\u{203A}",
+        "chevron.down" => "\u{2304}",
+        "sidebar.left" | "sidebar.leading" => "\u{2261}",
+        "plus" => "+",
+        "ellipsis" => "\u{22EF}",
+        _ => name,
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = super::get_hwnd(handle) {
+            // Read existing title and prepend the icon
+            let mut buf = [0u16; 512];
+            let len = unsafe { GetWindowTextW(hwnd, &mut buf) } as usize;
+            let existing = if len > 0 {
+                String::from_utf16_lossy(&buf[..len])
+            } else {
+                String::new()
+            };
+            let combined = if existing.is_empty() {
+                fallback.to_string()
+            } else {
+                format!("{} {}", fallback, existing)
+            };
+            let wide = to_wide(&combined);
+            unsafe {
+                let _ = SetWindowTextW(hwnd, windows::core::PCWSTR(wide.as_ptr()));
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, fallback);
+    }
+}
+
 /// Set the text color of a button. Switches to owner-draw mode.
 pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, _a: f64) {
     let r_byte = (r * 255.0).round().min(255.0).max(0.0) as u32;

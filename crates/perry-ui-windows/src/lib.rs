@@ -2,6 +2,7 @@ pub mod app;
 pub mod clipboard;
 pub mod dialog;
 pub mod file_dialog;
+pub mod folder_dialog;
 pub mod keychain;
 pub mod menu;
 pub mod sheet;
@@ -236,6 +237,13 @@ pub extern "C" fn perry_ui_widget_add_child(parent_handle: i64, child_handle: i6
     app::request_layout();
 }
 
+/// Remove a child widget from a parent.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_remove_child(parent_handle: i64, child_handle: i64) {
+    widgets::remove_child(parent_handle, child_handle);
+    app::request_layout();
+}
+
 // =============================================================================
 // State System
 // =============================================================================
@@ -371,6 +379,22 @@ pub extern "C" fn perry_ui_button_set_bordered(handle: i64, bordered: f64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_button_set_title(handle: i64, title_ptr: i64) {
     widgets::button::set_title(handle, title_ptr as *const u8);
+}
+
+/// Set button image (SF Symbol name). On Windows, maps known SF Symbol names to Unicode/text fallbacks.
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_image(handle: i64, name_ptr: i64) {
+    widgets::button::set_image(handle, name_ptr as *const u8);
+}
+
+/// Set button image position. No-op on Windows (our "images" are text).
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_image_position(_handle: i64, _position: f64) {}
+
+/// Set button content tint color. On Windows, delegates to text color since icons are text.
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_text_color(handle, r, g, b, a);
 }
 
 // =============================================================================
@@ -585,6 +609,12 @@ pub extern "C" fn perry_ui_clipboard_write(text_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_open_file_dialog(callback: f64) {
     file_dialog::open_dialog(callback);
+}
+
+/// Open a folder dialog.
+#[no_mangle]
+pub extern "C" fn perry_ui_open_folder_dialog(callback: f64) {
+    folder_dialog::open_dialog(callback);
 }
 
 /// Open a save file dialog.

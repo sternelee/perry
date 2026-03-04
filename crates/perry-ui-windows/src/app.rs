@@ -147,6 +147,9 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
                 None,
             ).unwrap();
 
+            // Attach any pending menu bar now that the window exists
+            crate::menu::attach_pending_menubar(hwnd);
+
             APPS.with(|apps| {
                 let mut apps = apps.borrow_mut();
                 apps.push(AppEntry {
@@ -545,7 +548,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         WM_COMMAND => {
             let control_id = (wparam.0 & 0xFFFF) as u16;
             let notify_code = ((wparam.0 >> 16) & 0xFFFF) as u16;
-            crate::widgets::handle_command(control_id, notify_code, lparam);
+            if notify_code == 0 && lparam.0 == 0 {
+                // Menu bar command — lparam==0 distinguishes from control notifications
+                crate::menu::dispatch_menu_item(control_id);
+            } else {
+                crate::widgets::handle_command(control_id, notify_code, lparam);
+            }
             LRESULT(0)
         }
         x if x == WM_HSCROLL || x == WM_VSCROLL => {

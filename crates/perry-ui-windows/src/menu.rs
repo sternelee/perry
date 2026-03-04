@@ -57,6 +57,8 @@ thread_local! {
     // Global map from menu item ID -> callback pointer
     static MENU_CALLBACKS: RefCell<Vec<(u16, *const u8)>> = RefCell::new(Vec::new());
     static MENUBARS: RefCell<Vec<MenuBarEntry>> = RefCell::new(Vec::new());
+    /// Pending menubar handle to attach when window is created
+    static PENDING_MENUBAR: RefCell<Option<i64>> = RefCell::new(None);
 }
 
 /// Create a context menu. Returns menu handle (1-based).
@@ -257,22 +259,46 @@ pub fn menubar_add_menu(bar_handle: i64, title_ptr: *const u8, menu_handle: i64)
 }
 
 /// Attach a menu bar to the main application window.
+/// If the window doesn't exist yet, stores the handle as pending.
 pub fn menubar_attach(bar_handle: i64) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = crate::app::get_main_hwnd() {
+            attach_menubar_to_hwnd(bar_handle, hwnd);
+        } else {
+            // Window not created yet — store for later
+            PENDING_MENUBAR.with(|p| *p.borrow_mut() = Some(bar_handle));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = bar_handle;
+    }
+}
+
+/// Actually attach a menubar HMENU to a window HWND.
+#[cfg(target_os = "windows")]
+fn attach_menubar_to_hwnd(bar_handle: i64, hwnd: HWND) {
     MENUBARS.with(|bars| {
         let bars = bars.borrow();
         let bar_idx = (bar_handle - 1) as usize;
         if bar_idx < bars.len() {
-            #[cfg(target_os = "windows")]
-            {
-                if let Some(hwnd) = crate::app::get_main_hwnd() {
-                    unsafe {
-                        let _ = SetMenu(hwnd, bars[bar_idx].hmenu);
-                        let _ = DrawMenuBar(hwnd);
-                    }
-                }
+            unsafe {
+                let _ = SetMenu(hwnd, bars[bar_idx].hmenu);
+                let _ = DrawMenuBar(hwnd);
             }
         }
     });
+}
+
+/// Called from app_create after the window is created — attaches any pending menu bar.
+#[cfg(target_os = "windows")]
+pub fn attach_pending_menubar(hwnd: HWND) {
+    let pending = PENDING_MENUBAR.with(|p| p.borrow_mut().take());
+    if let Some(bar_handle) = pending {
+        attach_menubar_to_hwnd(bar_handle, hwnd);
+    }
 }
 
 /// Set a context menu on a widget (right-click menu).

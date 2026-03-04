@@ -367,6 +367,40 @@ pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
     });
 }
 
+/// Remove a specific child from a parent container.
+pub fn remove_child(parent_handle: i64, child_handle: i64) {
+    // Remove from children list
+    let removed = WIDGETS.with(|w| {
+        let mut widgets = w.borrow_mut();
+        let idx = (parent_handle - 1) as usize;
+        if idx < widgets.len() {
+            if let Some(pos) = widgets[idx].children.iter().position(|&c| c == child_handle) {
+                widgets[idx].children.remove(pos);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    });
+
+    #[cfg(target_os = "windows")]
+    {
+        if removed {
+            let parking = get_parking_hwnd();
+            if let Some(child_hwnd) = get_hwnd(child_handle) {
+                unsafe {
+                    let _ = ShowWindow(child_hwnd, SW_HIDE);
+                    let _ = SetParent(child_hwnd, parking);
+                }
+            }
+        }
+    }
+
+    let _ = removed;
+}
+
 /// Remove all children from a container widget.
 pub fn clear_children(handle: i64) {
     let children: Vec<i64> = WIDGETS.with(|w| {
