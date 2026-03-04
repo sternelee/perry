@@ -187,6 +187,7 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
 /// Returns a new string representing the number
 #[no_mangle]
 pub extern "C" fn js_number_to_string(value: f64) -> *mut StringHeader {
+    eprintln!("[number_to_string] value={} bits=0x{:016X}", value, value.to_bits());
     // Format the number as a string
     let s = if value.fract() == 0.0 && value.abs() < 1e15 {
         // Integer-like, format without decimal

@@ -345,6 +345,15 @@ impl Default for JSValue {
 /// it is preserved as-is to prevent tag corruption.
 #[no_mangle]
 pub extern "C" fn js_nanbox_pointer(ptr: i64) -> f64 {
+    // Guard: null pointer (ptr == 0) must NOT produce null POINTER_TAG (0x7FFD_0000_0000_0000).
+    // Null POINTER_TAG causes crashes when code tries to dereference it as a real object pointer.
+    // Main source: Perry captures an uninitialized I64 variable (value=0) in a closure
+    // that is created inside the variable's own initializer (self-referential closures like
+    // @noble/curves `const f = { pow: (x) => FpPow(f, x) }`). Return TAG_NULL instead so
+    // method calls on it return undefined gracefully rather than crashing.
+    if ptr == 0 {
+        return f64::from_bits(TAG_NULL); // JS null — not callable, method calls return undefined
+    }
     let bits = ptr as u64;
     // If value already has a NaN-box tag (top bits in NaN range), preserve it
     if bits & 0xFFF0_0000_0000_0000 >= 0x7FF0_0000_0000_0000 {
@@ -363,6 +372,16 @@ pub extern "C" fn js_nanbox_string(ptr: i64) -> f64 {
     f64::from_bits(jsval.bits())
 }
 
+/// Debug checkpoint function: prints checkpoint number to stderr.
+/// Used to narrow down crash locations in generated code.
+#[no_mangle]
+pub extern "C" fn js_checkpoint(n: i32) {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    let _ = write!(stderr, "[CHECKPOINT] {}\n", n);
+    let _ = stderr.flush();
+}
+
 /// Create a NaN-boxed BigInt pointer value from an i64 raw pointer.
 /// Returns the value as f64 for storage in union-typed variables.
 /// This uses BIGINT_TAG (0x7FFA) to distinguish from other pointer types.
@@ -370,6 +389,112 @@ pub extern "C" fn js_nanbox_string(ptr: i64) -> f64 {
 pub extern "C" fn js_nanbox_bigint(ptr: i64) -> f64 {
     let jsval = JSValue::bigint_ptr(ptr as *mut crate::bigint::BigIntHeader);
     f64::from_bits(jsval.bits())
+}
+
+// ======================================================================
+// Dynamic arithmetic dispatch: handles BigInt vs float at runtime.
+// When a parameter has Type::Any (is_union=true), it may hold a BigInt
+// (NaN-boxed with BIGINT_TAG) or a regular f64. These functions check
+// the NaN-box tag at runtime and dispatch to the correct operation.
+// ======================================================================
+
+/// Convert a NaN-boxed JSValue to a *mut BigIntHeader for arithmetic.
+/// If the value is already a BigInt, extracts the pointer.
+/// Otherwise allocates a new BigInt from the f64 value.
+#[inline]
+unsafe fn coerce_to_bigint_ptr(val: f64) -> *mut crate::bigint::BigIntHeader {
+    let jsval = JSValue::from_bits(val.to_bits());
+    if jsval.is_bigint() {
+        jsval.as_bigint_ptr() as *mut _
+    } else {
+        crate::bigint::js_bigint_from_f64(val)
+    }
+}
+
+/// Dynamic multiply: BigInt * BigInt if either operand is BigInt, else f64 * f64.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_mul(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let a_ptr = coerce_to_bigint_ptr(a) as *const _;
+        let b_ptr = coerce_to_bigint_ptr(b) as *const _;
+        let result = crate::bigint::js_bigint_mul(a_ptr, b_ptr);
+        return js_nanbox_bigint(result as i64);
+    }
+    a * b
+}
+
+/// Dynamic add: BigInt + BigInt if either operand is BigInt, else f64 + f64.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_add(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_add(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    a + b
+}
+
+/// Dynamic subtract: BigInt - BigInt if either operand is BigInt, else f64 - f64.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_sub(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_sub(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    a - b
+}
+
+/// Dynamic divide: BigInt / BigInt if either operand is BigInt, else f64 / f64.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_div(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_div(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    a / b
+}
+
+/// Dynamic modulo: BigInt % BigInt if either operand is BigInt, else f64 % f64.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_mod(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_mod(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    // Float modulo: a - trunc(a / b) * b
+    a - (a / b).trunc() * b
+}
+
+/// Dynamic negate: -BigInt if operand is BigInt, else -f64.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_neg(a: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    if a_val.is_bigint() {
+        let result = crate::bigint::js_bigint_neg(a_val.as_bigint_ptr());
+        return js_nanbox_bigint(result as i64);
+    }
+    -a
 }
 
 /// Check if an f64 value (interpreted as NaN-boxed) represents a BigInt.
@@ -385,11 +510,17 @@ pub extern "C" fn js_nanbox_is_bigint(value: f64) -> bool {
 pub extern "C" fn js_nanbox_get_bigint(value: f64) -> i64 {
     let jsval = JSValue::from_bits(value.to_bits());
     if jsval.is_bigint() {
-        jsval.as_bigint_ptr() as i64
-    } else {
-        // Fallback: might be a raw bitcast pointer
-        value.to_bits() as i64
+        return jsval.as_bigint_ptr() as i64;
     }
+    // Any NaN that is not BIGINT_TAG: return null (0).
+    // This handles POINTER_TAG objects, fneg'd BigInts (0xFFFA_...), undefined, etc.
+    // Without this guard, clean_bigint_ptr would strip the tag and access a potentially
+    // GC'd or non-BigInt heap address, causing SIGSEGV.
+    if value.is_nan() {
+        return 0;
+    }
+    // Non-NaN F64: might be a raw bitcast I64 pointer from legacy BigInt path.
+    value.to_bits() as i64
 }
 
 /// Check if an f64 value (interpreted as NaN-boxed) represents a pointer.
@@ -560,30 +691,45 @@ pub extern "C" fn js_ensure_string_ptr(value: f64) -> i64 {
     bits as i64
 }
 
-/// Compare two NaN-boxed f64 values for equality.
+/// Compare two NaN-boxed f64 values for equality (JavaScript `===` semantics).
 /// Handles string comparison by comparing actual string contents.
+/// Handles BigInt comparison by comparing underlying bigint values (not pointers).
 /// Returns 1 if equal, 0 if not.
 #[no_mangle]
 pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
-    let a_val = JSValue::from_bits(a.to_bits());
-    let b_val = JSValue::from_bits(b.to_bits());
+    let abits = a.to_bits();
+    let bbits = b.to_bits();
 
-    // If both are strings, compare their contents
+    // Fast path: same bit pattern → equal (same number, same pointer, same boolean, etc.)
+    // Exception: NaN === NaN is false in JavaScript, but NaN-boxed values (tagged NaN) are fine.
+    // Regular IEEE NaN (0x7FF8...) will have same bit pattern == same bit pattern,
+    // but standard JS says NaN !== NaN. We skip this check only for canonical IEEE NaN.
+    // In practice, Perry doesn't produce raw IEEE NaN as a user value, so this is safe.
+    if abits == bbits {
+        return 1;
+    }
+
+    let a_val = JSValue::from_bits(abits);
+    let b_val = JSValue::from_bits(bbits);
+
+    // BigInt comparison: compare by value, not by pointer
+    // Two BigInt allocations with the same value must be equal under ===
+    if a_val.is_bigint() && b_val.is_bigint() {
+        let a_ptr = a_val.as_bigint_ptr();
+        let b_ptr = b_val.as_bigint_ptr();
+        let result = crate::bigint::js_bigint_eq(a_ptr, b_ptr);
+        return if result { 1 } else { 0 };
+    }
+
+    // String comparison: compare by content, not by pointer
     if a_val.is_string() && b_val.is_string() {
         let a_str = a_val.as_string_ptr();
         let b_str = b_val.as_string_ptr();
-        if crate::string::js_string_equals(a_str, b_str) {
-            return 1;
-        }
-        return 0;
+        return if crate::string::js_string_equals(a_str, b_str) { 1 } else { 0 };
     }
 
-    // Otherwise, compare bits directly (works for numbers, null, undefined, etc.)
-    if a.to_bits() == b.to_bits() {
-        1
-    } else {
-        0
-    }
+    // Different types or different values → not equal
+    0
 }
 
 /// Check if a JavaScript value is truthy.
@@ -626,6 +772,10 @@ pub extern "C" fn js_is_truthy(value: f64) -> i32 {
 
     // Check for NaN-boxed pointer (objects/arrays are always truthy)
     if (bits & TAG_MASK) == POINTER_TAG {
+        // Null pointer (0x7FFD_0000_0000_0000) is falsy — like null in JS
+        if (bits & POINTER_MASK) == 0 {
+            return 0;
+        }
         return 1;
     }
 
@@ -905,8 +1055,8 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
 
     // Not a JS handle - it's a native object pointer
     let ptr = js_nanbox_get_pointer(obj_value);
+
     if ptr == 0 {
-        // Invalid pointer - return undefined
         return f64::from_bits(TAG_UNDEFINED);
     }
 
@@ -936,6 +1086,14 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         Ok(s) => s,
         Err(_) => return f64::from_bits(TAG_UNDEFINED),
     };
+
+    // Check if this is a ClosureHeader (CLOSURE_MAGIC at offset 12).
+    // ClosureHeader layout: func_ptr (8B), capture_count u32 (4B), type_tag u32 (4B), captures at 16+
+    // ObjectHeader layout: object_type u32 (4B), class_id u32 (4B), parent_class_id u32 (4B), field_count u32 (4B), keys_array (8B), ...
+    // Without this check, the closure's capture[0] at offset 16 would be read as keys_array → crash.
+    if crate::closure::is_closure_ptr(ptr as usize) {
+        return crate::closure::closure_get_dynamic_prop(ptr as usize, property_name);
+    }
 
     // Check the object type tag (first u32 field of both ObjectHeader and ErrorHeader)
     let object_type = *(ptr as *const u32);

@@ -38,9 +38,14 @@ impl MySqlConfig {
             .as_ref()
             .map(|d| format!("/{}", d))
             .unwrap_or_default();
+        // URL-encode password to handle special characters (e.g., # @ : /)
+        let encoded_password: String = self.password.chars().map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
+            c => format!("%{:02X}", c as u32),
+        }).collect();
         let url = format!(
-            "mysql://{}:{}@{}:{}{}",
-            self.user, self.password, self.host, self.port, db_part
+            "mysql://{}:{}@{}:{}{}?ssl-mode=disabled",
+            self.user, encoded_password, self.host, self.port, db_part
         );
         url
     }
@@ -87,12 +92,22 @@ unsafe fn make_key(s: &str) -> *const StringHeader {
 pub unsafe fn parse_mysql_config(config: JSValue) -> MySqlConfig {
     let mut result = MySqlConfig::default();
 
-    // Check if config is a valid object pointer
-    if !config.is_pointer() {
+    // Check if config is a valid object pointer (NaN-boxed or raw pointer)
+    let obj_ptr: *const ObjectHeader = if config.is_pointer() {
+        // NaN-boxed pointer (POINTER_TAG = 0x7FFD)
+        config.as_pointer()
+    } else if !config.is_null() && !config.is_undefined() && !config.is_bool() {
+        // Perry may pass objects as raw pointers (bits directly hold the address)
+        // This happens when object values are passed to C functions without NaN-boxing
+        let raw_bits = config.bits();
+        // Valid pointer: non-zero and looks like a heap address (reasonable range)
+        if raw_bits == 0 || raw_bits > 0x0000_7FFF_FFFF_FFFF {
+            return result;
+        }
+        raw_bits as *const ObjectHeader
+    } else {
         return result;
-    }
-
-    let obj_ptr = config.as_pointer() as *const ObjectHeader;
+    };
     if obj_ptr.is_null() {
         return result;
     }

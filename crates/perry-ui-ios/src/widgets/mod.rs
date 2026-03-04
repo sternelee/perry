@@ -16,6 +16,7 @@ pub mod picker;
 pub mod form;
 pub mod navstack;
 pub mod zstack;
+pub mod tabbar;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};

@@ -266,6 +266,16 @@ fn find_max_local_id(stmts: &[Stmt]) -> LocalId {
                     check_expr(elem, max_id);
                 }
             }
+            Expr::Object(fields) => {
+                for (_, v) in fields {
+                    check_expr(v, max_id);
+                }
+            }
+            Expr::ObjectSpread { parts } => {
+                for (_, v) in parts {
+                    check_expr(v, max_id);
+                }
+            }
             Expr::IndexGet { object, index } | Expr::IndexSet { object, index, .. } => {
                 check_expr(object, max_id);
                 check_expr(index, max_id);
@@ -524,6 +534,16 @@ fn inline_calls_in_expr(
         Expr::Array(elements) => {
             for elem in elements {
                 inline_calls_in_expr(elem, func_candidates, method_candidates, local_types, next_local_id);
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, v) in fields {
+                inline_calls_in_expr(v, func_candidates, method_candidates, local_types, next_local_id);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, v) in parts {
+                inline_calls_in_expr(v, func_candidates, method_candidates, local_types, next_local_id);
             }
         }
         Expr::ArraySpread(elements) => {
@@ -964,6 +984,11 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         // Object literal
         Expr::Object(fields) => {
             for (_, value) in fields {
+                substitute_locals(value, param_map, next_local_id);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, value) in parts {
                 substitute_locals(value, param_map, next_local_id);
             }
         }

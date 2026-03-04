@@ -82,7 +82,56 @@ pub extern "C" fn js_throw(value: f64) -> ! {
         if TRY_DEPTH == 0 {
             // Print the exception and abort cleanly.
             // Cannot panic! in extern "C" functions (causes double-panic abort).
-            eprintln!("Uncaught exception: {}", value);
+            let bits = value.to_bits();
+            let top16 = bits >> 48;
+            // Check if this is a NaN-boxed pointer (POINTER_TAG = 0x7FFD)
+            if top16 == 0x7FFD {
+                let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+                if ptr >= 0x10000 {
+                    // Check GcHeader type (at ptr - 8 offset, but GcHeader is prepended)
+                    // ErrorHeader has object_type as first u32
+                    let object_type = unsafe { *(ptr as *const u32) };
+                    if object_type == 2 {
+                        // ErrorHeader: object_type(u32), _padding(u32), message(*mut StringHeader), name(*mut StringHeader)
+                        let name_ptr = unsafe { *((ptr + 16) as *const *const crate::string::StringHeader) };
+                        let msg_ptr = unsafe { *((ptr + 8) as *const *const crate::string::StringHeader) };
+                        let name_str = if !name_ptr.is_null() && (name_ptr as usize) >= 0x10000 {
+                            unsafe {
+                                let name_len = (*name_ptr).length as usize;
+                                let bytes_ptr = (name_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                                std::str::from_utf8(std::slice::from_raw_parts(bytes_ptr, name_len)).unwrap_or("?").to_string()
+                            }
+                        } else { "Error".to_string() };
+                        let msg_str = if !msg_ptr.is_null() && (msg_ptr as usize) >= 0x10000 {
+                            unsafe {
+                                let msg_len = (*msg_ptr).length as usize;
+                                let bytes_ptr = (msg_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                                std::str::from_utf8(std::slice::from_raw_parts(bytes_ptr, msg_len)).unwrap_or("?").to_string()
+                            }
+                        } else { String::new() };
+                        eprintln!("Uncaught exception: {}: {}", name_str, msg_str);
+                    } else {
+                        eprintln!("Uncaught exception: [object] (type={}, bits=0x{:016X})", object_type, bits);
+                    }
+                } else {
+                    eprintln!("Uncaught exception: [pointer] (bits=0x{:016X})", bits);
+                }
+            } else if top16 == 0x7FFF {
+                // String
+                let str_ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::string::StringHeader;
+                if !str_ptr.is_null() && (str_ptr as usize) >= 0x10000 {
+                    let msg_str = unsafe {
+                        let len = (*str_ptr).length as usize;
+                        let bytes_ptr = (str_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+                        std::str::from_utf8(std::slice::from_raw_parts(bytes_ptr, len)).unwrap_or("?").to_string()
+                    };
+                    eprintln!("Uncaught exception: {}", msg_str);
+                } else {
+                    eprintln!("Uncaught exception: [string] (bits=0x{:016X})", bits);
+                }
+            } else {
+                eprintln!("Uncaught exception: {} (bits=0x{:016X})", value, bits);
+            }
             std::process::exit(1);
         }
 

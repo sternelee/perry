@@ -452,7 +452,23 @@ fn build_response_body(value: f64) -> Vec<u8> {
         }
     }
 
-    // Convert to JSON string
+    // For objects/arrays (pointers), use js_json_stringify for proper JSON serialization
+    if jsv.is_pointer() {
+        extern "C" {
+            fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader;
+        }
+        unsafe {
+            let str_ptr = js_json_stringify(value, 0);
+            if !str_ptr.is_null() {
+                let len = (*str_ptr).length as usize;
+                let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let bytes = std::slice::from_raw_parts(data_ptr, len);
+                return bytes.to_vec();
+            }
+        }
+    }
+
+    // Fallback: convert to string
     unsafe {
         let json_ptr = perry_runtime::js_jsvalue_to_string(value);
         if !json_ptr.is_null() {

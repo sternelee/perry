@@ -235,7 +235,7 @@ fn infer_expr_type(expr: &Expr, module: &Module) -> Option<Type> {
         }
 
         // Object literals
-        Expr::Object(_) => Some(Type::Object(ObjectType::default())),
+        Expr::Object(_) | Expr::ObjectSpread { .. } => Some(Type::Object(ObjectType::default())),
 
         // Function calls - try to get return type
         Expr::Call { callee, type_args, .. } => {
@@ -947,6 +947,9 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         Expr::Object(props) => Expr::Object(
             props.iter().map(|(k, v)| (k.clone(), substitute_expr(v, substitutions))).collect()
         ),
+        Expr::ObjectSpread { parts } => Expr::ObjectSpread {
+            parts: parts.iter().map(|(k, v)| (k.clone(), substitute_expr(v, substitutions))).collect()
+        },
         Expr::Array(elems) => Expr::Array(
             elems.iter().map(|e| substitute_expr(e, substitutions)).collect()
         ),
@@ -1760,6 +1763,11 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
                 collect_instantiations_in_expr(v, ctx, module);
             }
         }
+        Expr::ObjectSpread { parts } => {
+            for (_, v) in parts {
+                collect_instantiations_in_expr(v, ctx, module);
+            }
+        }
         Expr::Array(elems) => {
             for e in elems {
                 collect_instantiations_in_expr(e, ctx, module);
@@ -2163,6 +2171,11 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
                 update_call_sites_in_expr(v, ctx, lookup);
             }
         }
+        Expr::ObjectSpread { parts } => {
+            for (_, v) in parts.iter_mut() {
+                update_call_sites_in_expr(v, ctx, lookup);
+            }
+        }
         Expr::Array(elems) => {
             for e in elems.iter_mut() {
                 update_call_sites_in_expr(e, ctx, lookup);
@@ -2428,7 +2441,7 @@ fn infer_expr_type_from_lookup(expr: &Expr, lookup: &InferenceLookup) -> Option<
             Some(Type::Array(Box::new(Type::Any)))
         }
 
-        Expr::Object(_) => Some(Type::Object(ObjectType::default())),
+        Expr::Object(_) | Expr::ObjectSpread { .. } => Some(Type::Object(ObjectType::default())),
 
         Expr::Call { callee, type_args, .. } => {
             if let Expr::FuncRef(func_id) = callee.as_ref() {
@@ -2639,6 +2652,11 @@ fn fill_defaults_in_expr(expr: &mut Expr, ctor_defaults: &HashMap<String, Vec<Op
         }
         Expr::Object(fields) => {
             for (_, val) in fields {
+                fill_defaults_in_expr(val, ctor_defaults);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, val) in parts {
                 fill_defaults_in_expr(val, ctor_defaults);
             }
         }

@@ -878,6 +878,31 @@ impl JsEmitter {
                 }
                 self.output.push('}');
             }
+            Expr::ObjectSpread { parts } => {
+                self.output.push('{');
+                let mut first = true;
+                for (key_opt, val) in parts.iter() {
+                    if !first { self.output.push_str(", "); }
+                    first = false;
+                    match key_opt {
+                        None => {
+                            self.output.push_str("...(");
+                            self.emit_expr(val);
+                            self.output.push(')');
+                        }
+                        Some(key) => {
+                            if is_valid_identifier(key) {
+                                self.output.push_str(key);
+                            } else {
+                                self.output.push_str(&self.quote_string(key));
+                            }
+                            self.output.push_str(": ");
+                            self.emit_expr(val);
+                        }
+                    }
+                }
+                self.output.push('}');
+            }
 
             // --- Array literal ---
             Expr::Array(elements) => {

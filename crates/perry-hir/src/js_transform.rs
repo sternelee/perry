@@ -554,6 +554,11 @@ fn transform_expr(
                 transform_expr(value, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
         }
+        Expr::ObjectSpread { parts } => {
+            for (_, value) in parts {
+                transform_expr(value, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            }
+        }
         Expr::PropertyUpdate { object, .. } => {
             transform_expr(object, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
@@ -1212,6 +1217,11 @@ fn fix_native_instance_expr(expr: &mut Expr, native_instances: &HashMap<String, 
                 fix_native_instance_expr(value, native_instances, local_id_instances);
             }
         }
+        Expr::ObjectSpread { parts } => {
+            for (_, value) in parts {
+                fix_native_instance_expr(value, native_instances, local_id_instances);
+            }
+        }
         Expr::PropertyGet { object, .. } => {
             fix_native_instance_expr(object, native_instances, local_id_instances);
         }
@@ -1697,6 +1707,11 @@ fn fix_native_instance_expr_with_locals(
         }
         Expr::Object(properties) => {
             for (_, value) in properties {
+                fix_native_instance_expr_with_locals(value, native_instances, local_id_instances);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, value) in parts {
                 fix_native_instance_expr_with_locals(value, native_instances, local_id_instances);
             }
         }

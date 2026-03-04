@@ -64,15 +64,22 @@ pub unsafe extern "C" fn js_mysql2_create_pool(config: JSValue) -> Handle {
     // We need to enter the runtime context for connect_lazy to work
     let _guard = crate::common::runtime().enter();
 
-    let pool = MySqlPoolOptions::new()
-        .max_connections(10)
-        // Set timeouts to prevent indefinite hangs when MySQL is unavailable
-        .acquire_timeout(Duration::from_secs(DEFAULT_ACQUIRE_TIMEOUT_SECS))
-        .connect_lazy(&url);
+    // Use eager connection to get immediate error feedback
+    let pool_result = crate::common::runtime().block_on(async {
+        MySqlPoolOptions::new()
+            .max_connections(10)
+            .acquire_timeout(Duration::from_secs(DEFAULT_ACQUIRE_TIMEOUT_SECS))
+            .connect(&url)
+            .await
+    });
 
-    match pool {
-        Ok(pool) => register_handle(MysqlPoolHandle::new(pool)),
-        Err(_) => 0, // Return invalid handle on error
+    match pool_result {
+        Ok(pool) => {
+            register_handle(MysqlPoolHandle::new(pool))
+        }
+        Err(_e) => {
+            0
+        }
     }
 }
 

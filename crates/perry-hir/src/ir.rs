@@ -597,6 +597,13 @@ pub enum Expr {
     // Object literal
     Object(Vec<(String, Expr)>),
 
+    // Object literal with spread: { ...src, key: val, ...src2, key2: val2 }
+    // Each part is (None, expr) for a spread source, or (Some(key), expr) for a static prop.
+    // Parts are ordered to reflect JavaScript evaluation order (later props override earlier spreads).
+    ObjectSpread {
+        parts: Vec<(Option<String>, Expr)>,
+    },
+
     // Array literal
     Array(Vec<Expr>),
 

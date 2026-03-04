@@ -51,6 +51,12 @@ pub struct CompileArgs {
     /// and compiles them into the binary as static plugins.
     #[arg(long)]
     pub bundle_extensions: Option<PathBuf>,
+
+    /// Enable type checking via tsgo (Microsoft's native TypeScript checker).
+    /// Resolves cross-file types, interfaces, and generics for better optimization.
+    /// Requires: npm install -g @typescript/native-preview
+    #[arg(long)]
+    pub type_check: bool,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -65,7 +71,6 @@ pub struct JsModule {
 }
 
 /// Compilation context tracking all modules
-#[derive(Debug)]
 pub struct CompilationContext {
     /// Native TypeScript modules to compile
     pub native_modules: BTreeMap<PathBuf, HirModule>,
@@ -91,6 +96,18 @@ pub struct CompilationContext {
     pub compile_packages: HashSet<String>,
     /// First-resolved directory for each compile package (deduplication across nested node_modules)
     pub compile_package_dirs: HashMap<String, PathBuf>,
+    /// Optional tsgo type checker client (when --type-check is enabled)
+    pub type_checker: Option<super::typecheck::TsGoClient>,
+}
+
+impl std::fmt::Debug for CompilationContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompilationContext")
+            .field("native_modules", &self.native_modules.len())
+            .field("js_modules", &self.js_modules.len())
+            .field("type_checker", &self.type_checker.is_some())
+            .finish()
+    }
 }
 
 impl CompilationContext {
@@ -108,6 +125,7 @@ impl CompilationContext {
             package_aliases: HashMap::new(),
             compile_packages: HashSet::new(),
             compile_package_dirs: HashMap::new(),
+            type_checker: None,
         }
     }
 }
@@ -1074,7 +1092,32 @@ fn collect_modules(
     let ast_module = perry_parser::parse_typescript(&source, filename)
         .map_err(|e| anyhow!("Failed to parse {}: {}", canonical.display(), e))?;
     let source_file_path = canonical.to_string_lossy().to_string();
-    let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id(&ast_module, &module_name, &source_file_path, *next_class_id)?;
+
+    // If type checking is enabled, resolve types from tsgo before lowering
+    let resolved_types = if ctx.type_checker.is_some() {
+        let positions = super::typecheck::collect_untyped_positions(&ast_module);
+        if !positions.is_empty() {
+            let client = ctx.type_checker.as_mut().unwrap();
+            match super::typecheck::resolve_types_for_file(client, &source_file_path, &positions) {
+                Ok(types) => {
+                    if !types.is_empty() {
+                        Some(types)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None, // Silently continue without resolved types on error
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id_and_types(
+        &ast_module, &module_name, &source_file_path, *next_class_id, resolved_types
+    )?;
     *next_class_id = new_next_class_id; // Update the global class_id counter
 
     if !skip_transforms {
@@ -1468,6 +1511,40 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             ctx.compile_packages.insert(name.to_string());
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Initialize tsgo type checker if --type-check is enabled
+    if args.type_check {
+        match super::typecheck::TsGoClient::spawn(&project_root) {
+            Ok(mut client) => {
+                // Try to load the project's tsconfig.json
+                if let Some(tsconfig) = super::typecheck::find_tsconfig(&project_root) {
+                    match format {
+                        OutputFormat::Text => println!("  Type checking enabled (tsgo)"),
+                        OutputFormat::Json => {}
+                    }
+                    if let Err(e) = client.load_project(&tsconfig) {
+                        match format {
+                            OutputFormat::Text => eprintln!("  Warning: tsgo project load failed: {}. Continuing without type checking.", e),
+                            OutputFormat::Json => {}
+                        }
+                    } else {
+                        ctx.type_checker = Some(client);
+                    }
+                } else {
+                    match format {
+                        OutputFormat::Text => eprintln!("  Warning: No tsconfig.json found. Type checking disabled."),
+                        OutputFormat::Json => {}
+                    }
+                }
+            }
+            Err(e) => {
+                match format {
+                    OutputFormat::Text => eprintln!("  Warning: {}", e),
+                    OutputFormat::Json => {}
                 }
             }
         }

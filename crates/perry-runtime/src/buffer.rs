@@ -93,7 +93,14 @@ pub extern "C" fn js_buffer_from_string(str_ptr: *const StringHeader, encoding: 
 /// Create a Buffer from an array of numbers
 #[no_mangle]
 pub extern "C" fn js_buffer_from_array(arr_ptr: *const ArrayHeader) -> *mut BufferHeader {
-    if arr_ptr.is_null() {
+    // Strip NaN-boxing tags: if upper 16 bits are nonzero, this is a NaN-boxed value.
+    // Valid heap pointers on macOS ARM64 have upper 16 bits = 0.
+    let arr_ptr = if (arr_ptr as u64) >> 48 != 0 {
+        ((arr_ptr as u64) & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+    } else {
+        arr_ptr
+    };
+    if arr_ptr.is_null() || (arr_ptr as usize) < 0x1000 {
         return buffer_alloc(0);
     }
 

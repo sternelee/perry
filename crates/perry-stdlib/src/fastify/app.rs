@@ -136,10 +136,17 @@ unsafe fn register_route(app_handle: Handle, method: &str, path: i64, handler: i
         None => return false,
     };
 
+    // Strip NaN-box tag from handler closure pointer if needed
+    let raw_handler = if (handler as u64 & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
+        (handler as u64 & 0x0000_FFFF_FFFF_FFFF) as i64
+    } else {
+        handler
+    };
+
     if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
         let full = if app.prefix.is_empty() { path_str.clone() } else { format!("{}{}", app.prefix, path_str) };
         eprintln!("[ROUTE] {} {} (handle={})", method, full, app_handle);
-        app.add_route(method, &path_str, handler);
+        app.add_route(method, &path_str, raw_handler);
         return true;
     }
     eprintln!("[ROUTE] handle {} not found", app_handle);
@@ -158,8 +165,15 @@ pub unsafe extern "C" fn js_fastify_add_hook(app_handle: Handle, hook_name: i64,
         None => return false,
     };
 
+    // Strip NaN-box tag from handler closure pointer if needed
+    let raw_handler = if (handler as u64 & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
+        (handler as u64 & 0x0000_FFFF_FFFF_FFFF) as i64
+    } else {
+        handler
+    };
+
     if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
-        app.add_hook(&name, handler);
+        app.add_hook(&name, raw_handler);
         return true;
     }
     false
@@ -172,8 +186,15 @@ pub unsafe extern "C" fn js_fastify_add_hook(app_handle: Handle, hook_name: i64,
 /// Set custom error handler
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_set_error_handler(app_handle: Handle, handler: i64) -> bool {
+    // Strip NaN-box tag from handler closure pointer if needed
+    let raw_handler = if (handler as u64 & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
+        (handler as u64 & 0x0000_FFFF_FFFF_FFFF) as i64
+    } else {
+        handler
+    };
+
     if let Some(app) = get_handle_mut::<FastifyApp>(app_handle) {
-        app.set_error_handler(handler);
+        app.set_error_handler(raw_handler);
         return true;
     }
     false

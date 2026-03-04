@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.168
+**Current Version:** 0.2.169
 
 ## Workflow Requirements
 
@@ -152,6 +152,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.169
+- Type inference: `infer_type_from_expr()` infers types from literals, binary ops, variable propagation, known method returns, and user-defined function return types — eliminates `Type::Any` for common patterns (`let x = 5` → `Number`, `let s = "hi".trim()` → `String`, etc.)
+- `--type-check` flag: optional tsgo IPC integration (Microsoft's native TS checker) resolves cross-file types, interfaces, and generics via msgpack protocol over stdio — graceful fallback if tsgo not installed
 
 ### v0.2.168
 - Native application menu bars: `menuBarCreate`, `menuBarAddMenu`, `menuBarAttach`, `menuAddSeparator`, `menuAddSubmenu`, `menuAddItem` with optional keyboard shortcut (4th arg)

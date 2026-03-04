@@ -25,6 +25,38 @@ fn bigint_alloc() -> *mut BigIntHeader {
     raw as *mut BigIntHeader
 }
 
+/// Check if a BigInt pointer is valid (not null, not NaN-boxed, in user address space).
+/// Protects against accidental use of NaN-boxed values (e.g., TAG_UNDEFINED) as BigInt pointers.
+#[inline(always)]
+fn is_valid_bigint_ptr(p: *const BigIntHeader) -> bool {
+    let bits = p as usize;
+    // Valid heap pointers: non-null, >= 0x10000, upper 16 bits must be 0 (48-bit address space)
+    bits >= 0x10000 && bits >> 48 == 0
+}
+
+/// Strip NaN-boxing tags from a BigInt pointer (defensive guard).
+/// Returns null if the value is not a valid bigint pointer.
+#[inline(always)]
+pub fn clean_bigint_ptr(p: *const BigIntHeader) -> *const BigIntHeader {
+    let bits = p as usize;
+    let top16 = bits >> 48;
+    if top16 >= 0x7FF8 {
+        // NaN-boxed value — extract lower 48 bits
+        let raw = (bits & 0x0000_FFFF_FFFF_FFFF) as *const BigIntHeader;
+        if (raw as usize) < 0x10000 { return std::ptr::null(); }
+        raw
+    } else if bits < 0x10000 {
+        std::ptr::null()
+    } else {
+        p
+    }
+}
+
+#[inline(always)]
+pub fn clean_bigint_ptr_mut(p: *mut BigIntHeader) -> *mut BigIntHeader {
+    clean_bigint_ptr(p as *const BigIntHeader) as *mut BigIntHeader
+}
+
 /// Create a BigInt from a u64 value
 #[no_mangle]
 pub extern "C" fn js_bigint_from_u64(value: u64) -> *mut BigIntHeader {
@@ -155,6 +187,8 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
 /// Negate a BigInt (two's complement: flip all bits and add 1)
 #[no_mangle]
 pub extern "C" fn js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    if a.is_null() { return bigint_alloc(); }
     let ptr = bigint_alloc();
     unsafe {
         let a_limbs = (*a).limbs;
@@ -176,6 +210,8 @@ pub extern "C" fn js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader {
 /// Check if a BigInt is zero (all limbs are zero). Returns 1 for zero, 0 for non-zero.
 #[no_mangle]
 pub extern "C" fn js_bigint_is_zero(a: *const BigIntHeader) -> i32 {
+    let a = clean_bigint_ptr(a);
+    if a.is_null() { return 1; } // null/undefined treated as zero
     unsafe {
         let limbs = (*a).limbs;
         for i in 0..BIGINT_LIMBS {
@@ -190,11 +226,13 @@ pub extern "C" fn js_bigint_is_zero(a: *const BigIntHeader) -> i32 {
 /// Add two BigInts
 #[no_mangle]
 pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
+    if a.is_null() && b.is_null() { return bigint_alloc(); }
     let ptr = bigint_alloc();
     unsafe {
-
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
         let mut result = ZERO_LIMBS;
         let mut carry = 0u64;
 
@@ -212,11 +250,12 @@ pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Subtract two BigInts (a - b)
 #[no_mangle]
 pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
         let mut result = ZERO_LIMBS;
         let mut borrow = 0i128;
 
@@ -239,6 +278,8 @@ pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Multiply two BigInts
 #[no_mangle]
 pub extern "C" fn js_bigint_mul(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
         if a.is_null() || b.is_null() {
@@ -306,11 +347,12 @@ fn unsigned_div_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> ([u64
 /// Divide two BigInts (a / b) — truncates toward zero like JavaScript
 #[no_mangle]
 pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
 
         // Division by zero: return 0 instead of panicking (panic can't unwind in extern "C")
         if b_limbs == ZERO_LIMBS {
@@ -340,11 +382,12 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Modulo of two BigInts (a % b) — result has sign of dividend (like JavaScript)
 #[no_mangle]
 pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
 
         // Division by zero: return 0 instead of panicking (panic can't unwind in extern "C")
         if b_limbs == ZERO_LIMBS {
@@ -375,11 +418,12 @@ pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
 pub extern "C" fn js_bigint_pow(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
         // Get exponent as u64 (only lower 64 bits)
-        let exp = (*b).limbs[0];
+        let exp = if b.is_null() { 0u64 } else { (*b).limbs[0] };
 
         if exp == 0 {
             // Anything to the power of 0 is 1
@@ -391,7 +435,7 @@ pub extern "C" fn js_bigint_pow(a: *const BigIntHeader, b: *const BigIntHeader) 
         // Binary exponentiation
         let mut result = ZERO_LIMBS;
         result[0] = 1;
-        let mut base = (*a).limbs;
+        let mut base = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
         let mut e = exp;
 
         while e > 0 {
@@ -427,16 +471,16 @@ fn mul_limbs(a: &[u64; BIGINT_LIMBS], b: &[u64; BIGINT_LIMBS]) -> [u64; BIGINT_L
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
 pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let shift = (*b).limbs[0] as usize;
+        let shift = if b.is_null() { 0usize } else { (*b).limbs[0] as usize };
         if shift >= BIGINT_BITS {
             (*ptr).limbs = ZERO_LIMBS;
             return ptr;
         }
-
-        let a_limbs = (*a).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
         let mut result = ZERO_LIMBS;
 
         // Calculate full limb shifts and bit shifts within a limb
@@ -468,16 +512,16 @@ pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
 pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let shift = (*b).limbs[0] as usize;
+        let shift = if b.is_null() { 0usize } else { (*b).limbs[0] as usize };
         if shift >= BIGINT_BITS {
             (*ptr).limbs = ZERO_LIMBS;
             return ptr;
         }
-
-        let a_limbs = (*a).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
         let mut result = ZERO_LIMBS;
 
         // Calculate full limb shifts and bit shifts within a limb
@@ -508,11 +552,12 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Bitwise AND of two BigInts (a & b)
 #[no_mangle]
 pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
         let mut result = ZERO_LIMBS;
 
         for i in 0..BIGINT_LIMBS {
@@ -527,17 +572,16 @@ pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Bitwise OR of two BigInts (a | b)
 #[no_mangle]
 pub extern "C" fn js_bigint_or(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
         let mut result = ZERO_LIMBS;
-
         for i in 0..BIGINT_LIMBS {
             result[i] = a_limbs[i] | b_limbs[i];
         }
-
         (*ptr).limbs = result;
         ptr
     }
@@ -546,17 +590,16 @@ pub extern "C" fn js_bigint_or(a: *const BigIntHeader, b: *const BigIntHeader) -
 /// Bitwise XOR of two BigInts (a ^ b)
 #[no_mangle]
 pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
     unsafe {
-
-        let a_limbs = (*a).limbs;
-        let b_limbs = (*b).limbs;
+        let a_limbs = if a.is_null() { ZERO_LIMBS } else { (*a).limbs };
+        let b_limbs = if b.is_null() { ZERO_LIMBS } else { (*b).limbs };
         let mut result = ZERO_LIMBS;
-
         for i in 0..BIGINT_LIMBS {
             result[i] = a_limbs[i] ^ b_limbs[i];
         }
-
         (*ptr).limbs = result;
         ptr
     }
@@ -565,6 +608,8 @@ pub extern "C" fn js_bigint_xor(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Compare two BigInts (-1 if a < b, 0 if equal, 1 if a > b)
 #[no_mangle]
 pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) -> i32 {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     if a.is_null() || b.is_null() {
         return 0;
     }
@@ -576,6 +621,8 @@ pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Check if two BigInts are equal
 #[no_mangle]
 pub extern "C" fn js_bigint_eq(a: *const BigIntHeader, b: *const BigIntHeader) -> bool {
+    let a = clean_bigint_ptr(a);
+    let b = clean_bigint_ptr(b);
     if a.is_null() || b.is_null() {
         return a == b; // both null = equal, one null = not equal
     }
@@ -662,6 +709,9 @@ fn limbs_to_decimal_string(limbs: &[u64; BIGINT_LIMBS]) -> String {
 #[no_mangle]
 pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::string::StringHeader {
     unsafe {
+        if a.is_null() || (a as usize) < 0x10000 || (a as usize) >> 48 != 0 {
+            return std::ptr::null_mut();
+        }
         let s = limbs_to_decimal_string(&(*a).limbs);
         crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
     }
@@ -681,7 +731,7 @@ pub extern "C" fn js_bigint_print(a: *const BigIntHeader) {
 pub extern "C" fn js_bigint_error(a: *const BigIntHeader) {
     unsafe {
         let s = limbs_to_decimal_string(&(*a).limbs);
-        eprintln!("{}n", s);
+        let _ = s;
     }
 }
 
@@ -690,7 +740,7 @@ pub extern "C" fn js_bigint_error(a: *const BigIntHeader) {
 pub extern "C" fn js_bigint_warn(a: *const BigIntHeader) {
     unsafe {
         let s = limbs_to_decimal_string(&(*a).limbs);
-        eprintln!("{}n", s);
+        let _ = s;
     }
 }
 

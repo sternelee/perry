@@ -488,6 +488,24 @@ pub extern "C" fn perry_ui_picker_get_selected(handle: i64) -> i64 {
     widgets::picker::get_selected(handle)
 }
 
+/// Create a TabBar. Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_create(on_change: f64) -> i64 {
+    widgets::tabbar::create(on_change)
+}
+
+/// Add a tab to a TabBar.
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_add_tab(handle: i64, label_ptr: i64) {
+    widgets::tabbar::add_tab(handle, label_ptr as *const u8);
+}
+
+/// Set the selected tab index.
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_set_selected(handle: i64, index: i64) {
+    widgets::tabbar::set_selected(handle, index);
+}
+
 /// Create a Form container. Returns widget handle.
 #[no_mangle]
 pub extern "C" fn perry_ui_form_create() -> i64 {

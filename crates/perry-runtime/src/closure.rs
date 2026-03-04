@@ -103,265 +103,290 @@ unsafe fn dispatch_bound_method(closure: *const ClosureHeader, args: &[f64]) -> 
     )
 }
 
-/// Check if a closure pointer is valid (not null, not from TAG_UNDEFINED dereference).
-#[inline]
-fn is_valid_closure_ptr(closure: *const ClosureHeader) -> bool {
-    !closure.is_null() && (closure as usize) >= 0x1000
+/// Validate a closure pointer and return its func_ptr if the closure is valid.
+///
+/// Uses `read_volatile` for type_tag + `compiler_fence` to GUARANTEE that:
+/// 1. CLOSURE_MAGIC is checked BEFORE func_ptr is ever read
+/// 2. The optimizer cannot hoist the func_ptr read before the type_tag check
+///
+/// Background: `#[inline(never)]` on `is_valid_closure_ptr` is insufficient — LLVM
+/// still speculatively hoists the non-volatile func_ptr load before the CLOSURE_MAGIC
+/// check in the caller. This produces code that only checks CLOSURE_MAGIC when func_ptr==0,
+/// allowing non-closure heap objects (Box<JSValue>, BigInt structs) to bypass validation
+/// and execute their data as code via `br x1` → SIGBUS.
+///
+/// Returns null pointer if invalid (address out of range, wrong CLOSURE_MAGIC, bad func_ptr).
+#[inline(always)]
+fn get_valid_func_ptr(closure: *const ClosureHeader) -> *const u8 {
+    let addr = closure as usize;
+    if addr < 0x1000 || addr >= 0x0001_0000_0000_0000 {
+        return std::ptr::null();
+    }
+    // CRITICAL: Read type_tag with volatile. All volatile accesses are sequentially
+    // ordered with respect to each other — the optimizer cannot reorder this read
+    // with the func_ptr volatile read below.
+    let type_tag = unsafe {
+        std::ptr::read_volatile((closure as *const u8).add(12) as *const u32)
+    };
+    if type_tag != CLOSURE_MAGIC {
+        return std::ptr::null();
+    }
+    // compiler_fence prevents the optimizer from moving the non-volatile func_ptr
+    // load above the volatile type_tag read + CLOSURE_MAGIC check.
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    // Now read func_ptr (guaranteed to happen after CLOSURE_MAGIC verified)
+    let func_ptr = unsafe {
+        std::ptr::read_volatile(closure as *const *const u8)
+    };
+    let func_ptr_addr = func_ptr as usize;
+    if func_ptr_addr == 0 {
+        return std::ptr::null();
+    }
+    // Validate func_ptr is in .text section range (macOS ARM64: 0x100000000+, <4GB from base)
+    // This catches cases where a non-closure object's first 8 bytes happen to be non-zero
+    // but are a heap address (e.g., BigInt ptr, Box content) rather than a code address.
+    if func_ptr_addr < 0x100000000 || func_ptr_addr > 0x400000000 {
+        return std::ptr::null();
+    }
+    func_ptr
 }
 
 /// Call a closure with 0 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call0(closure: *const ClosureHeader) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[]);
-        }
-        let func: extern "C" fn(*const ClosureHeader) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[]) };
     }
+    let func: extern "C" fn(*const ClosureHeader) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure)
 }
 
 /// Call a closure with 1 argument, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call1(closure: *const ClosureHeader, arg0: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0)
 }
 
 /// Call a closure with 2 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call2(closure: *const ClosureHeader, arg0: f64, arg1: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1)
 }
 
 /// Call a closure with 3 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call3(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2)
 }
 
 /// Call a closure with 4 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call4(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3)
 }
 
 /// Call a closure with 5 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call5(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4)
 }
 
 /// Call a closure with 6 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call6(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5)
 }
 
 /// Call a closure with 7 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call7(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6)
 }
 
 /// Call a closure with 8 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call8(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7)
 }
 
 /// Call a closure with 9 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call9(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8)
 }
 
 /// Call a closure with 10 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call10(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
 }
 
 /// Call a closure with 11 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call11(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10)
 }
 
 /// Call a closure with 12 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call12(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11)
 }
 
 /// Call a closure with 13 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call13(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12)
 }
 
 /// Call a closure with 14 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call14(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64, arg13: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13)
 }
 
 /// Call a closure with 15 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call15(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64, arg13: f64, arg14: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14)
 }
 
 /// Call a closure with 16 arguments, returning f64
 #[no_mangle]
 pub extern "C" fn js_closure_call16(closure: *const ClosureHeader, arg0: f64, arg1: f64, arg2: f64, arg3: f64, arg4: f64, arg5: f64, arg6: f64, arg7: f64, arg8: f64, arg9: f64, arg10: f64, arg11: f64, arg12: f64, arg13: f64, arg14: f64, arg15: f64) -> f64 {
-    if !is_valid_closure_ptr(closure) {
+    let func_ptr = get_valid_func_ptr(closure);
+    if func_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
-    unsafe {
-        if (*closure).func_ptr == BOUND_METHOD_FUNC_PTR {
-            return dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15]);
-        }
-        let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute((*closure).func_ptr);
-        func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15)
+    if func_ptr == BOUND_METHOD_FUNC_PTR {
+        return unsafe { dispatch_bound_method(closure, &[arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15]) };
     }
+    let func: extern "C" fn(*const ClosureHeader, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = unsafe { std::mem::transmute(func_ptr) };
+    func(closure, arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13, arg14, arg15)
 }
 
 /// Call a JavaScript function value with variable arguments
@@ -500,6 +525,47 @@ pub unsafe extern "C" fn js_native_call_value(
             let a = |i: usize| if args_ptr.is_null() { 0.0 } else { *args_ptr.add(i) };
             js_closure_call16(closure, a(0), a(1), a(2), a(3), a(4), a(5), a(6), a(7), a(8), a(9), a(10), a(11), a(12), a(13), a(14), a(15))
         }
+    }
+}
+
+use std::collections::HashMap;
+use std::sync::{OnceLock, Mutex};
+
+static CLOSURE_PROPS: OnceLock<Mutex<HashMap<usize, HashMap<String, f64>>>> = OnceLock::new();
+
+fn get_closure_props() -> &'static Mutex<HashMap<usize, HashMap<String, f64>>> {
+    CLOSURE_PROPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Check if a raw pointer points to a ClosureHeader by checking CLOSURE_MAGIC at offset 12.
+/// Safe to call with any non-null, sufficiently aligned pointer >= 0x10000.
+pub fn is_closure_ptr(ptr: usize) -> bool {
+    if ptr < 0x10000 {
+        return false;
+    }
+    unsafe {
+        let type_tag = *((ptr as *const u8).add(12) as *const u32);
+        type_tag == CLOSURE_MAGIC
+    }
+}
+
+/// Get a dynamic property stored on a closure.
+/// Returns TAG_UNDEFINED if not found.
+pub fn closure_get_dynamic_prop(ptr: usize, prop: &str) -> f64 {
+    if let Ok(props) = get_closure_props().lock() {
+        if let Some(closure_props) = props.get(&ptr) {
+            if let Some(&val) = closure_props.get(prop) {
+                return val;
+            }
+        }
+    }
+    f64::from_bits(crate::value::TAG_UNDEFINED)
+}
+
+/// Set a dynamic property on a closure.
+pub fn closure_set_dynamic_prop(ptr: usize, prop: &str, value: f64) {
+    if let Ok(mut props) = get_closure_props().lock() {
+        props.entry(ptr).or_insert_with(HashMap::new).insert(prop.to_string(), value);
     }
 }
 

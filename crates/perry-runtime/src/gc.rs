@@ -284,7 +284,10 @@ fn try_mark_value(value_bits: u64, valid_ptrs: &HashSet<usize>) -> bool {
     }
 }
 
-/// Conservative stack scan: scan the current thread's stack for NaN-boxed pointers.
+/// Conservative stack scan: scan the current thread's stack for heap pointers.
+/// Handles BOTH NaN-boxed pointers (POINTER_TAG/STRING_TAG/BIGINT_TAG) AND raw I64 pointers.
+/// Raw I64 pointers arise from Perry's `is_array`/`is_string`/`is_pointer`/`is_closure` local
+/// variables — Cranelift stores these as raw I64 words (not NaN-boxed) in registers and on stack.
 fn mark_stack_roots(valid_ptrs: &HashSet<usize>) {
     // Capture callee-saved registers into a buffer via setjmp
     let mut jmp_buf = [0u64; 32]; // oversized for safety
@@ -296,9 +299,9 @@ fn mark_stack_roots(valid_ptrs: &HashSet<usize>) {
         setjmp(jmp_buf.as_mut_ptr());
     }
 
-    // Scan the register buffer
+    // Scan the register buffer (covers callee-saved regs: x19-x28 on AArch64, rbx/rbp/r12-r15 on x86_64)
     for &word in &jmp_buf {
-        try_mark_value(word, valid_ptrs);
+        try_mark_value_or_raw(word, valid_ptrs);
     }
 
     // Get stack bounds
@@ -326,13 +329,49 @@ fn mark_stack_roots(valid_ptrs: &HashSet<usize>) {
         return; // Can't determine stack bounds
     }
 
-    // Walk the stack from current SP to stack bottom
+    // Walk the stack from current SP to stack bottom.
+    // Each 8-byte word may be: NaN-boxed pointer, raw I64 heap pointer, return addr, or plain value.
     let mut addr = stack_top;
     while addr < stack_bottom {
         let word = unsafe { *(addr as *const u64) };
-        try_mark_value(word, valid_ptrs);
+        try_mark_value_or_raw(word, valid_ptrs);
         addr += 8;
     }
+}
+
+/// Mark a value if it is a heap pointer — either NaN-boxed OR a raw I64 pointer.
+/// Returns true if newly marked.
+/// This is used for conservative scanning where Perry stores raw I64 pointers (for is_string/
+/// is_array/is_pointer/is_closure vars) alongside NaN-boxed F64 values.
+#[inline]
+fn try_mark_value_or_raw(word: u64, valid_ptrs: &HashSet<usize>) -> bool {
+    // First try NaN-boxed interpretation (POINTER_TAG / STRING_TAG / BIGINT_TAG)
+    if try_mark_value(word, valid_ptrs) {
+        return true;
+    }
+    // Fallback: treat as raw (non-NaN-boxed) heap pointer.
+    // Perry's is_string/is_array/is_pointer/is_closure Cranelift locals store raw I64 addresses.
+    // Validate against the known-heap-pointer set to avoid false positives from return addresses
+    // and plain integers. Valid heap pointers are in the lower 48-bit address space and
+    // won't have NaN-boxing tags in upper bits (already rejected above).
+    let raw_ptr = word as usize;
+    if raw_ptr < 0x1000 || raw_ptr > 0x0000_FFFF_FFFF_FFFF {
+        return false; // Too small (null/invalid) or has upper bits set (NaN tag or non-address)
+    }
+    if !valid_ptrs.contains(&raw_ptr) {
+        return false;
+    }
+    unsafe {
+        let header = header_from_user_ptr(raw_ptr as *const u8);
+        if (*header).gc_flags & GC_FLAG_MARKED != 0 {
+            return false; // Already marked
+        }
+        if (*header).gc_flags & GC_FLAG_PINNED != 0 {
+            return false; // Pinned objects are always live
+        }
+        (*header).gc_flags |= GC_FLAG_MARKED;
+    }
+    true
 }
 
 /// Get the bottom (highest address) of the current thread's stack.
@@ -529,15 +568,23 @@ unsafe fn trace_object(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist:
 }
 
 /// Trace closure captures
+/// Captures may be NaN-boxed JSValues OR raw I64 pointers bitcast to F64.
+/// Perry's codegen stores `is_string`/`is_array`/`is_closure` captures as raw I64 in some paths.
 unsafe fn trace_closure(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: &mut Vec<*mut GcHeader>) {
     let closure = user_ptr as *const crate::closure::ClosureHeader;
     let capture_count = (*closure).capture_count;
-    let captures = (user_ptr as *const u8).add(std::mem::size_of::<crate::closure::ClosureHeader>()) as *const f64;
+    let captures = (user_ptr as *const u8).add(std::mem::size_of::<crate::closure::ClosureHeader>()) as *const u64;
 
     for i in 0..capture_count as usize {
-        let val = *captures.add(i);
-        if try_mark_value(val.to_bits(), valid_ptrs) {
-            let ptr_val = (val.to_bits() & POINTER_MASK) as usize;
+        let val_bits = *captures.add(i);
+        if try_mark_value_or_raw(val_bits, valid_ptrs) {
+            // Determine the actual heap pointer: NaN-boxed uses lower 48 bits, raw uses full value
+            let tag = val_bits & TAG_MASK;
+            let ptr_val = if tag == POINTER_TAG || tag == STRING_TAG || tag == BIGINT_TAG {
+                (val_bits & POINTER_MASK) as usize
+            } else {
+                val_bits as usize // raw pointer
+            };
             let header = header_from_user_ptr(ptr_val as *const u8);
             worklist.push(header);
         }
@@ -665,6 +712,13 @@ fn sweep() -> u64 {
                 let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
                 freed_bytes += total_size as u64;
 
+                // If this is an ObjectHeader, remove its OVERFLOW_FIELDS entry before
+                // zeroing memory. This prevents stale entries from "infecting" new objects
+                // that might be allocated at the same address.
+                if (*header).obj_type == GC_TYPE_OBJECT {
+                    crate::object::clear_overflow_for_ptr(user_ptr as usize);
+                }
+
                 // Zero the memory to prevent stale pointer retention
                 std::ptr::write_bytes(user_ptr, 0, payload_size);
 
@@ -719,11 +773,23 @@ pub fn exception_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::exception::scan_exception_roots(mark);
 }
 
+/// Root scanner for object shape cache (keys arrays shared across objects with same shape)
+pub fn shape_cache_root_scanner(mark: &mut dyn FnMut(f64)) {
+    crate::object::scan_shape_cache_roots(mark);
+}
+
+/// Root scanner for OVERFLOW_FIELDS (per-object extra properties beyond inline slots)
+pub fn overflow_fields_root_scanner(mark: &mut dyn FnMut(f64)) {
+    crate::object::scan_overflow_fields_roots(mark);
+}
+
 /// Initialize GC root scanners. Called once at runtime startup.
 pub fn gc_init() {
     gc_register_root_scanner(promise_root_scanner);
     gc_register_root_scanner(timer_root_scanner);
     gc_register_root_scanner(exception_root_scanner);
+    gc_register_root_scanner(shape_cache_root_scanner);
+    gc_register_root_scanner(overflow_fields_root_scanner);
 }
 
 /// FFI: initialize GC (called from compiled code startup)

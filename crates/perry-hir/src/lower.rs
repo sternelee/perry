@@ -76,6 +76,12 @@ pub struct LoweringContext {
     /// Classes created during expression lowering (e.g., class expressions in `new (class extends X {})()`)
     /// These are flushed to the module after the enclosing statement is lowered.
     pending_classes: Vec<Class>,
+    /// Function return types: func_name -> return_type
+    /// Tracks return types of user-defined functions for call-site type inference
+    func_return_types: Vec<(String, Type)>,
+    /// Resolved types from external type checker (tsgo): byte_position -> Type
+    /// Populated before lowering when --type-check is enabled
+    pub resolved_types: Option<std::collections::HashMap<u32, Type>>,
 }
 
 impl LoweringContext {
@@ -113,6 +119,8 @@ impl LoweringContext {
             pending_functions: Vec::new(),
             func_return_native_instances: Vec::new(),
             pending_classes: Vec::new(),
+            func_return_types: Vec::new(),
+            resolved_types: None,
         }
     }
 
@@ -380,6 +388,16 @@ impl LoweringContext {
             .map(|(_, module, class)| (module.as_str(), class.as_str()))
     }
 
+    fn register_func_return_type(&mut self, name: String, ty: Type) {
+        self.func_return_types.push((name, ty));
+    }
+
+    fn lookup_func_return_type(&self, name: &str) -> Option<&Type> {
+        self.func_return_types.iter().rev()
+            .find(|(n, _)| n == name)
+            .map(|(_, ty)| ty)
+    }
+
     fn enter_scope(&self) -> (usize, usize, usize) {
         (self.locals.len(), self.native_instances.len(), self.functions.len())
     }
@@ -390,6 +408,306 @@ impl LoweringContext {
         self.functions.truncate(mark.2);
     }
 
+}
+
+/// Infer a Type from an AST expression without type annotations.
+/// Uses the LoweringContext for variable type lookups and function return types.
+fn infer_type_from_expr(expr: &ast::Expr, ctx: &LoweringContext) -> Type {
+    match expr {
+        // Literals
+        ast::Expr::Lit(lit) => match lit {
+            ast::Lit::Num(_) => Type::Number,
+            ast::Lit::Str(_) => Type::String,
+            ast::Lit::Bool(_) => Type::Boolean,
+            ast::Lit::BigInt(_) => Type::BigInt,
+            ast::Lit::Null(_) => Type::Null,
+            ast::Lit::Regex(_) => Type::Named("RegExp".to_string()),
+            _ => Type::Any,
+        },
+
+        // Template literals are always strings
+        ast::Expr::Tpl(_) => Type::String,
+
+        // Array literals → infer element type from first element
+        ast::Expr::Array(arr) => {
+            let elem_ty = arr.elems.iter()
+                .find_map(|e| e.as_ref().map(|elem| infer_type_from_expr(&elem.expr, ctx)))
+                .unwrap_or(Type::Any);
+            Type::Array(Box::new(elem_ty))
+        }
+
+        // Variable reference → look up known type
+        ast::Expr::Ident(ident) => {
+            let name = ident.sym.as_ref();
+            ctx.lookup_local_type(name).cloned().unwrap_or(Type::Any)
+        }
+
+        // Binary operators
+        ast::Expr::Bin(bin) => {
+            use ast::BinaryOp::*;
+            match bin.op {
+                // Comparison/equality operators always return boolean
+                EqEq | NotEq | EqEqEq | NotEqEq | Lt | LtEq | Gt | GtEq |
+                In | InstanceOf => Type::Boolean,
+
+                // Addition: string if either side is string, else number if both number
+                Add => {
+                    let left = infer_type_from_expr(&bin.left, ctx);
+                    let right = infer_type_from_expr(&bin.right, ctx);
+                    if matches!(left, Type::String) || matches!(right, Type::String) {
+                        Type::String
+                    } else if matches!(left, Type::Number) && matches!(right, Type::Number) {
+                        Type::Number
+                    } else {
+                        Type::Any
+                    }
+                }
+
+                // Arithmetic operators → Number if both sides Number
+                Sub | Mul | Div | Mod | Exp => {
+                    let left = infer_type_from_expr(&bin.left, ctx);
+                    let right = infer_type_from_expr(&bin.right, ctx);
+                    if matches!(left, Type::Number | Type::Int32) && matches!(right, Type::Number | Type::Int32) {
+                        Type::Number
+                    } else {
+                        Type::Any
+                    }
+                }
+
+                // Bitwise operators → Number
+                BitAnd | BitOr | BitXor | LShift | RShift | ZeroFillRShift => Type::Number,
+
+                // Logical operators → type of operands (simplified)
+                LogicalAnd | LogicalOr => {
+                    let right = infer_type_from_expr(&bin.right, ctx);
+                    if !matches!(right, Type::Any) { right } else {
+                        infer_type_from_expr(&bin.left, ctx)
+                    }
+                }
+                NullishCoalescing => {
+                    let left = infer_type_from_expr(&bin.left, ctx);
+                    if !matches!(left, Type::Any) { left } else {
+                        infer_type_from_expr(&bin.right, ctx)
+                    }
+                }
+            }
+        }
+
+        // Unary operators
+        ast::Expr::Unary(unary) => {
+            match unary.op {
+                ast::UnaryOp::TypeOf => Type::String,
+                ast::UnaryOp::Void => Type::Void,
+                ast::UnaryOp::Bang => Type::Boolean,
+                ast::UnaryOp::Minus | ast::UnaryOp::Plus | ast::UnaryOp::Tilde => Type::Number,
+                _ => Type::Any,
+            }
+        }
+
+        // Update expressions (++, --) → Number
+        ast::Expr::Update(_) => Type::Number,
+
+        // typeof always returns string
+        // Conditional (ternary) → try both branches
+        ast::Expr::Cond(cond) => {
+            let cons = infer_type_from_expr(&cond.cons, ctx);
+            let alt = infer_type_from_expr(&cond.alt, ctx);
+            if cons == alt { cons } else { Type::Any }
+        }
+
+        // Parenthesized expression
+        ast::Expr::Paren(paren) => infer_type_from_expr(&paren.expr, ctx),
+
+        // Type assertion (x as T) → extract the asserted type
+        ast::Expr::TsAs(ts_as) => extract_ts_type(&ts_as.type_ann),
+
+        // Non-null assertion (x!) → infer inner type
+        ast::Expr::TsNonNull(non_null) => infer_type_from_expr(&non_null.expr, ctx),
+
+        // Await expression → unwrap Promise
+        ast::Expr::Await(await_expr) => {
+            let inner = infer_type_from_expr(&await_expr.arg, ctx);
+            match inner {
+                Type::Promise(inner_ty) => *inner_ty,
+                other => other,
+            }
+        }
+
+        // Function calls → look up known return types
+        ast::Expr::Call(call) => {
+            if let ast::Callee::Expr(callee) = &call.callee {
+                infer_call_return_type(callee, ctx)
+            } else {
+                Type::Any
+            }
+        }
+
+        // Method calls on known types
+        ast::Expr::Member(member) => {
+            // Property access on known types (e.g., arr.length → Number)
+            if let ast::MemberProp::Ident(prop) = &member.prop {
+                let prop_name = prop.sym.as_ref();
+                let obj_ty = infer_type_from_expr(&member.obj, ctx);
+                match (&obj_ty, prop_name) {
+                    (Type::Array(_), "length") => Type::Number,
+                    (Type::String, "length") => Type::Number,
+                    _ => Type::Any,
+                }
+            } else {
+                Type::Any
+            }
+        }
+
+        // Assignments return the assigned value type
+        ast::Expr::Assign(assign) => infer_type_from_expr(&assign.right, ctx),
+
+        // new Array(), new Map(), etc. handled separately in var decl lowering
+        // Object literals
+        ast::Expr::Object(_) => Type::Any, // Could be refined but objects have complex shapes
+
+        // Arrow/function expressions
+        ast::Expr::Arrow(arrow) => {
+            let return_type = arrow.return_type.as_ref()
+                .map(|rt| extract_ts_type(&rt.type_ann))
+                .unwrap_or(Type::Any);
+            Type::Function(perry_types::FunctionType {
+                params: arrow.params.iter().map(|p| {
+                    let name = get_pat_name(p).unwrap_or_default();
+                    let ty = extract_param_type_with_ctx(p, None);
+                    (name, ty, false)
+                }).collect(),
+                return_type: Box::new(return_type),
+                is_async: arrow.is_async,
+                is_generator: arrow.is_generator,
+            })
+        }
+
+        _ => Type::Any,
+    }
+}
+
+/// Infer the return type of a function/method call expression.
+fn infer_call_return_type(callee: &ast::Expr, ctx: &LoweringContext) -> Type {
+    match callee {
+        // Direct function call: foo()
+        ast::Expr::Ident(ident) => {
+            let name = ident.sym.as_ref();
+            // Check user-defined function return types
+            if let Some(ty) = ctx.lookup_func_return_type(name) {
+                return ty.clone();
+            }
+            // Known built-in functions
+            match name {
+                "parseInt" | "parseFloat" | "Number" | "Math" => Type::Number,
+                "String" => Type::String,
+                "Boolean" => Type::Boolean,
+                "isNaN" | "isFinite" => Type::Boolean,
+                "Array" => Type::Array(Box::new(Type::Any)),
+                _ => Type::Any,
+            }
+        }
+        // Method call: obj.method()
+        ast::Expr::Member(member) => {
+            if let ast::MemberProp::Ident(method) = &member.prop {
+                let method_name = method.sym.as_ref();
+                let obj_ty = infer_type_from_expr(&member.obj, ctx);
+
+                // String methods
+                if matches!(obj_ty, Type::String) {
+                    return match method_name {
+                        "trim" | "trimStart" | "trimEnd" | "toLowerCase" | "toUpperCase"
+                        | "slice" | "substring" | "substr" | "replace" | "replaceAll"
+                        | "padStart" | "padEnd" | "repeat" | "charAt" | "concat"
+                        | "normalize" | "toLocaleLowerCase" | "toLocaleUpperCase" => Type::String,
+                        "indexOf" | "lastIndexOf" | "search" | "charCodeAt"
+                        | "codePointAt" | "localeCompare" => Type::Number,
+                        "startsWith" | "endsWith" | "includes" => Type::Boolean,
+                        "split" => Type::Array(Box::new(Type::String)),
+                        "match" | "matchAll" => Type::Any, // complex return types
+                        _ => Type::Any,
+                    };
+                }
+
+                // Array methods
+                if let Type::Array(elem_ty) = &obj_ty {
+                    return match method_name {
+                        "push" | "unshift" | "indexOf" | "lastIndexOf" | "findIndex" => Type::Number,
+                        "join" => Type::String,
+                        "includes" | "every" | "some" => Type::Boolean,
+                        "pop" | "shift" | "find" | "at" => *elem_ty.clone(),
+                        "map" | "filter" | "slice" | "concat" | "flat" | "flatMap"
+                        | "reverse" | "sort" | "splice" => obj_ty.clone(),
+                        "reduce" => Type::Any, // depends on accumulator
+                        "fill" => obj_ty.clone(),
+                        "forEach" => Type::Void,
+                        "length" => Type::Number,
+                        _ => Type::Any,
+                    };
+                }
+
+                // Number methods
+                if matches!(obj_ty, Type::Number | Type::Int32) {
+                    return match method_name {
+                        "toFixed" | "toPrecision" | "toExponential" | "toString" => Type::String,
+                        "valueOf" => Type::Number,
+                        _ => Type::Any,
+                    };
+                }
+
+                // Math.* methods
+                if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                    let obj_name = obj_ident.sym.as_ref();
+                    if obj_name == "Math" {
+                        return match method_name {
+                            "floor" | "ceil" | "round" | "abs" | "sqrt" | "pow" | "min" | "max"
+                            | "random" | "log" | "log2" | "log10" | "sin" | "cos" | "tan"
+                            | "asin" | "acos" | "atan" | "atan2" | "exp" | "sign" | "trunc"
+                            | "cbrt" | "hypot" | "fround" | "clz32" | "imul" => Type::Number,
+                            _ => Type::Any,
+                        };
+                    }
+                    if obj_name == "Number" {
+                        return match method_name {
+                            "parseInt" | "parseFloat" | "EPSILON" | "MAX_SAFE_INTEGER"
+                            | "MIN_SAFE_INTEGER" | "MAX_VALUE" | "MIN_VALUE" => Type::Number,
+                            "isNaN" | "isFinite" | "isInteger" | "isSafeInteger" => Type::Boolean,
+                            _ => Type::Any,
+                        };
+                    }
+                    if obj_name == "JSON" {
+                        return match method_name {
+                            "stringify" => Type::String,
+                            _ => Type::Any,  // parse returns any
+                        };
+                    }
+                    if obj_name == "Object" {
+                        return match method_name {
+                            "keys" | "values" => Type::Array(Box::new(Type::Any)),
+                            "entries" => Type::Array(Box::new(Type::Any)),
+                            _ => Type::Any,
+                        };
+                    }
+                    if obj_name == "Date" {
+                        return match method_name {
+                            "now" => Type::Number,
+                            _ => Type::Any,
+                        };
+                    }
+                    // console.log etc → void
+                    if obj_name == "console" {
+                        return Type::Void;
+                    }
+                }
+
+                // Generic .toString() on any object → String
+                if method_name == "toString" {
+                    return Type::String;
+                }
+            }
+            Type::Any
+        }
+        _ => Type::Any,
+    }
 }
 
 /// Extract type parameters from SWC's TsTypeParamDecl
@@ -772,7 +1090,12 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
 }
 
 pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_file_path: &str, start_class_id: ClassId) -> Result<(Module, ClassId)> {
+    lower_module_with_class_id_and_types(ast_module, name, source_file_path, start_class_id, None)
+}
+
+pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str, source_file_path: &str, start_class_id: ClassId, resolved_types: Option<std::collections::HashMap<u32, Type>>) -> Result<(Module, ClassId)> {
     let mut ctx = LoweringContext::with_class_id_start(source_file_path, start_class_id);
+    ctx.resolved_types = resolved_types;
     let mut module = Module::new(name);
 
     // For .tsx files, pre-register JSX runtime symbols so JSX expressions can be lowered.
@@ -866,7 +1189,16 @@ pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_f
             // Function has a body - each declaration gets a unique FuncId
             // (inner-scope functions shadow outer-scope same-name functions via reverse lookup)
             let func_id = ctx.fresh_func();
-            ctx.functions.push((func_name, func_id));
+            ctx.functions.push((func_name.clone(), func_id));
+
+            // Pre-register return type annotation for call-site type inference
+            // (so variables initialized from function calls can infer their type)
+            if let Some(rt) = &fn_decl.function.return_type {
+                let return_type = extract_ts_type(&rt.type_ann);
+                if !matches!(return_type, Type::Any) {
+                    ctx.register_func_return_type(func_name, return_type);
+                }
+            }
         }
     }
 
@@ -1032,6 +1364,10 @@ fn lower_module_decl(
                     func.is_exported = true;
                     let func_name = func.name.clone();
                     let func_id = func.id;
+                    // Register return type for call-site inference
+                    if !matches!(func.return_type, Type::Any) {
+                        ctx.register_func_return_type(func_name.clone(), func.return_type.clone());
+                    }
                     // Store parameter defaults for call-site resolution
                     let defaults: Vec<Option<Expr>> = func.params.iter().map(|p| p.default.clone()).collect();
                     let param_ids: Vec<LocalId> = func.params.iter().map(|p| p.id).collect();
@@ -1144,7 +1480,7 @@ fn lower_module_decl(
                                             if module_name == "perry/ui" {
                                                 match method_name {
                                                     "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
-                                                    | "NavigationStack" | "Picker" | "Table" => {
+                                                    | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
                                                         ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                                     }
                                                     _ => {}
@@ -1435,6 +1771,10 @@ fn lower_stmt(
                         return Ok(());
                     }
                     let func = lower_fn_decl(ctx, fn_decl)?;
+                    // Register return type for call-site inference
+                    if !matches!(func.return_type, Type::Any) {
+                        ctx.register_func_return_type(func.name.clone(), func.return_type.clone());
+                    }
                     // Store parameter defaults for call-site resolution
                     let defaults: Vec<Option<Expr>> = func.params.iter().map(|p| p.default.clone()).collect();
                     let param_ids: Vec<LocalId> = func.params.iter().map(|p| p.id).collect();
@@ -2048,6 +2388,10 @@ fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Fun
                 "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
                 "Redis" => Some(("ioredis", "Redis")),
                 "EventEmitter" => Some(("events", "EventEmitter")),
+                // Fastify types
+                "FastifyInstance" => Some(("fastify", "App")),
+                "FastifyRequest" => Some(("fastify", "Request")),
+                "FastifyReply" => Some(("fastify", "Reply")),
                 _ => None,
             };
             if let Some((module, class)) = native_info {
@@ -3785,6 +4129,39 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                         "entries" => {
                                             let obj = args.get(0).cloned().unwrap_or(Expr::Undefined);
                                             return Ok(Expr::ObjectEntries(Box::new(obj)));
+                                        }
+                                        // Object.freeze(obj) is a no-op in Perry (we don't enforce immutability)
+                                        "freeze" | "seal" | "preventExtensions" | "create" => {
+                                            let obj = args.get(0).cloned().unwrap_or(Expr::Undefined);
+                                            return Ok(obj);
+                                        }
+                                        // Object.assign(target, src1, src2, ...) - treat as object spread
+                                        // Each non-object arg is spread; object literal args are inlined
+                                        "assign" => {
+                                            let mut parts: Vec<(Option<String>, Expr)> = Vec::new();
+                                            for arg in &args {
+                                                match arg {
+                                                    Expr::Object(props) => {
+                                                        // Inline object literal props as static key-value pairs
+                                                        for (key, val) in props {
+                                                            parts.push((Some(key.clone()), val.clone()));
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        // Spread non-object expression
+                                                        parts.push((None, arg.clone()));
+                                                    }
+                                                }
+                                            }
+                                            // If no spreads and only static props, return plain Object
+                                            let has_spread = parts.iter().any(|(k, _)| k.is_none());
+                                            if !has_spread {
+                                                let static_props: Vec<(String, Expr)> = parts.into_iter()
+                                                    .filter_map(|(k, v)| k.map(|key| (key, v)))
+                                                    .collect();
+                                                return Ok(Expr::Object(static_props));
+                                            }
+                                            return Ok(Expr::ObjectSpread { parts });
                                         }
                                         _ => {} // Fall through to generic handling
                                     }
@@ -6082,6 +6459,46 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
             }
         }
         ast::Expr::Object(obj) => {
+            // Check if any spread elements exist; if so, use ObjectSpread
+            let has_spread = obj.props.iter().any(|p| matches!(p, ast::PropOrSpread::Spread(_)));
+            if has_spread {
+                let mut parts: Vec<(Option<String>, Expr)> = Vec::new();
+                for prop in &obj.props {
+                    match prop {
+                        ast::PropOrSpread::Spread(spread) => {
+                            let spread_expr = lower_expr(ctx, &spread.expr)?;
+                            parts.push((None, spread_expr));
+                        }
+                        ast::PropOrSpread::Prop(prop) => {
+                            match prop.as_ref() {
+                                ast::Prop::KeyValue(kv) => {
+                                    let key = match &kv.key {
+                                        ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                        ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                        ast::PropName::Num(n) => n.value.to_string(),
+                                        _ => continue,
+                                    };
+                                    let value = lower_expr(ctx, &kv.value)?;
+                                    parts.push((Some(key), value));
+                                }
+                                ast::Prop::Shorthand(ident) => {
+                                    let name = ident.sym.to_string();
+                                    let value = if let Some(func_id) = ctx.lookup_func(&name) {
+                                        Expr::FuncRef(func_id)
+                                    } else if let Some(local_id) = ctx.lookup_local(&name) {
+                                        Expr::LocalGet(local_id)
+                                    } else {
+                                        continue;
+                                    };
+                                    parts.push((Some(name), value));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                return Ok(Expr::ObjectSpread { parts });
+            }
             let mut props = Vec::new();
             for prop in &obj.props {
                 match prop {
@@ -6427,6 +6844,10 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         "WebSocket" | "WebSocketServer" => Some(("ws", type_name.as_str())),
                         "Redis" => Some(("ioredis", "Redis")),
                         "EventEmitter" => Some(("events", "EventEmitter")),
+                        // Fastify types
+                        "FastifyInstance" => Some(("fastify", "App")),
+                        "FastifyRequest" => Some(("fastify", "Request")),
+                        "FastifyReply" => Some(("fastify", "Reply")),
                         _ => None,
                     };
                     if let Some((module, class)) = native_info {
@@ -7969,7 +8390,22 @@ fn lower_var_decl_with_destructuring(
             let name = ident.id.sym.to_string();
             let mut ty = ident.type_ann.as_ref()
                 .map(|ann| extract_ts_type(&ann.type_ann))
-                .unwrap_or(Type::Any);
+                .unwrap_or_else(|| {
+                    // No type annotation: try local inference from initializer
+                    if let Some(init_expr) = &decl.init {
+                        let inferred = infer_type_from_expr(init_expr, ctx);
+                        if !matches!(inferred, Type::Any) {
+                            return inferred;
+                        }
+                        // Fall back to tsgo resolved types if available
+                        if let Some(resolved) = ctx.resolved_types.as_ref() {
+                            if let Some(resolved_ty) = resolved.get(&(ident.id.span.lo.0)) {
+                                return resolved_ty.clone();
+                            }
+                        }
+                    }
+                    Type::Any
+                });
 
             // If no type annotation, infer from new Set<T>() or new Map<K, V>() or new URLSearchParams() expressions
             if matches!(ty, Type::Any) {
@@ -8094,7 +8530,7 @@ fn lower_var_decl_with_destructuring(
                                 if module_name == "perry/ui" {
                                     match method_name {
                                         "State" | "Sheet" | "Toolbar" | "Window" | "LazyVStack"
-                                        | "NavigationStack" | "Picker" | "Table" => {
+                                        | "NavigationStack" | "Picker" | "Table" | "TabBar" => {
                                             ctx.register_native_instance(name.clone(), module_name.to_string(), method_name.to_string());
                                         }
                                         _ => {}
