@@ -685,24 +685,17 @@ pub extern "C" fn js_array_flat(arr: *const ArrayHeader) -> *mut ArrayHeader {
             // Check if the element is an array pointer (NaN-boxed or raw)
             let maybe_arr_ptr = if top16 >= 0x7FF8 {
                 // NaN-boxed value - check if it's a pointer-like tag
-                if top16 == 0x7FFD || top16 == 0x7FFF || top16 == 0x7FFA || top16 == 0x7FFB {
-                    // Could be POINTER_TAG, STRING_TAG, BIGINT_TAG, JS_HANDLE_TAG
-                    // For flat(), we only care about array pointers (POINTER_TAG)
-                    if top16 == 0x7FFD {
-                        let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
-                        if (ptr as usize) >= 0x1000 { Some(ptr) } else { None }
-                    } else {
-                        None
-                    }
-                } else if top16 == 0x7FFC {
-                    None // undefined
+                if top16 == 0x7FFD {
+                    // POINTER_TAG — extract raw pointer
+                    let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader;
+                    if (ptr as usize) >= 0x1000 { Some(ptr) } else { None }
                 } else {
-                    None // regular NaN
+                    None // STRING_TAG, BIGINT_TAG, JS_HANDLE_TAG, undefined, NaN
                 }
-            } else if bits > 0x0001_0000_0000_0000 && (bits & 0x7) == 0 {
-                // Raw pointer (aligned, high address)
-                let ptr = bits as *const ArrayHeader;
-                if (ptr as usize) >= 0x1000 { Some(ptr) } else { None }
+            } else if top16 == 0 && bits >= 0x10000 && (bits & 0x7) == 0 {
+                // Raw pointer without NaN-boxing (top 16 bits zero = userspace pointer,
+                // >= 64KB to exclude small integers, 8-byte aligned)
+                Some(bits as *const ArrayHeader)
             } else {
                 None
             };
