@@ -784,6 +784,23 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         None
     };
 
+    // Pre-flight credential validation — fail fast before building the tarball
+    {
+        let is_macos = !is_android && !is_ios && !is_linux;
+        validate_credentials_for_distribute(
+            is_android,
+            android_distribute.as_deref(),
+            google_play_json.as_deref(),
+            is_ios,
+            ios_distribute.as_deref(),
+            apple_key_id.as_deref(),
+            apple_issuer_id.as_deref(),
+            p8_key_content.as_deref(),
+            is_macos,
+            macos_distribute.as_deref(),
+        )?;
+    }
+
     // --- Show summary and confirm ---
     if let OutputFormat::Text = format {
         println!("  Version:   {version}");
@@ -1320,62 +1337,62 @@ fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
 // --- Saved config (~/.perry/config.toml) ---
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-struct PerryConfig {
+pub(crate) struct PerryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    license_key: Option<String>,
+    pub(crate) license_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    server: Option<String>,
+    pub(crate) server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    default_target: Option<String>,
+    pub(crate) default_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    apple: Option<AppleSavedConfig>,
+    pub(crate) apple: Option<AppleSavedConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    ios: Option<IosSavedConfig>,
+    pub(crate) ios: Option<IosSavedConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    android: Option<AndroidSavedConfig>,
+    pub(crate) android: Option<AndroidSavedConfig>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-struct AppleSavedConfig {
+pub(crate) struct AppleSavedConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    team_id: Option<String>,
+    pub(crate) team_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    signing_identity: Option<String>,
+    pub(crate) signing_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    p8_key_path: Option<String>,
+    pub(crate) p8_key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    key_id: Option<String>,
+    pub(crate) key_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    issuer_id: Option<String>,
+    pub(crate) issuer_id: Option<String>,
     /// Path to .p12 certificate bundle. Only the path is saved, never the cert data or password.
     #[serde(skip_serializing_if = "Option::is_none")]
-    certificate_path: Option<String>,
+    pub(crate) certificate_path: Option<String>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-struct IosSavedConfig {
+pub(crate) struct IosSavedConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    provisioning_profile_path: Option<String>,
+    pub(crate) provisioning_profile_path: Option<String>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
-struct AndroidSavedConfig {
+pub(crate) struct AndroidSavedConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    keystore_path: Option<String>,
+    pub(crate) keystore_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    key_alias: Option<String>,
+    pub(crate) key_alias: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    google_play_key_path: Option<String>,
+    pub(crate) google_play_key_path: Option<String>,
 }
 
-fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".perry")
         .join("config.toml")
 }
 
-fn load_config() -> PerryConfig {
+pub(crate) fn load_config() -> PerryConfig {
     let path = config_path();
     if let Ok(content) = fs::read_to_string(&path) {
         toml::from_str(&content).unwrap_or_default()
@@ -1384,7 +1401,7 @@ fn load_config() -> PerryConfig {
     }
 }
 
-fn save_config(config: &PerryConfig) -> Result<()> {
+pub(crate) fn save_config(config: &PerryConfig) -> Result<()> {
     let path = config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1395,13 +1412,13 @@ fn save_config(config: &PerryConfig) -> Result<()> {
     Ok(())
 }
 
-fn is_interactive() -> bool {
+pub(crate) fn is_interactive() -> bool {
     atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout)
 }
 
 /// Prompt user for text input with an optional default value.
 /// Returns None if the user enters empty string.
-fn prompt_input(prompt: &str, default: Option<&str>) -> Option<String> {
+pub(crate) fn prompt_input(prompt: &str, default: Option<&str>) -> Option<String> {
     let mut builder = Input::<String>::new().with_prompt(prompt);
     if let Some(d) = default {
         builder = builder.default(d.to_string());
@@ -1507,6 +1524,86 @@ fn resolve_path_credential(
     None
 }
 
+/// Validate that required distribution credentials are present before starting a build.
+///
+/// Called immediately after credential resolution, before the tarball is created,
+/// so users get a clear error message without waiting for a full build to complete.
+fn validate_credentials_for_distribute(
+    is_android: bool,
+    android_distribute: Option<&str>,
+    google_play_json: Option<&str>,
+    is_ios: bool,
+    ios_distribute: Option<&str>,
+    apple_key_id: Option<&str>,
+    apple_issuer_id: Option<&str>,
+    p8_key_content: Option<&str>,
+    is_macos: bool,
+    macos_distribute: Option<&str>,
+) -> Result<()> {
+    // Android + playstore
+    if is_android {
+        let distribute = android_distribute.unwrap_or("");
+        if distribute == "playstore" || distribute.starts_with("playstore:") {
+            if google_play_json.is_none() {
+                bail!(
+                    "android.distribute = \"playstore\" requires a Google Play service account JSON key.\n\
+                     Run `perry setup android`, pass --google-play-key <path>, or set PERRY_GOOGLE_PLAY_KEY_PATH.\n\
+                     To build without uploading, remove distribute = \"playstore\" from perry.toml."
+                );
+            }
+            // Validate track if explicitly specified
+            if let Some(track) = distribute.strip_prefix("playstore:") {
+                if !matches!(track, "internal" | "alpha" | "beta" | "production") {
+                    bail!(
+                        "Invalid Play Store track \"{track}\". Valid values: internal, alpha, beta, production.\n\
+                         Example: distribute = \"playstore:beta\""
+                    );
+                }
+            }
+        }
+    }
+
+    // iOS + appstore/testflight
+    if is_ios {
+        let distribute = ios_distribute.unwrap_or("");
+        if distribute == "appstore" || distribute == "testflight" {
+            let mut missing = Vec::new();
+            if apple_key_id.is_none() { missing.push("Key ID (--apple-key-id / PERRY_APPLE_KEY_ID)"); }
+            if apple_issuer_id.is_none() { missing.push("Issuer ID (--apple-issuer-id / PERRY_APPLE_ISSUER_ID)"); }
+            if p8_key_content.is_none() { missing.push(".p8 key (--apple-p8-key / PERRY_APPLE_P8_KEY)"); }
+            if !missing.is_empty() {
+                bail!(
+                    "ios.distribute = \"{distribute}\" requires App Store Connect API credentials.\n\
+                     Missing: {}\n\
+                     Run `perry setup ios` or pass the missing flags.",
+                    missing.join(", ")
+                );
+            }
+        }
+    }
+
+    // macOS + appstore
+    if is_macos {
+        let distribute = macos_distribute.unwrap_or("");
+        if distribute == "appstore" {
+            let mut missing = Vec::new();
+            if apple_key_id.is_none() { missing.push("Key ID (--apple-key-id / PERRY_APPLE_KEY_ID)"); }
+            if apple_issuer_id.is_none() { missing.push("Issuer ID (--apple-issuer-id / PERRY_APPLE_ISSUER_ID)"); }
+            if p8_key_content.is_none() { missing.push(".p8 key (--apple-p8-key / PERRY_APPLE_P8_KEY)"); }
+            if !missing.is_empty() {
+                bail!(
+                    "macos.distribute = \"appstore\" requires App Store Connect API credentials.\n\
+                     Missing: {}\n\
+                     Run `perry setup macos` or pass the missing flags.",
+                    missing.join(", ")
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1523,6 +1620,7 @@ mod tests {
                 p8_key_path: Some("/Users/me/AuthKey_XXX.p8".into()),
                 key_id: Some("XXX".into()),
                 issuer_id: Some("abc-def-ghi".into()),
+                ..Default::default()
             }),
             ios: Some(IosSavedConfig {
                 provisioning_profile_path: Some("/Users/me/profile.mobileprovision".into()),
@@ -1604,6 +1702,8 @@ mod tests {
             apple_issuer_id: None,
             apple_p8_key: None,
             provisioning_profile_base64: None,
+            apple_certificate_p12_base64: None,
+            apple_certificate_password: None,
             android_keystore_base64: Some("dGVzdA==".into()),
             android_keystore_password: Some("pass".into()),
             android_key_alias: Some("key0".into()),
@@ -1624,6 +1724,8 @@ mod tests {
             apple_issuer_id: None,
             apple_p8_key: None,
             provisioning_profile_base64: None,
+            apple_certificate_p12_base64: None,
+            apple_certificate_password: None,
             android_keystore_base64: None,
             android_keystore_password: None,
             android_key_alias: None,
@@ -1743,5 +1845,99 @@ mod tests {
         // Cleanup
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_validate_android_playstore_requires_json() {
+        let result = validate_credentials_for_distribute(
+            true, Some("playstore"), None, // android, no key
+            false, None, None, None, None, // ios not applicable
+            false, None,                   // macos not applicable
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("service account JSON key"), "{msg}");
+        assert!(msg.contains("perry setup android"), "{msg}");
+    }
+
+    #[test]
+    fn test_validate_android_playstore_invalid_track() {
+        let result = validate_credentials_for_distribute(
+            true, Some("playstore:bogus"), Some("{}"),
+            false, None, None, None, None,
+            false, None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid Play Store track"));
+    }
+
+    #[test]
+    fn test_validate_android_playstore_valid_tracks() {
+        for track in ["internal", "alpha", "beta", "production"] {
+            let distribute = format!("playstore:{track}");
+            let result = validate_credentials_for_distribute(
+                true, Some(&distribute), Some("{\"ok\":1}"),
+                false, None, None, None, None,
+                false, None,
+            );
+            assert!(result.is_ok(), "track={track} should be valid");
+        }
+    }
+
+    #[test]
+    fn test_validate_ios_appstore_requires_creds() {
+        let result = validate_credentials_for_distribute(
+            false, None, None,
+            true, Some("appstore"), None, None, None, // ios, missing creds
+            false, None,
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("App Store Connect API credentials"), "{msg}");
+        assert!(msg.contains("perry setup ios"), "{msg}");
+    }
+
+    #[test]
+    fn test_validate_ios_testflight_requires_creds() {
+        let result = validate_credentials_for_distribute(
+            false, None, None,
+            true, Some("testflight"), Some("kid"), None, Some("key_content"),
+            false, None,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Issuer ID"));
+    }
+
+    #[test]
+    fn test_validate_ios_no_distribute_passes() {
+        let result = validate_credentials_for_distribute(
+            false, None, None,
+            true, None, None, None, None, // ios but no distribute set
+            false, None,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_macos_appstore_requires_creds() {
+        let result = validate_credentials_for_distribute(
+            false, None, None,
+            false, None, None, None, None,
+            true, Some("appstore"), // macos appstore, no creds
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("App Store Connect API credentials"), "{msg}");
+        assert!(msg.contains("perry setup macos"), "{msg}");
+    }
+
+    #[test]
+    fn test_validate_passes_when_all_present() {
+        let result = validate_credentials_for_distribute(
+            false, None, None,
+            true, Some("appstore"), Some("kid"), Some("iid"), Some("p8"),
+            false, None,
+        );
+        assert!(result.is_ok());
     }
 }

@@ -61,6 +61,9 @@ enum Commands {
     /// Build, sign, package and publish your app
     Publish(commands::publish::PublishArgs),
 
+    /// Set up credentials for App Store or Google Play distribution
+    Setup(commands::setup::SetupArgs),
+
     /// Check for updates and self-update Perry
     Update(commands::update::UpdateArgs),
 }
@@ -79,7 +82,7 @@ fn is_legacy_invocation(args: &[String]) -> bool {
         // If it's a known subcommand, not legacy
         if matches!(
             arg.as_str(),
-            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "help"
+            "compile" | "check" | "init" | "doctor" | "explain" | "publish" | "update" | "setup" | "help"
         ) {
             return false;
         }
@@ -151,6 +154,9 @@ fn main() -> Result<()> {
         }
         Commands::Publish(args) => {
             commands::publish::run(args, cli.format, use_color, cli.verbose)
+        }
+        Commands::Setup(args) => {
+            commands::setup::run(args)
         }
         Commands::Update(args) => {
             commands::update::run(args, cli.format, use_color, cli.verbose)

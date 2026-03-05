@@ -9,5 +9,6 @@ pub mod fix_applier;
 pub mod fixer;
 pub mod init;
 pub mod publish;
+pub mod setup;
 pub mod typecheck;
 pub mod update;
