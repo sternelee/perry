@@ -94,8 +94,17 @@ pub extern "C" fn js_array_from_f64(elements: *const f64, count: u32) -> *mut Ar
 }
 
 /// Get the length of an array
+/// Also handles Sets and Maps via registry check (for-of iteration treats them as arrays)
 #[no_mangle]
 pub extern "C" fn js_array_length(arr: *const ArrayHeader) -> u32 {
+    if !arr.is_null() {
+        if crate::set::is_registered_set(arr as usize) {
+            return crate::set::js_set_size(arr as *const crate::set::SetHeader);
+        }
+        if crate::map::is_registered_map(arr as usize) {
+            return crate::map::js_map_size(arr as *const crate::map::MapHeader);
+        }
+    }
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return 0; }
     unsafe { (*arr).length }
@@ -124,10 +133,40 @@ pub extern "C" fn js_array_get_element_f64(arr: i64, index: i64) -> f64 {
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::NAN; }
+    // Check if this is actually a buffer (Uint8Array) — read individual bytes
+    if crate::buffer::is_registered_buffer(arr as usize) {
+        let byte_val = crate::buffer::js_buffer_get(arr as *const crate::buffer::BufferHeader, index as i32);
+        return byte_val as f64;
+    }
+    // Check if this is a Set — read from elements pointer (not inline)
+    if crate::set::is_registered_set(arr as usize) {
+        let set = arr as *const crate::set::SetHeader;
+        unsafe {
+            let size = (*set).size;
+            if index >= size { return f64::NAN; }
+            let elements = (*set).elements as *const f64;
+            return std::ptr::read(elements.add(index as usize));
+        }
+    }
+    // Check if this is a Map — return entries as [key, value] pairs
+    if crate::map::is_registered_map(arr as usize) {
+        let map = arr as *const crate::map::MapHeader;
+        unsafe {
+            let size = (*map).size;
+            if index >= size { return f64::NAN; }
+            let entries = (*map).entries as *const f64;
+            // Map entries: key at index*2, return key for simple iteration
+            return std::ptr::read(entries.add(index as usize * 2));
+        }
+    }
     unsafe {
         let length = (*arr).length;
         if index >= length {
             return f64::NAN; // Out of bounds returns NaN (like undefined coerced to number)
+        }
+        // Guard: corrupted arrays with unreasonably large length
+        if length > 100000 {
+            return f64::NAN;
         }
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
         *elements_ptr.add(index as usize)
@@ -140,6 +179,11 @@ pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
 pub extern "C" fn js_array_set_f64(arr: *mut ArrayHeader, index: u32, value: f64) {
     let arr = clean_arr_ptr_mut(arr);
     if arr.is_null() { return; }
+    // Check if this is actually a buffer (Uint8Array) — write individual bytes
+    if crate::buffer::is_registered_buffer(arr as usize) {
+        crate::buffer::js_buffer_set(arr as *mut crate::buffer::BufferHeader, index as i32, value as i32);
+        return;
+    }
     unsafe {
         let length = (*arr).length;
         if index >= length {
@@ -157,6 +201,11 @@ pub extern "C" fn js_array_set_f64(arr: *mut ArrayHeader, index: u32, value: f64
 pub extern "C" fn js_array_set_f64_extend(arr: *mut ArrayHeader, index: u32, value: f64) -> *mut ArrayHeader {
     let arr = clean_arr_ptr_mut(arr);
     if arr.is_null() { return js_array_alloc(0); }
+    // Check if this is actually a buffer (Uint8Array) — write individual bytes
+    if crate::buffer::is_registered_buffer(arr as usize) {
+        crate::buffer::js_buffer_set(arr as *mut crate::buffer::BufferHeader, index as i32, value as i32);
+        return arr;
+    }
     unsafe {
         let length = (*arr).length;
 
@@ -609,8 +658,17 @@ pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeade
 /// Clone an array from a NaN-boxed f64 pointer value.
 /// Extracts the array pointer from the NaN-boxed value and creates a shallow copy.
 /// If the value is not a valid array pointer, returns an empty array.
+/// Also handles Sets (via registry check) — converts Set to Array transparently.
 #[no_mangle]
 pub extern "C" fn js_array_clone(src: *const ArrayHeader) -> *mut ArrayHeader {
+    // Check if this is actually a Set (type unknown at compile time)
+    if !src.is_null() && crate::set::is_registered_set(src as usize) {
+        return crate::set::js_set_to_array(src as *const crate::set::SetHeader);
+    }
+    // Check if this is a Map (for Array.from(map) → array of [key, value] pairs)
+    if !src.is_null() && crate::map::is_registered_map(src as usize) {
+        return crate::map::js_map_entries(src as *const crate::map::MapHeader);
+    }
     let src = clean_arr_ptr(src);
     if src.is_null() {
         return js_array_alloc(0);

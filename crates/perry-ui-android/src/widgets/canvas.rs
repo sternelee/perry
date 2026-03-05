@@ -19,6 +19,7 @@ pub enum DrawCmd {
 struct CanvasState {
     width: i32,
     height: i32,
+    density: f32,
     cmds: Vec<DrawCmd>,
 }
 
@@ -27,13 +28,21 @@ thread_local! {
 }
 
 pub fn create(width: f64, height: f64) -> i64 {
-    let w = width as i32;
-    let h = height as i32;
-
     let mut env = jni_bridge::get_env();
     let _ = env.push_local_frame(32);
 
     let activity = super::get_activity(&mut env);
+
+    // Get display density to convert dp to px
+    let resources = env.call_method(&activity, "getResources", "()Landroid/content/res/Resources;", &[])
+        .expect("getResources").l().expect("resources");
+    let display_metrics = env.call_method(&resources, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;", &[])
+        .expect("getDisplayMetrics").l().expect("displayMetrics");
+    let density = env.get_field(&display_metrics, "density", "F")
+        .expect("density").f().expect("float");
+
+    let w = (width as f32 * density) as i32;
+    let h = (height as f32 * density) as i32;
 
     // Create ImageView
     let image_view = env.new_object(
@@ -52,6 +61,7 @@ pub fn create(width: f64, height: f64) -> i64 {
         s.borrow_mut().insert(handle, CanvasState {
             width: w,
             height: h,
+            density,
             cmds: Vec::new(),
         });
     });
@@ -185,58 +195,65 @@ fn repaint(handle: i64) {
                         }
                     }
                     DrawCmd::FillGradient(color1, color2, direction) => {
-                        // Create LinearGradient shader
-                        let (x1, y1, x2, y2) = if *direction < 0.5 {
-                            (0.0f32, 0.0f32, 0.0f32, h as f32) // vertical
-                        } else {
-                            (0.0f32, 0.0f32, w as f32, 0.0f32) // horizontal
-                        };
+                        if path_points.len() >= 3 {
+                            // Build Android Path from accumulated path_points
+                            let path = env.new_object("android/graphics/Path", "()V", &[])
+                                .expect("Failed to create Path");
+                            let (sx, sy) = path_points[0];
+                            let _ = env.call_method(&path, "moveTo", "(FF)V",
+                                &[JValue::Float(sx), JValue::Float(sy)]);
+                            for i in 1..path_points.len() {
+                                let (px, py) = path_points[i];
+                                let _ = env.call_method(&path, "lineTo", "(FF)V",
+                                    &[JValue::Float(px), JValue::Float(py)]);
+                            }
+                            let _ = env.call_method(&path, "close", "()V", &[]);
 
-                        let tile_class = env.find_class("android/graphics/Shader$TileMode").expect("TileMode");
-                        let clamp = env.get_static_field(
-                            &tile_class,
-                            "CLAMP",
-                            "Landroid/graphics/Shader$TileMode;",
-                        ).expect("CLAMP").l().expect("clamp");
+                            // Create LinearGradient shader
+                            let (x1, y1, x2, y2) = if *direction < 0.5 {
+                                (0.0f32, 0.0f32, 0.0f32, h as f32) // vertical
+                            } else {
+                                (0.0f32, 0.0f32, w as f32, 0.0f32) // horizontal
+                            };
 
-                        let gradient = env.new_object(
-                            "android/graphics/LinearGradient",
-                            "(FFFFIILandroid/graphics/Shader$TileMode;)V",
-                            &[
-                                JValue::Float(x1), JValue::Float(y1),
-                                JValue::Float(x2), JValue::Float(y2),
-                                JValue::Int(*color1), JValue::Int(*color2),
-                                JValue::Object(&clamp),
-                            ],
-                        ).expect("LinearGradient");
+                            let tile_class = env.find_class("android/graphics/Shader$TileMode").expect("TileMode");
+                            let clamp = env.get_static_field(
+                                &tile_class, "CLAMP", "Landroid/graphics/Shader$TileMode;",
+                            ).expect("CLAMP").l().expect("clamp");
 
-                        let _ = env.call_method(
-                            &paint,
-                            "setShader",
-                            "(Landroid/graphics/Shader;)Landroid/graphics/Shader;",
-                            &[JValue::Object(&gradient)],
-                        );
+                            let gradient = env.new_object(
+                                "android/graphics/LinearGradient",
+                                "(FFFFIILandroid/graphics/Shader$TileMode;)V",
+                                &[
+                                    JValue::Float(x1), JValue::Float(y1),
+                                    JValue::Float(x2), JValue::Float(y2),
+                                    JValue::Int(*color1), JValue::Int(*color2),
+                                    JValue::Object(&clamp),
+                                ],
+                            ).expect("LinearGradient");
 
-                        let rect_f = env.new_object(
-                            "android/graphics/RectF",
-                            "(FFFF)V",
-                            &[JValue::Float(0.0), JValue::Float(0.0), JValue::Float(w as f32), JValue::Float(h as f32)],
-                        ).expect("RectF");
+                            let _ = env.call_method(&paint, "setShader",
+                                "(Landroid/graphics/Shader;)Landroid/graphics/Shader;",
+                                &[JValue::Object(&gradient)]);
 
-                        let _ = env.call_method(
-                            &canvas,
-                            "drawRect",
-                            "(Landroid/graphics/RectF;Landroid/graphics/Paint;)V",
-                            &[JValue::Object(&rect_f), JValue::Object(&paint)],
-                        );
+                            // Set FILL style
+                            let style_class = env.find_class("android/graphics/Paint$Style").expect("Paint$Style");
+                            let fill_style = env.get_static_field(
+                                &style_class, "FILL", "Landroid/graphics/Paint$Style;",
+                            ).expect("FILL").l().expect("style");
+                            let _ = env.call_method(&paint, "setStyle",
+                                "(Landroid/graphics/Paint$Style;)V",
+                                &[JValue::Object(&fill_style)]);
 
-                        // Clear shader
-                        let _ = env.call_method(
-                            &paint,
-                            "setShader",
-                            "(Landroid/graphics/Shader;)Landroid/graphics/Shader;",
-                            &[JValue::Object(&jni::objects::JObject::null())],
-                        );
+                            let _ = env.call_method(&canvas, "drawPath",
+                                "(Landroid/graphics/Path;Landroid/graphics/Paint;)V",
+                                &[JValue::Object(&path), JValue::Object(&paint)]);
+
+                            // Clear shader
+                            let _ = env.call_method(&paint, "setShader",
+                                "(Landroid/graphics/Shader;)Landroid/graphics/Shader;",
+                                &[JValue::Object(&jni::objects::JObject::null())]);
+                        }
                     }
                 }
             }
@@ -278,7 +295,8 @@ pub fn move_to(handle: i64, x: f64, y: f64) {
     CANVAS_STATES.with(|s| {
         let mut states = s.borrow_mut();
         if let Some(state) = states.get_mut(&handle) {
-            state.cmds.push(DrawCmd::MoveTo(x as f32, y as f32));
+            let d = state.density;
+            state.cmds.push(DrawCmd::MoveTo(x as f32 * d, y as f32 * d));
         }
     });
 }
@@ -287,7 +305,8 @@ pub fn line_to(handle: i64, x: f64, y: f64) {
     CANVAS_STATES.with(|s| {
         let mut states = s.borrow_mut();
         if let Some(state) = states.get_mut(&handle) {
-            state.cmds.push(DrawCmd::LineTo(x as f32, y as f32));
+            let d = state.density;
+            state.cmds.push(DrawCmd::LineTo(x as f32 * d, y as f32 * d));
         }
     });
 }
@@ -302,7 +321,8 @@ pub fn stroke(handle: i64, r: f64, g: f64, b: f64, a: f64, line_width: f64) {
     CANVAS_STATES.with(|s| {
         let mut states = s.borrow_mut();
         if let Some(state) = states.get_mut(&handle) {
-            state.cmds.push(DrawCmd::Stroke(color, line_width as f32));
+            let d = state.density;
+            state.cmds.push(DrawCmd::Stroke(color, line_width as f32 * d));
         }
     });
     repaint(handle);

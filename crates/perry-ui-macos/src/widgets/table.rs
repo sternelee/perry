@@ -100,26 +100,28 @@ define_class!(
         #[unsafe(method(tableViewSelectionDidChange:))]
         fn selection_did_change(&self, _notification: &AnyObject) {
             let idx = self.ivars().entry_idx.get();
-            let (select_closure, tv_ptr) = TABLES.with(|t| {
-                let tables = t.borrow();
-                if let Some(e) = tables.get(idx) {
-                    (e.select_closure, Retained::as_ptr(&e.table_view) as usize)
-                } else {
-                    (0.0, 0)
+            crate::catch_callback_panic("table selection callback", std::panic::AssertUnwindSafe(|| {
+                let (select_closure, tv_ptr) = TABLES.with(|t| {
+                    let tables = t.borrow();
+                    if let Some(e) = tables.get(idx) {
+                        (e.select_closure, Retained::as_ptr(&e.table_view) as usize)
+                    } else {
+                        (0.0, 0)
+                    }
+                });
+                if select_closure == 0.0 || tv_ptr == 0 {
+                    return;
                 }
-            });
-            if select_closure == 0.0 || tv_ptr == 0 {
-                return;
-            }
-            let selected_row: i64 =
-                unsafe { msg_send![tv_ptr as *const AnyObject, selectedRow] };
-            if selected_row >= 0 {
-                let closure_ptr =
-                    unsafe { js_nanbox_get_pointer(select_closure) } as *const u8;
-                unsafe {
-                    js_closure_call1(closure_ptr, selected_row as f64);
+                let selected_row: i64 =
+                    unsafe { msg_send![tv_ptr as *const AnyObject, selectedRow] };
+                if selected_row >= 0 {
+                    let closure_ptr =
+                        unsafe { js_nanbox_get_pointer(select_closure) } as *const u8;
+                    unsafe {
+                        js_closure_call1(closure_ptr, selected_row as f64);
+                    }
                 }
-            }
+            }));
         }
     }
 );

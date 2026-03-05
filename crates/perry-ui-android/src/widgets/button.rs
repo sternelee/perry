@@ -77,6 +77,14 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
         &[JValue::Object(&jstr)],
     );
 
+    // Disable ALL CAPS (Material default) to match iOS mixed-case behavior
+    let _ = env.call_method(
+        &button,
+        "setAllCaps",
+        "(Z)V",
+        &[JValue::Bool(0)],
+    );
+
     // Register callback and set up OnClickListener via PerryBridge
     let cb_key = callback::register(on_press);
     let bridge_class = jni_bridge::with_cache(|c| {
@@ -115,6 +123,26 @@ pub fn set_bordered(handle: i64, bordered: bool) {
                 &[JValue::Object(view_ref.as_obj()), JValue::Bool(0)],
             );
         }
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    }
+}
+
+/// Set the text color of a button.
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view_ref) = super::get_widget(handle) {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+        let ai = (a * 255.0) as u32;
+        let ri = (r * 255.0) as u32;
+        let gi = (g * 255.0) as u32;
+        let bi = (b * 255.0) as u32;
+        let color = ((ai << 24) | (ri << 16) | (gi << 8) | bi) as i32;
+        let _ = env.call_method(
+            view_ref.as_obj(),
+            "setTextColor",
+            "(I)V",
+            &[JValue::Int(color)],
+        );
         unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
     }
 }

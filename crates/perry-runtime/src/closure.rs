@@ -136,26 +136,19 @@ fn get_valid_func_ptr(closure: *const ClosureHeader) -> *const u8 {
     if func_ptr_addr == 0 {
         return std::ptr::null();
     }
-    // Validate func_ptr is in .text section range
-    // macOS ARM64: 0x100000000+, <4GB from base
+    // Validate func_ptr is in a reasonable code address range.
+    // macOS ARM64: .text starts at 0x100000000, typically < 0x400000000
     // Windows x86_64: typically 0x7FF7_xxxx_xxxx (ASLR), so we allow up to 0x8000_0000_0000
+    // Linux x86_64 PIE: .text is typically in 0x55xxxxxxxxxx range
+    // Skip this check on Linux since PIE addresses vary widely and CLOSURE_MAGIC
+    // already provides strong validation.
     #[cfg(target_os = "macos")]
-    {
-        if func_ptr_addr < 0x100000000 || func_ptr_addr > 0x400000000 {
-            return std::ptr::null();
-        }
+    if func_ptr_addr < 0x100000000 || func_ptr_addr > 0x400000000 {
+        return std::ptr::null();
     }
     #[cfg(target_os = "windows")]
-    {
-        if func_ptr_addr < 0x10000 || func_ptr_addr > 0x800000000000 {
-            return std::ptr::null();
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        if func_ptr_addr < 0x100000000 || func_ptr_addr > 0x400000000 {
-            return std::ptr::null();
-        }
+    if func_ptr_addr < 0x10000 || func_ptr_addr > 0x800000000000 {
+        return std::ptr::null();
     }
     func_ptr
 }

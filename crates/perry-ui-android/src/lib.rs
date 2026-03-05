@@ -2,6 +2,7 @@ pub mod app;
 pub mod callback;
 pub mod clipboard;
 pub mod dialog;
+pub mod fetch;
 pub mod file_dialog;
 pub mod jni_bridge;
 pub mod json;
@@ -869,4 +870,52 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
 #[no_mangle]
 pub extern "C" fn perry_system_request_location(callback: f64) {
     location::request_location(callback);
+}
+
+// =============================================================================
+// TabBar
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_create(on_select: f64) -> i64 {
+    catch_panic("perry_ui_tabbar_create", || widgets::tabbar::create(on_select))
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_add_tab(tabbar_handle: i64, label_ptr: i64) {
+    catch_panic_void("perry_ui_tabbar_add_tab", || widgets::tabbar::add_tab(tabbar_handle, label_ptr as *const u8));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_tabbar_set_selected(tabbar_handle: i64, index: i64) {
+    catch_panic_void("perry_ui_tabbar_set_selected", || widgets::tabbar::set_selected(tabbar_handle, index));
+}
+
+// =============================================================================
+// Additional widget functions
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    catch_panic_void("perry_ui_button_set_text_color", || widgets::button::set_text_color(handle, r, g, b, a));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_set_refresh_control(scroll_handle: i64, callback: f64) {
+    catch_panic_void("perry_ui_scrollview_set_refresh_control", || widgets::scrollview::set_refresh_control(scroll_handle, callback));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_end_refreshing(scroll_handle: i64) {
+    catch_panic_void("perry_ui_scrollview_end_refreshing", || widgets::scrollview::end_refreshing(scroll_handle));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
+    catch_panic_void("perry_ui_widget_set_on_click", || widgets::set_on_click(handle, callback));
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
+    catch_panic_void("perry_ui_widget_set_hugging", || widgets::set_hugging(handle, priority));
 }

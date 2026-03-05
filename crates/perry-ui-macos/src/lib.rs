@@ -9,6 +9,21 @@ pub mod state;
 pub mod string_header;
 pub mod widgets;
 
+/// Run a closure, catching any Rust panics so they don't abort across the FFI boundary.
+/// Logs the panic message to stderr and returns the error if one occurred.
+pub fn catch_callback_panic<F: FnOnce() + std::panic::UnwindSafe>(label: &str, f: F) {
+    if let Err(e) = std::panic::catch_unwind(f) {
+        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = e.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            format!("{:?}", e)
+        };
+        eprintln!("[perry] panic in {}: {}", label, msg);
+    }
+}
+
 // =============================================================================
 // FFI exports — these are the functions called from Cranelift-generated code
 // =============================================================================
@@ -68,6 +83,18 @@ pub extern "C" fn perry_ui_hstack_create(spacing: f64) -> i64 {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child(parent_handle: i64, child_handle: i64) {
     widgets::add_child(parent_handle, child_handle);
+}
+
+/// Remove a child widget from a parent widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_remove_child(parent_handle: i64, child_handle: i64) {
+    widgets::remove_child(parent_handle, child_handle);
+}
+
+/// Reorder a child widget within a parent (NSStackView) by index.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_reorder_child(parent_handle: i64, from_index: f64, to_index: f64) {
+    widgets::reorder_child(parent_handle, from_index as i64, to_index as i64);
 }
 
 /// Create a reactive state cell. initial = f64 value. Returns state handle.
@@ -293,6 +320,24 @@ pub extern "C" fn perry_ui_button_set_title(handle: i64, title_ptr: i64) {
     widgets::button::set_title(handle, title_ptr as *const u8);
 }
 
+/// Set an SF Symbol image on a Button.
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_image(handle: i64, name_ptr: i64) {
+    widgets::button::set_image(handle, name_ptr as *const u8);
+}
+
+/// Set the content tint color of a Button (for SF Symbol icon coloring).
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::button::set_content_tint_color(handle, r, g, b, a);
+}
+
+/// Set the image position of a Button (0=NoImage, 1=ImageOnly, 2=Left, 7=Leading).
+#[no_mangle]
+pub extern "C" fn perry_ui_button_set_image_position(handle: i64, position: i64) {
+    widgets::button::set_image_position(handle, position);
+}
+
 // =============================================================================
 // Phase A.4: Focus & Scroll-To
 // =============================================================================
@@ -383,6 +428,12 @@ pub extern "C" fn perry_ui_menubar_attach(bar_handle: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_open_file_dialog(callback: f64) {
     file_dialog::open_dialog(callback);
+}
+
+/// Open a folder dialog. Calls callback with selected directory path or undefined.
+#[no_mangle]
+pub extern "C" fn perry_ui_open_folder_dialog(callback: f64) {
+    file_dialog::open_folder_dialog(callback);
 }
 
 /// Set minimum window size.

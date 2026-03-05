@@ -30,17 +30,19 @@ define_class!(
         fn selection_changed(&self, _sender: &AnyObject) {
             let handle = self.ivars().handle.get();
             let addr = self as *const Self as usize;
-            PICKER_CALLBACKS.with(|cbs| {
-                if let Some(&callback) = cbs.borrow().get(&addr) {
-                    if let Some(view) = super::get_widget(handle) {
-                        let index: i64 = unsafe { msg_send![&*view, indexOfSelectedItem] };
-                        let closure_ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
-                        unsafe {
-                            js_closure_call1(closure_ptr, index as f64);
+            crate::catch_callback_panic("picker callback", std::panic::AssertUnwindSafe(|| {
+                PICKER_CALLBACKS.with(|cbs| {
+                    if let Some(&callback) = cbs.borrow().get(&addr) {
+                        if let Some(view) = super::get_widget(handle) {
+                            let index: i64 = unsafe { msg_send![&*view, indexOfSelectedItem] };
+                            let closure_ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+                            unsafe {
+                                js_closure_call1(closure_ptr, index as f64);
+                            }
                         }
                     }
-                }
-            });
+                });
+            }));
         }
     }
 );

@@ -5,8 +5,22 @@
 //! without changing the SetHeader address.
 
 use std::alloc::{alloc, realloc, Layout};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ptr;
 use crate::string::StringHeader;
+
+thread_local! {
+    static SET_REGISTRY: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+fn register_set(ptr: *mut SetHeader) {
+    SET_REGISTRY.with(|r| r.borrow_mut().insert(ptr as usize));
+}
+
+pub fn is_registered_set(addr: usize) -> bool {
+    SET_REGISTRY.with(|r| r.borrow().contains(&addr))
+}
 
 /// Set header - stable address, elements allocated separately
 #[repr(C)]
@@ -167,6 +181,9 @@ pub extern "C" fn js_set_alloc(capacity: u32) -> *mut SetHeader {
         (*ptr).capacity = cap;
         (*ptr).elements = elements;
 
+        // Register in set registry for runtime type detection
+        register_set(ptr);
+
         ptr
     }
 }
@@ -281,4 +298,22 @@ pub extern "C" fn js_set_to_array(set: *const SetHeader) -> *mut crate::array::A
         }
         result
     }
+}
+
+/// Create a Set from an Array (for `new Set(array)`)
+/// Takes an ArrayHeader pointer and adds all elements to a new Set
+#[no_mangle]
+pub extern "C" fn js_set_from_array(arr: *const crate::array::ArrayHeader) -> *mut SetHeader {
+    let set = js_set_alloc(4);
+    if arr.is_null() {
+        return set;
+    }
+    unsafe {
+        let len = crate::array::js_array_length(arr);
+        for i in 0..len {
+            let element = crate::array::js_array_get_f64(arr, i);
+            js_set_add(set, element);
+        }
+    }
+    set
 }

@@ -872,6 +872,15 @@ pub enum Expr {
         body: Box<Expr>,
         headers: Vec<(String, Expr)>,
     },
+    FetchGetWithAuth {                   // fetchWithAuth(url, authHeader) -> Promise<Response>
+        url: Box<Expr>,
+        auth_header: Box<Expr>,
+    },
+    FetchPostWithAuth {                  // fetchPostWithAuth(url, authHeader, body) -> Promise<Response>
+        url: Box<Expr>,
+        auth_header: Box<Expr>,
+        body: Box<Expr>,
+    },
 
     // Net operations
     NetCreateServer {                    // net.createServer(options?, connectionListener?) -> Server
@@ -927,6 +936,7 @@ pub enum Expr {
 
     // Set operations
     SetNew,                                                    // new Set() -> empty set
+    SetNewFromArray(Box<Expr>),                                // new Set(array) -> set from iterable
     SetAdd { set_id: LocalId, value: Box<Expr> },              // set.add(value) -> set (updates local)
     SetHas { set: Box<Expr>, value: Box<Expr> },               // set.has(value) -> boolean
     SetDelete { set: Box<Expr>, value: Box<Expr> },            // set.delete(value) -> boolean

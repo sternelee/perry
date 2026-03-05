@@ -286,18 +286,18 @@ define_class!(
     impl PerryShortcutTarget {
         #[unsafe(method(shortcutFired:))]
         fn shortcut_fired(&self, _sender: &AnyObject) {
-            let key = self.ivars().callback_key.get();
-            // Extract closure pointer and drop the borrow BEFORE calling it,
-            // because the callback may modify widgets (re-entrant borrow).
-            let closure_f64 = SHORTCUT_CALLBACKS.with(|cbs| {
-                cbs.borrow().get(&key).copied()
-            });
-            if let Some(closure_f64) = closure_f64 {
-                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                unsafe {
-                    js_closure_call0(closure_ptr as *const u8);
+            crate::catch_callback_panic("shortcut callback", std::panic::AssertUnwindSafe(|| {
+                let key = self.ivars().callback_key.get();
+                let closure_f64 = SHORTCUT_CALLBACKS.with(|cbs| {
+                    cbs.borrow().get(&key).copied()
+                });
+                if let Some(closure_f64) = closure_f64 {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
                 }
-            }
+            }));
         }
     }
 );
@@ -428,22 +428,23 @@ define_class!(
     impl PerryTimerTarget {
         #[unsafe(method(timerFired:))]
         fn timer_fired(&self, _sender: &AnyObject) {
-            // Drain resolved promises, then run microtasks (.then callbacks)
-            unsafe {
-                js_stdlib_process_pending();
-                js_promise_run_microtasks();
-            }
-
-            let key = self.ivars().callback_key.get();
-            let closure_f64 = TIMER_CALLBACKS.with(|cbs| {
-                cbs.borrow().get(&key).copied()
-            });
-            if let Some(closure_f64) = closure_f64 {
-                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+            crate::catch_callback_panic("timer callback", std::panic::AssertUnwindSafe(|| {
                 unsafe {
-                    js_closure_call0(closure_ptr as *const u8);
+                    js_stdlib_process_pending();
+                    js_promise_run_microtasks();
                 }
-            }
+
+                let key = self.ivars().callback_key.get();
+                let closure_f64 = TIMER_CALLBACKS.with(|cbs| {
+                    cbs.borrow().get(&key).copied()
+                });
+                if let Some(closure_f64) = closure_f64 {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
+                }
+            }));
         }
     }
 );
@@ -467,11 +468,13 @@ define_class!(
     impl PerryPumpTarget {
         #[unsafe(method(pump:))]
         fn pump(&self, _sender: &AnyObject) {
-            unsafe {
-                js_callback_timer_tick();
-                js_interval_timer_tick();
-                js_promise_run_microtasks();
-            }
+            crate::catch_callback_panic("pump", std::panic::AssertUnwindSafe(|| {
+                unsafe {
+                    js_callback_timer_tick();
+                    js_interval_timer_tick();
+                    js_promise_run_microtasks();
+                }
+            }));
         }
     }
 );

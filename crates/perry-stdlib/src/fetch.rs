@@ -99,6 +99,150 @@ pub unsafe extern "C" fn js_fetch_get(url_ptr: *const StringHeader) -> *mut perr
     promise
 }
 
+/// Perform a GET request with Authorization header
+/// Used when fetch(url, { headers: { Authorization: "Bearer ..." } }) is needed
+#[no_mangle]
+pub unsafe extern "C" fn js_fetch_get_with_auth(
+    url_ptr: *const StringHeader,
+    auth_header_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let url = match string_from_header(url_ptr) {
+        Some(u) => u,
+        None => {
+            let err_msg = "Invalid URL";
+            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            queue_promise_resolution(promise_ptr, false, err_bits);
+            return promise;
+        }
+    };
+
+    let auth_header = string_from_header(auth_header_ptr).unwrap_or_default();
+
+    spawn(async move {
+        let client = reqwest::Client::new();
+        let mut request = client.get(&url);
+        if !auth_header.is_empty() {
+            request = request.header("Authorization", &auth_header);
+        }
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let status_text = response.status().canonical_reason().unwrap_or("").to_string();
+
+                let mut headers = HashMap::new();
+                for (key, value) in response.headers() {
+                    if let Ok(v) = value.to_str() {
+                        headers.insert(key.to_string(), v.to_string());
+                    }
+                }
+
+                let body = response.bytes().await.unwrap_or_default().to_vec();
+
+                let mut id_guard = NEXT_RESPONSE_ID.lock().unwrap();
+                let response_id = *id_guard;
+                *id_guard += 1;
+                drop(id_guard);
+
+                FETCH_RESPONSES.lock().unwrap().insert(response_id, FetchResponse {
+                    status,
+                    status_text,
+                    headers,
+                    body,
+                });
+
+                let result_bits = (response_id as f64).to_bits();
+                queue_promise_resolution(promise_ptr, true, result_bits);
+            }
+            Err(e) => {
+                let err_msg = format!("Fetch error: {}", e);
+                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                queue_promise_resolution(promise_ptr, false, err_bits);
+            }
+        }
+    });
+
+    promise
+}
+
+/// Perform a POST request with Authorization header and JSON body
+/// fetchPostWithAuth(url, authHeader, body) -> Promise<Response>
+#[no_mangle]
+pub unsafe extern "C" fn js_fetch_post_with_auth(
+    url_ptr: *const StringHeader,
+    auth_header_ptr: *const StringHeader,
+    body_ptr: *const StringHeader,
+) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let promise_ptr = promise as usize;
+
+    let url = match string_from_header(url_ptr) {
+        Some(u) => u,
+        None => {
+            let err_msg = "Invalid URL";
+            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            queue_promise_resolution(promise_ptr, false, err_bits);
+            return promise;
+        }
+    };
+
+    let auth_header = string_from_header(auth_header_ptr).unwrap_or_default();
+    let body = string_from_header(body_ptr).unwrap_or_default();
+
+    spawn(async move {
+        let client = reqwest::Client::new();
+        let mut request = client.post(&url)
+            .header("Content-Type", "application/json");
+        if !auth_header.is_empty() {
+            request = request.header("Authorization", &auth_header);
+        }
+        request = request.body(body);
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let status_text = response.status().canonical_reason().unwrap_or("").to_string();
+
+                let mut headers = HashMap::new();
+                for (key, value) in response.headers() {
+                    if let Ok(v) = value.to_str() {
+                        headers.insert(key.to_string(), v.to_string());
+                    }
+                }
+
+                let body = response.bytes().await.unwrap_or_default().to_vec();
+
+                let mut id_guard = NEXT_RESPONSE_ID.lock().unwrap();
+                let response_id = *id_guard;
+                *id_guard += 1;
+                drop(id_guard);
+
+                FETCH_RESPONSES.lock().unwrap().insert(response_id, FetchResponse {
+                    status,
+                    status_text,
+                    headers,
+                    body,
+                });
+
+                let result_bits = (response_id as f64).to_bits();
+                queue_promise_resolution(promise_ptr, true, result_bits);
+            }
+            Err(e) => {
+                let err_msg = format!("Fetch error: {}", e);
+                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
+                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                queue_promise_resolution(promise_ptr, false, err_bits);
+            }
+        }
+    });
+
+    promise
+}
+
 /// Perform a POST request with body
 /// fetch(url, { method: 'POST', body: '...' }) -> Promise<Response>
 #[no_mangle]

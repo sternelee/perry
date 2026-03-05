@@ -6,7 +6,12 @@ use std::ptr;
 use crate::string::{js_string_from_bytes, StringHeader};
 use crate::array::ArrayHeader;
 
+/// Type ID constant for Buffer/Uint8Array - matches class_id 0xFFFF0004
+pub const BUFFER_TYPE_ID: u32 = 0xFFFF0004;
+
 /// Buffer header - similar to StringHeader but specifically for binary data
+/// NOTE: Layout must match ArrayHeader (length at offset 0, capacity at offset 4)
+/// because the codegen treats Uint8Array like arrays with hardcoded offsets.
 #[repr(C)]
 pub struct BufferHeader {
     /// Length in bytes
@@ -21,8 +26,28 @@ fn buffer_layout(capacity: usize) -> Layout {
     Layout::from_size_align(total_size, 8).unwrap()
 }
 
+/// Thread-local registry of buffer pointers for instanceof checks.
+/// Since BufferHeader has the same layout as ArrayHeader (no type_id field),
+/// we track buffer pointers separately to distinguish them from arrays.
+use std::cell::RefCell;
+use std::collections::HashSet;
+
+thread_local! {
+    static BUFFER_REGISTRY: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+/// Register a buffer pointer in the thread-local registry
+fn register_buffer(ptr: *const BufferHeader) {
+    BUFFER_REGISTRY.with(|r| r.borrow_mut().insert(ptr as usize));
+}
+
+/// Check if a pointer is a registered buffer (for instanceof Uint8Array)
+pub fn is_registered_buffer(addr: usize) -> bool {
+    BUFFER_REGISTRY.with(|r| r.borrow().contains(&addr))
+}
+
 /// Allocate a buffer with the given capacity
-fn buffer_alloc(capacity: u32) -> *mut BufferHeader {
+pub(crate) fn buffer_alloc(capacity: u32) -> *mut BufferHeader {
     let layout = buffer_layout(capacity as usize);
     unsafe {
         let ptr = alloc(layout) as *mut BufferHeader;
@@ -31,6 +56,7 @@ fn buffer_alloc(capacity: u32) -> *mut BufferHeader {
         }
         (*ptr).length = 0;
         (*ptr).capacity = capacity;
+        register_buffer(ptr);
         ptr
     }
 }
@@ -43,7 +69,7 @@ fn buffer_data(buf: *const BufferHeader) -> *const u8 {
 }
 
 /// Get the mutable data pointer for a buffer
-fn buffer_data_mut(buf: *mut BufferHeader) -> *mut u8 {
+pub(crate) fn buffer_data_mut(buf: *mut BufferHeader) -> *mut u8 {
     unsafe {
         (buf as *mut u8).add(std::mem::size_of::<BufferHeader>())
     }
@@ -87,6 +113,47 @@ pub extern "C" fn js_buffer_from_string(str_ptr: *const StringHeader, encoding: 
                 buf
             }
         }
+    }
+}
+
+/// Create a Buffer from a value (auto-detects string vs array vs buffer)
+/// This is used by Buffer.from() which accepts multiple input types.
+#[no_mangle]
+pub extern "C" fn js_buffer_from_value(value: i64, encoding: i32) -> *mut BufferHeader {
+    let bits = value as u64;
+    let jsval = crate::JSValue::from_bits(bits);
+
+    // Check if it's a NaN-boxed string
+    if jsval.is_string() {
+        let str_ptr = jsval.as_string_ptr();
+        return js_buffer_from_string(str_ptr as *const crate::string::StringHeader, encoding);
+    }
+
+    // Extract the raw pointer
+    let ptr = if bits >> 48 >= 0x7FF8 {
+        // NaN-boxed pointer
+        (bits & 0x0000_FFFF_FFFF_FFFF) as usize
+    } else {
+        bits as usize
+    };
+
+    if ptr < 0x1000 {
+        return buffer_alloc(0);
+    }
+
+    // Check if it's a buffer (copy it)
+    if is_registered_buffer(ptr) {
+        let src = ptr as *const BufferHeader;
+        unsafe {
+            let len = (*src).length;
+            let buf = buffer_alloc(len);
+            (*buf).length = len;
+            std::ptr::copy_nonoverlapping(buffer_data(src), buffer_data_mut(buf), len as usize);
+            buf
+        }
+    } else {
+        // Assume it's an array of numbers
+        js_buffer_from_array(ptr as *const ArrayHeader)
     }
 }
 
@@ -148,7 +215,17 @@ pub extern "C" fn js_buffer_alloc_unsafe(size: i32) -> *mut BufferHeader {
 /// Concatenate multiple buffers
 #[no_mangle]
 pub extern "C" fn js_buffer_concat(arr_ptr: *const ArrayHeader) -> *mut BufferHeader {
-    if arr_ptr.is_null() {
+    // Strip NaN-boxing tags if present
+    let arr_ptr = {
+        let bits = arr_ptr as u64;
+        let top16 = (bits >> 48) as u16;
+        if top16 >= 0x7FF8 {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+        } else {
+            arr_ptr
+        }
+    };
+    if arr_ptr.is_null() || (arr_ptr as u64) < 0x1000 {
         return buffer_alloc(0);
     }
 
@@ -156,11 +233,22 @@ pub extern "C" fn js_buffer_concat(arr_ptr: *const ArrayHeader) -> *mut BufferHe
         let len = (*arr_ptr).length as usize;
         let arr_data = (arr_ptr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
 
+        // Helper to strip NaN-boxing tags from buffer element pointers
+        let strip_nanbox = |bits: u64| -> u64 {
+            let top16 = (bits >> 48) as u16;
+            if top16 >= 0x7FF8 {
+                bits & 0x0000_FFFF_FFFF_FFFF
+            } else {
+                bits
+            }
+        };
+
         // Calculate total size
         let mut total_size: usize = 0;
         for i in 0..len {
-            let buf_ptr = (*arr_data.add(i)).to_bits() as *const BufferHeader;
-            if !buf_ptr.is_null() {
+            let raw_bits = strip_nanbox((*arr_data.add(i)).to_bits());
+            let buf_ptr = raw_bits as *const BufferHeader;
+            if !buf_ptr.is_null() && raw_bits >= 0x1000 {
                 total_size += (*buf_ptr).length as usize;
             }
         }
@@ -172,8 +260,9 @@ pub extern "C" fn js_buffer_concat(arr_ptr: *const ArrayHeader) -> *mut BufferHe
         // Copy data
         let mut offset: usize = 0;
         for i in 0..len {
-            let buf_ptr = (*arr_data.add(i)).to_bits() as *const BufferHeader;
-            if !buf_ptr.is_null() {
+            let raw_bits = strip_nanbox((*arr_data.add(i)).to_bits());
+            let buf_ptr = raw_bits as *const BufferHeader;
+            if !buf_ptr.is_null() && raw_bits >= 0x1000 {
                 let buf_len = (*buf_ptr).length as usize;
                 let src_data = buffer_data(buf_ptr);
                 let dst_data = buffer_data_mut(result).add(offset);
@@ -186,16 +275,19 @@ pub extern "C" fn js_buffer_concat(arr_ptr: *const ArrayHeader) -> *mut BufferHe
     }
 }
 
-/// Check if an object is a Buffer (by checking the header)
+/// Check if an object is a Buffer (using the buffer registry)
 #[no_mangle]
 pub extern "C" fn js_buffer_is_buffer(ptr: i64) -> i32 {
-    // For now, we can't really distinguish between Buffer and other objects
-    // In a real implementation, we'd have type tags
-    if ptr == 0 {
+    if ptr == 0 || (ptr as u64) < 0x1000 {
         return 0;
     }
-    // Return 1 if it looks like a valid buffer pointer
-    1
+    // Strip NaN-boxing tags if present
+    let addr = if ((ptr as u64) >> 48) != 0 {
+        (ptr as u64) & 0x0000_FFFF_FFFF_FFFF
+    } else {
+        ptr as u64
+    };
+    if is_registered_buffer(addr as usize) { 1 } else { 0 }
 }
 
 /// Get the byte length of a string (when encoded to UTF-8)

@@ -521,44 +521,81 @@ fn trace_marked_objects(valid_ptrs: &HashSet<usize>) {
     }
 }
 
-/// Trace array elements (each element is an f64 that may be NaN-boxed)
+/// Trace array elements.
+/// Elements may be NaN-boxed JSValues OR raw I64 pointers (codegen stores raw I64 for
+/// is_pointer/is_array/is_string typed arrays via js_array_set_jsvalue).
 unsafe fn trace_array(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: &mut Vec<*mut GcHeader>) {
     let arr = user_ptr as *const crate::array::ArrayHeader;
     let length = (*arr).length;
-    let elements = (user_ptr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+    let capacity = (*arr).capacity;
+
+    // Sanity checks: reject corrupt length/capacity to avoid scanning wild memory
+    if length > capacity || length > 65536 {
+        return;
+    }
+
+    let elements = (user_ptr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const u64;
 
     for i in 0..length as usize {
-        let val = *elements.add(i);
-        if try_mark_value(val.to_bits(), valid_ptrs) {
-            let ptr_val = (val.to_bits() & POINTER_MASK) as usize;
+        let val_bits = *elements.add(i);
+        if try_mark_value_or_raw(val_bits, valid_ptrs) {
+            let tag = val_bits & TAG_MASK;
+            let ptr_val = if tag == POINTER_TAG || tag == STRING_TAG || tag == BIGINT_TAG {
+                (val_bits & POINTER_MASK) as usize
+            } else {
+                val_bits as usize // raw pointer
+            };
             let header = header_from_user_ptr(ptr_val as *const u8);
             worklist.push(header);
         }
     }
 }
 
-/// Trace object fields and keys array
+/// Trace object fields and keys array.
+/// Fields may be NaN-boxed JSValues OR raw I64 pointers (codegen stores some fields as raw I64).
+/// keys_array may be a raw pointer (*mut ArrayHeader) OR NaN-boxed (codegen may NaN-box it).
 unsafe fn trace_object(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: &mut Vec<*mut GcHeader>) {
     let obj = user_ptr as *const crate::object::ObjectHeader;
     let field_count = (*obj).field_count;
+
+    // Sanity check: reject corrupt field_count to avoid scanning wild memory.
+    // Object fields start after ObjectHeader (24 bytes). Max reasonable: ~64K fields.
+    if field_count > 65536 {
+        return;
+    }
+
     let fields = (user_ptr as *const u8).add(std::mem::size_of::<crate::object::ObjectHeader>()) as *const u64;
 
-    // Trace each field (stored as JSValue = u64 bits)
+    // Trace each field — use try_mark_value_or_raw since codegen may store raw I64 pointers
+    // (e.g., for is_pointer variables) alongside NaN-boxed JSValues.
     for i in 0..field_count as usize {
         let val_bits = *fields.add(i);
-        if try_mark_value(val_bits, valid_ptrs) {
-            let ptr_val = (val_bits & POINTER_MASK) as usize;
+        if try_mark_value_or_raw(val_bits, valid_ptrs) {
+            let tag = val_bits & TAG_MASK;
+            let ptr_val = if tag == POINTER_TAG || tag == STRING_TAG || tag == BIGINT_TAG {
+                (val_bits & POINTER_MASK) as usize
+            } else {
+                val_bits as usize // raw pointer
+            };
             let header = header_from_user_ptr(ptr_val as *const u8);
             worklist.push(header);
         }
     }
 
-    // Trace keys_array pointer
-    let keys = (*obj).keys_array;
-    if !keys.is_null() {
-        let keys_usize = keys as usize;
-        if valid_ptrs.contains(&keys_usize) {
-            let keys_header = header_from_user_ptr(keys as *const u8);
+    // Trace keys_array pointer.
+    // The codegen may store keys_array as either a raw pointer or a NaN-boxed POINTER_TAG value.
+    // Read the raw 64-bit value and handle both cases.
+    let keys_raw = (*obj).keys_array as u64;
+    if keys_raw != 0 {
+        // Extract the actual pointer: strip NaN-boxing tags if present
+        let keys_ptr = if keys_raw >> 48 >= 0x7FF8 {
+            // NaN-boxed: extract lower 48 bits as pointer
+            (keys_raw & POINTER_MASK) as usize
+        } else {
+            keys_raw as usize
+        };
+        if keys_ptr != 0 && keys_ptr >= 0x1000 && valid_ptrs.contains(&keys_ptr) {
+            let keys_header = header_from_user_ptr(keys_ptr as *const u8);
             if (*keys_header).gc_flags & GC_FLAG_MARKED == 0 {
                 (*keys_header).gc_flags |= GC_FLAG_MARKED;
                 worklist.push(keys_header);
@@ -595,19 +632,18 @@ unsafe fn trace_closure(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist
 unsafe fn trace_promise(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: &mut Vec<*mut GcHeader>) {
     let promise = user_ptr as *const crate::promise::Promise;
 
-    // Trace value and reason (f64, may be NaN-boxed)
-    let value = (*promise).value;
-    if try_mark_value(value.to_bits(), valid_ptrs) {
-        let ptr_val = (value.to_bits() & POINTER_MASK) as usize;
-        let header = header_from_user_ptr(ptr_val as *const u8);
-        worklist.push(header);
-    }
-
-    let reason = (*promise).reason;
-    if try_mark_value(reason.to_bits(), valid_ptrs) {
-        let ptr_val = (reason.to_bits() & POINTER_MASK) as usize;
-        let header = header_from_user_ptr(ptr_val as *const u8);
-        worklist.push(header);
+    // Trace value and reason — may be NaN-boxed JSValues or raw I64 pointers
+    for &val_bits in &[(*promise).value.to_bits(), (*promise).reason.to_bits()] {
+        if try_mark_value_or_raw(val_bits, valid_ptrs) {
+            let tag = val_bits & TAG_MASK;
+            let ptr_val = if tag == POINTER_TAG || tag == STRING_TAG || tag == BIGINT_TAG {
+                (val_bits & POINTER_MASK) as usize
+            } else {
+                val_bits as usize
+            };
+            let header = header_from_user_ptr(ptr_val as *const u8);
+            worklist.push(header);
+        }
     }
 
     // Trace on_fulfilled and on_rejected (closure pointers)

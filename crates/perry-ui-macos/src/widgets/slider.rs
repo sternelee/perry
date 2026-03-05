@@ -30,17 +30,18 @@ define_class!(
         #[unsafe(method(sliderChanged:))]
         fn slider_changed(&self, sender: &AnyObject) {
             let key = self.ivars().callback_key.get();
-            SLIDER_CALLBACKS.with(|cbs| {
-                if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                    // Get the slider's current value (f64 - no NaN-boxing needed for numbers)
-                    let value: f64 = unsafe { msg_send![sender, doubleValue] };
+            crate::catch_callback_panic("slider callback", std::panic::AssertUnwindSafe(|| {
+                SLIDER_CALLBACKS.with(|cbs| {
+                    if let Some(&closure_f64) = cbs.borrow().get(&key) {
+                        let value: f64 = unsafe { msg_send![sender, doubleValue] };
 
-                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                    unsafe {
-                        js_closure_call1(closure_ptr as *const u8, value);
+                        let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                        unsafe {
+                            js_closure_call1(closure_ptr as *const u8, value);
+                        }
                     }
-                }
-            });
+                });
+            }));
         }
     }
 );

@@ -1379,6 +1379,22 @@ impl JsEmitter {
                 }
                 self.output.push_str("}})");
             }
+            Expr::FetchGetWithAuth { url, auth_header } => {
+                self.output.push_str("fetch(");
+                self.emit_expr(url);
+                self.output.push_str(", {headers: {\"Authorization\": ");
+                self.emit_expr(auth_header);
+                self.output.push_str("}})");
+            }
+            Expr::FetchPostWithAuth { url, auth_header, body } => {
+                self.output.push_str("fetch(");
+                self.emit_expr(url);
+                self.output.push_str(", {method: \"POST\", headers: {\"Authorization\": ");
+                self.emit_expr(auth_header);
+                self.output.push_str(", \"Content-Type\": \"application/json\"}, body: ");
+                self.emit_expr(body);
+                self.output.push_str("})");
+            }
 
             // --- Net (throw stubs) ---
             Expr::NetCreateServer { .. } |
@@ -1568,6 +1584,11 @@ impl JsEmitter {
 
             // --- Set operations ---
             Expr::SetNew => self.output.push_str("new Set()"),
+            Expr::SetNewFromArray(expr) => {
+                self.output.push_str("new Set(");
+                self.emit_expr(expr);
+                self.output.push_str(")");
+            }
             Expr::SetAdd { set_id, value } => {
                 let name = self.get_local_name(*set_id);
                 let _ = write!(self.output, "{}.add(", name);
@@ -2105,6 +2126,10 @@ impl JsEmitter {
             "Toggle" | "toggle_create" => "perry_ui_toggle_create",
             "Slider" | "slider_create" => "perry_ui_slider_create",
             "ScrollView" | "scrollview_create" => "perry_ui_scrollview_create",
+            "scrollViewSetChild" => "perry_ui_scrollview_set_child",
+            "scrollViewScrollTo" => "perry_ui_scrollview_scroll_to",
+            "scrollViewGetOffset" => "perry_ui_scrollview_get_offset",
+            "scrollViewSetOffset" => "perry_ui_scrollview_set_offset",
             "Spacer" | "spacer_create" => "perry_ui_spacer_create",
             "Divider" | "divider_create" => "perry_ui_divider_create",
             "ProgressView" | "progressview_create" => "perry_ui_progressview_create",

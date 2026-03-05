@@ -1008,3 +1008,14 @@ pub extern "C" fn js_is_finite(value: f64) -> f64 {
 
     if num.is_finite() { 1.0 } else { 0.0 }
 }
+
+/// Debug trace for module initialization order.
+/// Called before each _perry_init_* call to identify which module crashes.
+/// No-op in release builds; re-enable eprintln for debugging.
+#[no_mangle]
+pub extern "C" fn perry_debug_trace_init(_index: i64, _name_ptr: *const u8, _name_len: i64) {
+}
+
+#[no_mangle]
+pub extern "C" fn perry_debug_trace_init_done(_index: i64) {
+}

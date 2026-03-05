@@ -1152,6 +1152,7 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
 
         // Set operations
         Expr::SetNew => Expr::SetNew,
+        Expr::SetNewFromArray(expr) => Expr::SetNewFromArray(Box::new(substitute_expr(expr, substitutions))),
         Expr::SetAdd { set_id, value } => Expr::SetAdd {
             set_id: *set_id,
             value: Box::new(substitute_expr(value, substitutions)),
@@ -1867,6 +1868,7 @@ fn collect_instantiations_in_expr(expr: &Expr, ctx: &mut MonomorphizationContext
             collect_instantiations_in_expr(map, ctx, module);
         }
         Expr::SetNew => {}
+        Expr::SetNewFromArray(expr) => { collect_instantiations_in_expr(expr, ctx, module); }
         Expr::SetAdd { set_id: _, value } => {
             collect_instantiations_in_expr(value, ctx, module);
         }
@@ -2283,6 +2285,7 @@ fn update_call_sites_in_expr(expr: &mut Expr, ctx: &MonomorphizationContext, loo
             update_call_sites_in_expr(map, ctx, lookup);
         }
         Expr::SetNew => {}
+        Expr::SetNewFromArray(expr) => { update_call_sites_in_expr(expr, ctx, lookup); }
         Expr::SetAdd { set_id: _, value } => {
             update_call_sites_in_expr(value, ctx, lookup);
         }

@@ -137,6 +137,51 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
     }
 }
 
+/// Remove a child view from a parent view.
+/// If the parent is an NSStackView, removes from arranged subviews first.
+pub fn remove_child(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            parent.isKindOfClass(cls)
+        } else {
+            false
+        };
+
+        if is_stack {
+            let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
+            stack.removeArrangedSubview(&child);
+        }
+        child.removeFromSuperview();
+    }
+}
+
+/// Reorder a child within an NSStackView by moving from one index to another.
+pub fn reorder_child(parent_handle: i64, from_index: i64, to_index: i64) {
+    if let Some(parent) = get_widget(parent_handle) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            parent.isKindOfClass(cls)
+        } else {
+            false
+        };
+
+        if is_stack {
+            let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
+            let subviews = stack.arrangedSubviews();
+            let count = subviews.len();
+            let fi = from_index as usize;
+            let ti = to_index as usize;
+            if fi < count && ti < count {
+                let child: *const NSView = unsafe { objc2::msg_send![&subviews, objectAtIndex: fi] };
+                let child_ref: &NSView = unsafe { &*child };
+                stack.removeArrangedSubview(child_ref);
+                unsafe {
+                    let _: () = objc2::msg_send![stack, insertArrangedSubview: child_ref, atIndex: ti];
+                }
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Widget Styling (Background, Gradient, Corner Radius)
 // =============================================================================
@@ -489,16 +534,18 @@ objc2::define_class!(
     impl PerryClickTarget {
         #[unsafe(method(handleClick:))]
         fn handle_click(&self, _sender: &AnyObject) {
-            let key = self.ivars().callback_key.get();
-            let closure_f64 = CLICK_CALLBACKS.with(|cbs| {
-                cbs.borrow().get(&key).copied()
-            });
-            if let Some(closure_f64) = closure_f64 {
-                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                unsafe {
-                    js_closure_call0(closure_ptr as *const u8);
+            crate::catch_callback_panic("click callback", std::panic::AssertUnwindSafe(|| {
+                let key = self.ivars().callback_key.get();
+                let closure_f64 = CLICK_CALLBACKS.with(|cbs| {
+                    cbs.borrow().get(&key).copied()
+                });
+                if let Some(closure_f64) = closure_f64 {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
                 }
-            }
+            }));
         }
     }
 );

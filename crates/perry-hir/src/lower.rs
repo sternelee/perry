@@ -1320,8 +1320,8 @@ fn lower_module_decl(
                             ctx.register_native_module(local.clone(), source.clone(), None);
                         } else {
                             // Default import from JS module - register so calls resolve to ExternFuncRef
-                            // The original name is "default" for default exports
-                            ctx.register_imported_func(local.clone(), local.clone());
+                            // Use "default" as the original name since default imports map to the "default" export
+                            ctx.register_imported_func(local.clone(), "default".to_string());
                         }
                         specifiers.push(ImportSpecifier::Default { local });
                     }
@@ -1734,21 +1734,40 @@ fn lower_module_decl(
         }
         ast::ModuleDecl::ExportDefaultExpr(export_default_expr) => {
             // export default <expr>
-            // Lower the expression and create a synthetic "default" variable
             let lowered = lower_expr(ctx, &export_default_expr.expr)?;
-            let id = ctx.define_local("default".to_string(), Type::Any);
-            module.init.push(Stmt::Let {
-                id,
-                name: "default".to_string(),
-                ty: Type::Any,
-                mutable: false,
-                init: Some(lowered),
-            });
-            module.exported_objects.push("default".to_string());
-            module.exports.push(Export::Named {
-                local: "default".to_string(),
-                exported: "default".to_string(),
-            });
+
+            // If the expression is a FuncRef, add to exported_functions for proper wrapper generation
+            if let Expr::FuncRef(func_id) = &lowered {
+                // Find the function and add as exported with name "default"
+                let func_id = *func_id;
+                module.exported_functions.push(("default".to_string(), func_id));
+                // Also mark the function as exported
+                for func in &mut module.functions {
+                    if func.id == func_id {
+                        func.is_exported = true;
+                        break;
+                    }
+                }
+                module.exports.push(Export::Named {
+                    local: "default".to_string(),
+                    exported: "default".to_string(),
+                });
+            } else {
+                // For other expressions (closures, calls, etc.), create a synthetic "default" variable
+                let id = ctx.define_local("default".to_string(), Type::Any);
+                module.init.push(Stmt::Let {
+                    id,
+                    name: "default".to_string(),
+                    ty: Type::Any,
+                    mutable: false,
+                    init: Some(lowered),
+                });
+                module.exported_objects.push("default".to_string());
+                module.exports.push(Export::Named {
+                    local: "default".to_string(),
+                    exported: "default".to_string(),
+                });
+            }
         }
         _ => {
             // TsImportEquals, TsExportAssignment, TsNamespaceExport - TypeScript specific
@@ -2162,15 +2181,34 @@ fn lower_stmt(
                                             let prop_name = assign.key.sym.to_string();
                                             let (name, id) = var_ids[var_idx].clone();
                                             var_idx += 1;
+                                            let init_value = if let Some(default_expr) = &assign.value {
+                                                let prop_access = Expr::PropertyGet {
+                                                    object: Box::new(Expr::LocalGet(item_id)),
+                                                    property: prop_name,
+                                                };
+                                                let default_val = lower_expr(ctx, default_expr)?;
+                                                let condition = Expr::Compare {
+                                                    op: CompareOp::Ne,
+                                                    left: Box::new(prop_access.clone()),
+                                                    right: Box::new(Expr::Undefined),
+                                                };
+                                                Expr::Conditional {
+                                                    condition: Box::new(condition),
+                                                    then_expr: Box::new(prop_access),
+                                                    else_expr: Box::new(default_val),
+                                                }
+                                            } else {
+                                                Expr::PropertyGet {
+                                                    object: Box::new(Expr::LocalGet(item_id)),
+                                                    property: prop_name,
+                                                }
+                                            };
                                             stmts.push(Stmt::Let {
                                                 id,
                                                 name,
                                                 ty: Type::Any,
                                                 mutable: false,
-                                                init: Some(Expr::PropertyGet {
-                                                    object: Box::new(Expr::LocalGet(item_id)),
-                                                    property: prop_name,
-                                                }),
+                                                init: Some(init_value),
                                             });
                                         }
                                         ast::ObjectPatProp::KeyValue(kv) => {
@@ -2613,6 +2651,44 @@ fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::ClassDecl, is_e
             }
             _ => {}
         }
+    }
+
+    // Detect fields from constructor body `this.xxx = ...` assignments.
+    // JavaScript classes (e.g., transpiled from TypeScript) often don't have ClassProp
+    // declarations; instead they assign to `this` in the constructor body.
+    {
+        let declared_field_names: std::collections::HashSet<String> = fields.iter().map(|f| f.name.clone()).collect();
+        for member in &class_decl.class.body {
+            if let ast::ClassMember::Constructor(ctor) = member {
+                if let Some(ref body) = ctor.body {
+                    for stmt in &body.stmts {
+                        if let ast::Stmt::Expr(expr_stmt) = stmt {
+                            if let ast::Expr::Assign(assign) = &*expr_stmt.expr {
+                                if let ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(mem)) = &assign.left {
+                                    if let ast::Expr::This(_) = &*mem.obj {
+                                        if let ast::MemberProp::Ident(prop_ident) = &mem.prop {
+                                            let fname = prop_ident.sym.to_string();
+                                            if !declared_field_names.contains(&fname) {
+                                                fields.push(ClassField {
+                                                    name: fname,
+                                                    ty: Type::Any,
+                                                    init: None,
+                                                    is_private: false,
+                                                    is_readonly: false,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Dedup fields: keep first occurrence of each name
+        let mut seen = std::collections::HashSet::new();
+        fields.retain(|f| seen.insert(f.name.clone()));
     }
 
     // Exit type parameter scope
@@ -3358,6 +3434,125 @@ fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Result<Vec<St
                 result.extend(stmts);
             }
         }
+        ast::Stmt::Decl(ast::Decl::Class(class_decl)) => {
+            // Class declared inside a function body (e.g., noble-curves' Point class)
+            let class_name = class_decl.ident.sym.to_string();
+            // Skip if a class with the same name already exists (avoids duplicate definitions
+            // when the same class name appears at both module level and function body level)
+            let already_exists = ctx.pending_classes.iter().any(|c| c.name == class_name)
+                || ctx.classes.iter().any(|(name, _)| name == &class_name);
+            if !already_exists {
+                let class = lower_class_decl(ctx, class_decl, false)?;
+                ctx.pending_classes.push(class);
+            }
+        }
+        ast::Stmt::Decl(ast::Decl::Fn(fn_decl)) => {
+            // Inner function declarations are compiled as closures and assigned to local variables.
+            if fn_decl.function.body.is_some() {
+                let func_name = fn_decl.ident.sym.to_string();
+                let func_id = ctx.fresh_func();
+                let scope_mark = ctx.enter_scope();
+
+                // Track outer locals for capture detection
+                let outer_locals: Vec<(String, LocalId)> = ctx.locals.iter()
+                    .map(|(name, id, _)| (name.clone(), *id))
+                    .collect();
+
+                // Lower parameters
+                let mut params = Vec::new();
+                let mut destructuring_params: Vec<(LocalId, ast::Pat)> = Vec::new();
+                for param in &fn_decl.function.params {
+                    let param_name = get_pat_name(&param.pat)?;
+                    let param_default = get_param_default(ctx, &param.pat)?;
+                    let is_rest = is_rest_param(&param.pat);
+                    let param_id = ctx.define_local(param_name.clone(), Type::Any);
+                    params.push(Param {
+                        id: param_id,
+                        name: param_name,
+                        ty: Type::Any,
+                        default: param_default,
+                        is_rest,
+                    });
+                    if is_destructuring_pattern(&param.pat) {
+                        destructuring_params.push((param_id, param.pat.clone()));
+                    }
+                }
+
+                // Generate destructuring stmts
+                let mut destructuring_stmts = Vec::new();
+                for (param_id, pat) in &destructuring_params {
+                    let stmts = generate_param_destructuring_stmts(ctx, pat, *param_id)?;
+                    destructuring_stmts.extend(stmts);
+                }
+
+                // Lower body
+                let mut body = if let Some(ref block) = fn_decl.function.body {
+                    lower_block_stmt(ctx, block)?
+                } else {
+                    Vec::new()
+                };
+
+                if !destructuring_stmts.is_empty() {
+                    let mut new_body = destructuring_stmts;
+                    new_body.append(&mut body);
+                    body = new_body;
+                }
+
+                ctx.exit_scope(scope_mark);
+
+                // Detect captured variables
+                let mut all_refs = Vec::new();
+                for stmt in &body {
+                    collect_local_refs_stmt(stmt, &mut all_refs);
+                }
+
+                let outer_local_ids: std::collections::HashSet<LocalId> = outer_locals.iter()
+                    .map(|(_, id)| *id)
+                    .collect();
+                let param_ids: std::collections::HashSet<LocalId> = params.iter()
+                    .map(|p| p.id)
+                    .collect();
+
+                let mut captures: Vec<LocalId> = all_refs.into_iter()
+                    .filter(|id| outer_local_ids.contains(id) && !param_ids.contains(id))
+                    .collect();
+                captures.sort();
+                captures.dedup();
+
+                // Detect mutable captures
+                let mut all_assigned = Vec::new();
+                for stmt in &body {
+                    collect_assigned_locals_stmt(stmt, &mut all_assigned);
+                }
+                let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
+                let mutable_captures: Vec<LocalId> = captures.iter()
+                    .filter(|id| assigned_set.contains(id))
+                    .copied()
+                    .collect();
+
+                let closure = Expr::Closure {
+                    func_id,
+                    params,
+                    return_type: Type::Any,
+                    body,
+                    captures,
+                    mutable_captures,
+                    captures_this: false,
+                    enclosing_class: None,
+                    is_async: fn_decl.function.is_async,
+                };
+
+                // Define local variable and assign closure via Stmt::Let
+                let local_id = ctx.define_local(func_name.clone(), Type::Any);
+                result.push(Stmt::Let {
+                    id: local_id,
+                    name: func_name,
+                    ty: Type::Any,
+                    init: Some(closure),
+                    mutable: false,
+                });
+            }
+        }
         ast::Stmt::While(while_stmt) => {
             let condition = lower_expr(ctx, &while_stmt.test)?;
             let body = lower_body_stmt(ctx, &while_stmt.body)?;
@@ -3642,15 +3837,34 @@ fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Result<Vec<St
                                             let prop_name = assign.key.sym.to_string();
                                             let (name, id) = var_ids[var_idx].clone();
                                             var_idx += 1;
+                                            let init_value = if let Some(default_expr) = &assign.value {
+                                                let prop_access = Expr::PropertyGet {
+                                                    object: Box::new(Expr::LocalGet(item_id)),
+                                                    property: prop_name,
+                                                };
+                                                let default_val = lower_expr(ctx, default_expr)?;
+                                                let condition = Expr::Compare {
+                                                    op: CompareOp::Ne,
+                                                    left: Box::new(prop_access.clone()),
+                                                    right: Box::new(Expr::Undefined),
+                                                };
+                                                Expr::Conditional {
+                                                    condition: Box::new(condition),
+                                                    then_expr: Box::new(prop_access),
+                                                    else_expr: Box::new(default_val),
+                                                }
+                                            } else {
+                                                Expr::PropertyGet {
+                                                    object: Box::new(Expr::LocalGet(item_id)),
+                                                    property: prop_name,
+                                                }
+                                            };
                                             stmts.push(Stmt::Let {
                                                 id,
                                                 name,
                                                 ty: Type::Any,
                                                 mutable: false,
-                                                init: Some(Expr::PropertyGet {
-                                                    object: Box::new(Expr::LocalGet(item_id)),
-                                                    property: prop_name,
-                                                }),
+                                                init: Some(init_value),
                                             });
                                         }
                                         ast::ObjectPatProp::KeyValue(kv) => {
@@ -3872,6 +4086,10 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                     param_types: Vec::new(),
                     return_type: Type::Any,
                 })
+            } else if ctx.lookup_class(&name).is_some() {
+                // Class used as a first-class value (e.g., { Point: Point })
+                eprintln!("[HIR_CLASSREF] '{}' resolved as ClassRef", name);
+                Ok(Expr::ClassRef(name))
             } else if name == "undefined" {
                 // Global undefined identifier
                 Ok(Expr::Undefined)
@@ -3886,6 +4104,19 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 Ok(Expr::Number(f64::INFINITY))
             } else {
                 // Assume it's a global (like console)
+                if name != "console" && name != "process" && name != "globalThis" && name != "Buffer"
+                    && name != "Date" && name != "JSON" && name != "Math" && name != "Object"
+                    && name != "Array" && name != "String" && name != "Number" && name != "Boolean"
+                    && name != "Error" && name != "TypeError" && name != "RangeError" && name != "Promise"
+                    && name != "Map" && name != "Set" && name != "RegExp" && name != "Symbol"
+                    && name != "WeakMap" && name != "WeakSet" && name != "Proxy" && name != "Reflect"
+                    && name != "Uint8Array" && name != "Int8Array" && name != "TextEncoder" && name != "TextDecoder"
+                    && name != "URL" && name != "URLSearchParams" && name != "AbortController" && name != "FormData"
+                    && name != "Headers" && name != "fetch" && name != "crypto" && name != "performance"
+                    && name != "queueMicrotask" && name != "structuredClone" && name != "atob" && name != "btoa"
+                    && name != "BigInt" {
+                    eprintln!("[HIR_GLOBAL_FALLBACK] '{}' fell through to GlobalGet(0)", name);
+                }
                 Ok(Expr::GlobalGet(0)) // TODO: proper global lookup
             }
         }
@@ -5729,6 +5960,36 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     return Err(anyhow!("perryResolveStaticPlugin requires one argument"));
                                 }
                             }
+                            "fetchWithAuth" => {
+                                // fetchWithAuth(url, authHeader) -> Promise<Response>
+                                // Calls js_fetch_get_with_auth(url, auth_header)
+                                if args.len() >= 2 {
+                                    let url = args.remove(0);
+                                    let auth_header = args.remove(0);
+                                    return Ok(Expr::FetchGetWithAuth {
+                                        url: Box::new(url),
+                                        auth_header: Box::new(auth_header),
+                                    });
+                                } else {
+                                    return Err(anyhow!("fetchWithAuth requires url and authHeader arguments"));
+                                }
+                            }
+                            "fetchPostWithAuth" => {
+                                // fetchPostWithAuth(url, authHeader, body) -> Promise<Response>
+                                // Calls js_fetch_post_with_auth(url, auth_header, body)
+                                if args.len() >= 3 {
+                                    let url = args.remove(0);
+                                    let auth_header = args.remove(0);
+                                    let body = args.remove(0);
+                                    return Ok(Expr::FetchPostWithAuth {
+                                        url: Box::new(url),
+                                        auth_header: Box::new(auth_header),
+                                        body: Box::new(body),
+                                    });
+                                } else {
+                                    return Err(anyhow!("fetchPostWithAuth requires url, authHeader, and body arguments"));
+                                }
+                            }
                             "fetch" => {
                                 // Handle fetch(url) and fetch(url, options)
                                 // Extract URL (first argument)
@@ -6221,6 +6482,14 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                 }
                 ast::MemberProp::Computed(computed) => {
                     let index = Box::new(lower_expr(ctx, &computed.expr)?);
+                    // Specialize for Uint8Array/Buffer variables → byte-level access
+                    if let Expr::LocalGet(id) = &*object {
+                        if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
+                            if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                                return Ok(Expr::Uint8ArrayGet { array: object, index });
+                            }
+                        }
+                    }
                     Ok(Expr::IndexGet { object, index })
                 }
                 ast::MemberProp::PrivateName(private) => {
@@ -6406,6 +6675,14 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         }
                         ast::MemberProp::Computed(computed) => {
                             let index = Box::new(lower_expr(ctx, &computed.expr)?);
+                            // Specialize for Uint8Array/Buffer variables → byte-level access
+                            if let Expr::LocalGet(id) = &*object {
+                                if let Some((_, _, ty)) = ctx.locals.iter().find(|(_, lid, _)| lid == id) {
+                                    if matches!(ty, Type::Named(n) if n == "Uint8Array") {
+                                        return Ok(Expr::Uint8ArraySet { array: object, index, value });
+                                    }
+                                }
+                            }
                             Ok(Expr::IndexSet { object, index, value })
                         }
                         ast::MemberProp::PrivateName(private) => {
@@ -6487,6 +6764,8 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                         Expr::FuncRef(func_id)
                                     } else if let Some(local_id) = ctx.lookup_local(&name) {
                                         Expr::LocalGet(local_id)
+                                    } else if ctx.lookup_class(&name).is_some() {
+                                        Expr::ClassRef(name.clone())
                                     } else {
                                         continue;
                                     };
@@ -6546,6 +6825,8 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                                     Expr::FuncRef(func_id)
                                 } else if let Some(local_id) = ctx.lookup_local(&name) {
                                     Expr::LocalGet(local_id)
+                                } else if ctx.lookup_class(&name).is_some() {
+                                    Expr::ClassRef(name.clone())
                                 } else {
                                     continue;
                                 };
@@ -6683,8 +6964,16 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                         return Ok(Expr::MapNew);
                     }
                     if class_name == "Set" {
-                        // new Set() -> create empty set
-                        return Ok(Expr::SetNew);
+                        // new Set() or new Set(iterable)
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+                        if args.is_empty() {
+                            return Ok(Expr::SetNew);
+                        } else {
+                            return Ok(Expr::SetNewFromArray(Box::new(args.into_iter().next().unwrap())));
+                        }
                     }
                     if class_name == "Date" {
                         // new Date() or new Date(timestamp)
@@ -6751,9 +7040,11 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
                             .unwrap_or_default();
                         if args.is_empty() {
                             return Ok(Expr::Uint8ArrayNew(None));
-                        } else {
+                        } else if args.len() == 1 {
                             return Ok(Expr::Uint8ArrayNew(Some(Box::new(args.into_iter().next().unwrap()))));
                         }
+                        // 2+ args: fall through to Expr::New to handle
+                        // new Uint8Array(buffer, byteOffset, length) etc.
                     }
 
                     let args = new_expr.args.as_ref()
@@ -7266,11 +7557,16 @@ fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<Expr> {
         ast::Expr::Seq(seq) => {
             // Comma operator: evaluate all expressions left-to-right, return the last value
             // e.g., (a++, b++, c) evaluates a++, then b++, then returns c
-            let mut last_expr = Expr::Undefined;
+            // All expressions must be evaluated for side effects (e.g., for-loop updates: it3--, i++)
+            let mut exprs = Vec::new();
             for expr in &seq.exprs {
-                last_expr = lower_expr(ctx, expr)?;
+                exprs.push(lower_expr(ctx, expr)?);
             }
-            Ok(last_expr)
+            if exprs.len() == 1 {
+                Ok(exprs.pop().unwrap())
+            } else {
+                Ok(Expr::Sequence(exprs))
+            }
         }
         ast::Expr::MetaProp(meta_prop) => {
             // import.meta expression
@@ -7681,17 +7977,35 @@ fn generate_param_destructuring_stmts(
                     ast::ObjectPatProp::Assign(assign) => {
                         let name = assign.key.sym.to_string();
                         let id = ctx.define_local(name.clone(), Type::Any);
-                        let prop_expr = Expr::PropertyGet {
-                            object: Box::new(Expr::LocalGet(param_id)),
-                            property: name.clone(),
+                        let init_value = if let Some(default_expr) = &assign.value {
+                            // { key = default } - use default if property is undefined
+                            let prop_access = Expr::PropertyGet {
+                                object: Box::new(Expr::LocalGet(param_id)),
+                                property: name.clone(),
+                            };
+                            let default_val = lower_expr(ctx, default_expr)?;
+                            let condition = Expr::Compare {
+                                op: CompareOp::Ne,
+                                left: Box::new(prop_access.clone()),
+                                right: Box::new(Expr::Undefined),
+                            };
+                            Expr::Conditional {
+                                condition: Box::new(condition),
+                                then_expr: Box::new(prop_access),
+                                else_expr: Box::new(default_val),
+                            }
+                        } else {
+                            Expr::PropertyGet {
+                                object: Box::new(Expr::LocalGet(param_id)),
+                                property: name.clone(),
+                            }
                         };
-                        // TODO: handle default value with nullish coalescing
                         stmts.push(Stmt::Let {
                             id,
                             name,
                             ty: Type::Any,
                             mutable: false,
-                            init: Some(prop_expr),
+                            init: Some(init_value),
                         });
                     }
                     ast::ObjectPatProp::Rest(_) => {
@@ -8426,6 +8740,8 @@ fn lower_var_decl_with_destructuring(
                                 };
                             } else if class_name == "URLSearchParams" {
                                 ty = Type::Named("URLSearchParams".to_string());
+                            } else if class_name == "Uint8Array" || class_name == "Buffer" {
+                                ty = Type::Named("Uint8Array".to_string());
                             }
                         }
                     }
@@ -8632,26 +8948,32 @@ fn lower_var_decl_with_destructuring(
 
             // Check if this is assigning from fetch() or await fetch() - register as fetch Response
             if let Some(init_expr) = &decl.init {
-                // Helper to check if an expression is a fetch call
-                fn is_fetch_call(expr: &ast::Expr) -> bool {
+                // Helper to check if an expression is a fetch-like call
+                // Returns the module name if it matches fetch/fetchWithAuth/fetchPostWithAuth
+                fn get_fetch_module(expr: &ast::Expr) -> Option<&'static str> {
                     if let ast::Expr::Call(call_expr) = expr {
                         if let ast::Callee::Expr(callee_expr) = &call_expr.callee {
                             if let ast::Expr::Ident(ident) = callee_expr.as_ref() {
-                                return ident.sym.as_ref() == "fetch";
+                                return match ident.sym.as_ref() {
+                                    "fetch" => Some("fetch"),
+                                    "fetchWithAuth" => Some("fetchWithAuth"),
+                                    "fetchPostWithAuth" => Some("fetchPostWithAuth"),
+                                    _ => None,
+                                };
                             }
                         }
                     }
-                    false
+                    None
                 }
 
-                // Check for: const response = fetch(url)
-                if is_fetch_call(init_expr) {
-                    ctx.register_native_instance(name.clone(), "fetch".to_string(), "Response".to_string());
+                // Check for: const response = fetch(url) / fetchWithAuth(url, auth) / fetchPostWithAuth(url, auth, body)
+                if let Some(module) = get_fetch_module(init_expr) {
+                    ctx.register_native_instance(name.clone(), module.to_string(), "Response".to_string());
                 }
-                // Check for: const response = await fetch(url)
+                // Check for: const response = await fetch(url) / await fetchWithAuth(...) / await fetchPostWithAuth(...)
                 else if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
-                    if is_fetch_call(&await_expr.arg) {
-                        ctx.register_native_instance(name.clone(), "fetch".to_string(), "Response".to_string());
+                    if let Some(module) = get_fetch_module(&await_expr.arg) {
+                        ctx.register_native_instance(name.clone(), module.to_string(), "Response".to_string());
                     }
                 }
             }
@@ -8984,7 +9306,7 @@ fn lower_var_decl_with_destructuring(
 }
 
 /// Collect all LocalGet references from an expression
-fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
+pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
     match expr {
         Expr::LocalGet(id) => refs.push(*id),
         Expr::LocalSet(id, value) => {
@@ -9074,6 +9396,11 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         }
         Expr::Object(fields) => {
             for (_, value) in fields {
+                collect_local_refs_expr(value, refs);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, value) in parts {
                 collect_local_refs_expr(value, refs);
             }
         }
@@ -9240,6 +9567,7 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
         }
         // Set operations
         Expr::SetNew => {}
+        Expr::SetNewFromArray(expr) => { collect_local_refs_expr(expr, refs); }
         Expr::SetAdd { set_id, value } => {
             refs.push(*set_id);
             collect_local_refs_expr(value, refs);
@@ -9612,13 +9940,22 @@ fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>) {
                 collect_local_refs_expr(v, refs);
             }
         }
+        Expr::FetchGetWithAuth { url, auth_header } => {
+            collect_local_refs_expr(url, refs);
+            collect_local_refs_expr(auth_header, refs);
+        }
+        Expr::FetchPostWithAuth { url, auth_header, body } => {
+            collect_local_refs_expr(url, refs);
+            collect_local_refs_expr(auth_header, refs);
+            collect_local_refs_expr(body, refs);
+        }
         // Catch-all for any other terminal expressions
         _ => {}
     }
 }
 
 /// Collect all LocalGet references from a statement
-fn collect_local_refs_stmt(stmt: &Stmt, refs: &mut Vec<LocalId>) {
+pub fn collect_local_refs_stmt(stmt: &Stmt, refs: &mut Vec<LocalId>) {
     match stmt {
         Stmt::Let { init, .. } => {
             if let Some(init_expr) = init {
@@ -9994,6 +10331,7 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
         }
         // Set operations
         Expr::SetNew => {}
+        Expr::SetNewFromArray(expr) => { collect_assigned_locals_expr(expr, assigned); }
         Expr::SetAdd { set_id, value } => {
             assigned.push(*set_id);  // Set is modified by add
             collect_assigned_locals_expr(value, assigned);
@@ -10371,6 +10709,15 @@ fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<LocalId>) {
                 collect_assigned_locals_expr(v, assigned);
             }
         }
+        Expr::FetchGetWithAuth { url, auth_header } => {
+            collect_assigned_locals_expr(url, assigned);
+            collect_assigned_locals_expr(auth_header, assigned);
+        }
+        Expr::FetchPostWithAuth { url, auth_header, body } => {
+            collect_assigned_locals_expr(url, assigned);
+            collect_assigned_locals_expr(auth_header, assigned);
+            collect_assigned_locals_expr(body, assigned);
+        }
         // Catch-all for any other terminal expressions
         _ => {}
     }
@@ -10407,6 +10754,7 @@ fn uses_this_expr(expr: &Expr) -> bool {
             ArrayElement::Expr(e) | ArrayElement::Spread(e) => uses_this_expr(e),
         }),
         Expr::Object(fields) => fields.iter().any(|(_, e)| uses_this_expr(e)),
+        Expr::ObjectSpread { parts } => parts.iter().any(|(_, e)| uses_this_expr(e)),
         Expr::Conditional { condition, then_expr, else_expr } => {
             uses_this_expr(condition) || uses_this_expr(then_expr) || uses_this_expr(else_expr)
         }
@@ -10620,6 +10968,9 @@ fn fix_imported_enums_in_expr(expr: &mut Expr, enums: &BTreeMap<String, Vec<(Str
         }
         Expr::Object(fields) => {
             for (_, value) in fields { fix_imported_enums_in_expr(value, enums); }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, value) in parts { fix_imported_enums_in_expr(value, enums); }
         }
         Expr::LocalSet(_, value) => {
             fix_imported_enums_in_expr(value, enums);

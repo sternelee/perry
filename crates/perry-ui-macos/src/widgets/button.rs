@@ -30,18 +30,18 @@ define_class!(
     impl PerryButtonTarget {
         #[unsafe(method(buttonPressed:))]
         fn button_pressed(&self, _sender: &AnyObject) {
-            let key = self.ivars().callback_key.get();
-            // Extract closure pointer and drop the borrow BEFORE calling it,
-            // because the callback may create new buttons (re-entrant borrow).
-            let closure_f64 = BUTTON_CALLBACKS.with(|cbs| {
-                cbs.borrow().get(&key).copied()
-            });
-            if let Some(closure_f64) = closure_f64 {
-                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                unsafe {
-                    js_closure_call0(closure_ptr as *const u8);
+            crate::catch_callback_panic("button callback", std::panic::AssertUnwindSafe(|| {
+                let key = self.ivars().callback_key.get();
+                let closure_f64 = BUTTON_CALLBACKS.with(|cbs| {
+                    cbs.borrow().get(&key).copied()
+                });
+                if let Some(closure_f64) = closure_f64 {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
                 }
-            }
+            }));
         }
     }
 );
@@ -72,6 +72,7 @@ fn str_from_header(ptr: *const u8) -> &'static str {
 /// `label_ptr` is a StringHeader pointer, `on_press` is a NaN-boxed closure pointer.
 pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
     let label = str_from_header(label_ptr);
+    eprintln!("[button] create: label=\"{}\" ptr={:?}", label, label_ptr);
 
     let mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
     let ns_string = NSString::from_str(label);
@@ -83,6 +84,7 @@ pub fn create(label_ptr: *const u8, on_press: f64) -> i64 {
             None,
             mtm,
         );
+        let _: () = msg_send![&*button, setAccessibilityLabel: &*ns_string];
 
         // Create our target object and wire it up
         let target = PerryButtonTarget::new();
@@ -142,6 +144,7 @@ pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
 
             // Create attributed string with the button's current title
             let title = btn.title();
+            eprintln!("[button] set_text_color: title=\"{}\"", title.to_string());
             let ns_title: *const AnyObject = Retained::as_ptr(&title) as *const AnyObject;
             let cls = AnyClass::get(c"NSAttributedString").unwrap();
             let alloc: *mut AnyObject = msg_send![cls, alloc];
@@ -152,6 +155,74 @@ pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
             ];
 
             let _: () = msg_send![btn, setAttributedTitle: attr_str];
+        }
+    }
+}
+
+/// Set an SF Symbol image on a button with a large point size.
+pub fn set_image(handle: i64, name_ptr: *const u8) {
+    let name = str_from_header(name_ptr);
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
+            let ns_name = NSString::from_str(name);
+            // NSImage.imageWithSystemSymbolName:accessibilityDescription:
+            let img_cls = AnyClass::get(c"NSImage").unwrap();
+            let img: *mut AnyObject = msg_send![
+                img_cls,
+                imageWithSystemSymbolName: &*ns_name,
+                accessibilityDescription: std::ptr::null::<AnyObject>()
+            ];
+            if !img.is_null() {
+                // Apply large symbol scale
+                // NSImageSymbolScale: 1=small, 2=medium, 3=large
+                let config_cls = AnyClass::get(c"NSImageSymbolConfiguration").unwrap();
+                let config: *mut AnyObject = msg_send![
+                    config_cls,
+                    configurationWithScale: 3_isize  // NSImageSymbolScaleLarge
+                ];
+                if !config.is_null() {
+                    let sized_img: *mut AnyObject = msg_send![img, imageWithSymbolConfiguration: config];
+                    if !sized_img.is_null() {
+                        let _: () = msg_send![btn, setImage: sized_img];
+                    } else {
+                        let _: () = msg_send![btn, setImage: img];
+                    }
+                } else {
+                    let _: () = msg_send![btn, setImage: img];
+                }
+                // NSImageLeading = 7 (icon before text, respects layout direction)
+                let _: () = msg_send![btn, setImagePosition: 7_isize];
+            }
+        }
+    }
+}
+
+/// Set the image position of a button.
+/// 0=NSNoImage, 1=NSImageOnly, 2=NSImageLeft, 3=NSImageRight,
+/// 4=NSImageBelow, 5=NSImageAbove, 6=NSImageOverlaps, 7=NSImageLeading, 8=NSImageTrailing
+pub fn set_image_position(handle: i64, position: i64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
+            let _: () = msg_send![btn, setImagePosition: position as isize];
+        }
+    }
+}
+
+/// Set the content tint color of a button (affects SF Symbol icon color).
+pub fn set_content_tint_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let btn: &NSButton = &*(Retained::as_ptr(&view) as *const NSButton);
+            let color: Retained<AnyObject> = msg_send![
+                AnyClass::get(c"NSColor").unwrap(),
+                colorWithRed: r as objc2_core_foundation::CGFloat,
+                green: g as objc2_core_foundation::CGFloat,
+                blue: b as objc2_core_foundation::CGFloat,
+                alpha: a as objc2_core_foundation::CGFloat
+            ];
+            let _: () = msg_send![btn, setContentTintColor: &*color];
         }
     }
 }

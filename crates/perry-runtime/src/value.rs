@@ -428,6 +428,7 @@ pub unsafe extern "C" fn js_dynamic_mul(a: f64, b: f64) -> f64 {
 /// Dynamic add: BigInt + BigInt if either operand is BigInt, else f64 + f64.
 #[no_mangle]
 pub unsafe extern "C" fn js_dynamic_add(a: f64, b: f64) -> f64 {
+
     let a_val = JSValue::from_bits(a.to_bits());
     let b_val = JSValue::from_bits(b.to_bits());
     if a_val.is_bigint() || b_val.is_bigint() {
@@ -443,6 +444,7 @@ pub unsafe extern "C" fn js_dynamic_add(a: f64, b: f64) -> f64 {
 /// Dynamic subtract: BigInt - BigInt if either operand is BigInt, else f64 - f64.
 #[no_mangle]
 pub unsafe extern "C" fn js_dynamic_sub(a: f64, b: f64) -> f64 {
+
     let a_val = JSValue::from_bits(a.to_bits());
     let b_val = JSValue::from_bits(b.to_bits());
     if a_val.is_bigint() || b_val.is_bigint() {
@@ -473,6 +475,7 @@ pub unsafe extern "C" fn js_dynamic_div(a: f64, b: f64) -> f64 {
 /// Dynamic modulo: BigInt % BigInt if either operand is BigInt, else f64 % f64.
 #[no_mangle]
 pub unsafe extern "C" fn js_dynamic_mod(a: f64, b: f64) -> f64 {
+
     let a_val = JSValue::from_bits(a.to_bits());
     let b_val = JSValue::from_bits(b.to_bits());
     if a_val.is_bigint() || b_val.is_bigint() {
@@ -497,6 +500,87 @@ pub unsafe extern "C" fn js_dynamic_neg(a: f64) -> f64 {
     -a
 }
 
+/// Dynamic right shift: BigInt >> if either operand is BigInt, else i32 >> for numbers.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_shr(a: f64, b: f64) -> f64 {
+
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_shr(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    let ai = a as i32;
+    let bi = (b as i32) & 0x1f;
+    (ai >> bi) as f64
+}
+
+/// Dynamic left shift: BigInt << if either operand is BigInt, else i32 << for numbers.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_shl(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_shl(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    let ai = a as i32;
+    let bi = (b as i32) & 0x1f;
+    (ai << bi) as f64
+}
+
+/// Dynamic bitwise AND: BigInt & if either operand is BigInt, else i32 & for numbers.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_bitand(a: f64, b: f64) -> f64 {
+
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_and(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    ((a as i32) & (b as i32)) as f64
+}
+
+/// Dynamic bitwise OR: BigInt | if either operand is BigInt, else i32 | for numbers.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_bitor(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_or(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    ((a as i32) | (b as i32)) as f64
+}
+
+/// Dynamic bitwise XOR: BigInt ^ if either operand is BigInt, else i32 ^ for numbers.
+#[no_mangle]
+pub unsafe extern "C" fn js_dynamic_bitxor(a: f64, b: f64) -> f64 {
+    let a_val = JSValue::from_bits(a.to_bits());
+    let b_val = JSValue::from_bits(b.to_bits());
+    if a_val.is_bigint() || b_val.is_bigint() {
+        let result = crate::bigint::js_bigint_xor(
+            coerce_to_bigint_ptr(a) as *const _,
+            coerce_to_bigint_ptr(b) as *const _,
+        );
+        return js_nanbox_bigint(result as i64);
+    }
+    ((a as i32) ^ (b as i32)) as f64
+}
+
 /// Check if an f64 value (interpreted as NaN-boxed) represents a BigInt.
 #[no_mangle]
 pub extern "C" fn js_nanbox_is_bigint(value: f64) -> bool {
@@ -508,19 +592,15 @@ pub extern "C" fn js_nanbox_is_bigint(value: f64) -> bool {
 /// Returns the pointer as i64.
 #[no_mangle]
 pub extern "C" fn js_nanbox_get_bigint(value: f64) -> i64 {
-    let jsval = JSValue::from_bits(value.to_bits());
+    let bits = value.to_bits();
+    let jsval = JSValue::from_bits(bits);
     if jsval.is_bigint() {
         return jsval.as_bigint_ptr() as i64;
     }
-    // Any NaN that is not BIGINT_TAG: return null (0).
-    // This handles POINTER_TAG objects, fneg'd BigInts (0xFFFA_...), undefined, etc.
-    // Without this guard, clean_bigint_ptr would strip the tag and access a potentially
-    // GC'd or non-BigInt heap address, causing SIGSEGV.
     if value.is_nan() {
         return 0;
     }
-    // Non-NaN F64: might be a raw bitcast I64 pointer from legacy BigInt path.
-    value.to_bits() as i64
+    bits as i64
 }
 
 /// Check if an f64 value (interpreted as NaN-boxed) represents a pointer.
@@ -581,19 +661,35 @@ pub extern "C" fn js_get_string_pointer_unified(value: f64) -> i64 {
     let bits = value.to_bits();
     let jsval = JSValue::from_bits(bits);
 
-    // First check if it's a properly NaN-boxed string
+    // Check if it's a properly NaN-boxed string (STRING_TAG = 0x7FFF)
     if jsval.is_string() {
         return jsval.as_string_ptr() as i64;
     }
 
-    // Otherwise, assume it's a raw pointer bitcast to f64.
-    // Real heap pointers have small upper bits (e.g., 0x0000 or 0x0001),
-    // so as f64 they are tiny denormalized numbers (NOT NaN).
-    // Only treat as raw pointer if within valid 48-bit address space.
-    // Regular f64 numbers (e.g., 30101.0 = 0x40DD65A000000000) have large upper bits
-    // and must NOT be treated as pointers.
+    // Check if it's a POINTER_TAG (0x7FFD) NaN-boxed pointer (used for cross-module returns)
+    if jsval.is_pointer() {
+        return (bits & 0x0000_FFFF_FFFF_FFFF) as i64;
+    }
+
+    // Raw pointer fallback: only accept values that look like valid heap pointers.
+    // Must be non-NaN, non-zero, within 48-bit address space, AND at least 4-byte aligned.
+    // The alignment check prevents subnormal f64 numbers like 2.16e-314 (bits=0x1100000003)
+    // from being misidentified as pointers.
     if !value.is_nan() && bits != 0 && bits < 0x0001_0000_0000_0000 {
-        return bits as i64;
+        // Must be at least 4-byte aligned (StringHeader starts with u32 length)
+        // and above minimum heap address
+        if (bits & 0x3) == 0 && bits >= 0x10000 {
+            return bits as i64;
+        }
+    }
+
+    // For numeric values used as property keys (e.g., obj[pool.id]),
+    // convert the number to a string representation
+    if !value.is_nan() && bits != 0 {
+        let s = crate::string::js_number_to_string(value);
+        if !s.is_null() {
+            return s as i64;
+        }
     }
 
     0
@@ -641,12 +737,81 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
         let n = jsval.as_int32();
         let s = n.to_string();
         crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
+    } else if jsval.is_bigint() {
+        // BigInt - convert to decimal string
+        let ptr = jsval.as_bigint_ptr();
+        crate::bigint::js_bigint_to_string(ptr)
     } else if jsval.is_pointer() {
         // Object/array - return "[object Object]" for now
         crate::string::js_string_from_bytes(b"[object Object]".as_ptr(), 15)
     } else {
         // Regular number - use js_number_to_string
         crate::string::js_number_to_string(value)
+    }
+}
+
+/// Convert a NaN-boxed f64 value to a string with the given radix.
+/// Handles BigInt (uses bigint_to_string_radix), numbers, strings, etc.
+#[no_mangle]
+pub extern "C" fn js_jsvalue_to_string_radix(value: f64, radix: i32) -> *mut crate::string::StringHeader {
+    let jsval = JSValue::from_bits(value.to_bits());
+
+    if jsval.is_bigint() {
+        let ptr = jsval.as_bigint_ptr();
+        crate::bigint::js_bigint_to_string_radix(ptr, radix)
+    } else if jsval.is_string() {
+        jsval.as_string_ptr() as *mut crate::string::StringHeader
+    } else if jsval.is_int32() {
+        let n = jsval.as_int32();
+        let s = if radix == 16 {
+            format!("{:x}", n)
+        } else if radix == 10 || radix == 0 {
+            n.to_string()
+        } else {
+            // General radix conversion
+            let mut result = String::new();
+            let mut val = if n < 0 { -(n as i64) as u64 } else { n as u64 };
+            let r = radix as u64;
+            if val == 0 { return crate::string::js_string_from_bytes(b"0".as_ptr(), 1); }
+            while val > 0 {
+                let digit = (val % r) as u8;
+                result.push(if digit < 10 { (b'0' + digit) as char } else { (b'a' + digit - 10) as char });
+                val /= r;
+            }
+            if n < 0 { result.push('-'); }
+            let s: String = result.chars().rev().collect();
+            return crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+        };
+        crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
+    } else {
+        // Regular f64 number
+        let n = value;
+        if n.is_nan() { return crate::string::js_string_from_bytes(b"NaN".as_ptr(), 3); }
+        if n.is_infinite() {
+            if n > 0.0 { return crate::string::js_string_from_bytes(b"Infinity".as_ptr(), 8); }
+            else { return crate::string::js_string_from_bytes(b"-Infinity".as_ptr(), 9); }
+        }
+        if radix == 10 || radix == 0 {
+            return crate::string::js_number_to_string(value);
+        }
+        // For hex and other radixes, convert via integer
+        let n_i64 = n as i64;
+        let s = if radix == 16 {
+            if n_i64 < 0 { format!("-{:x}", -n_i64) } else { format!("{:x}", n_i64) }
+        } else {
+            let mut result = String::new();
+            let mut val = if n_i64 < 0 { (-n_i64) as u64 } else { n_i64 as u64 };
+            let r = radix as u64;
+            if val == 0 { return crate::string::js_string_from_bytes(b"0".as_ptr(), 1); }
+            while val > 0 {
+                let digit = (val % r) as u8;
+                result.push(if digit < 10 { (b'0' + digit) as char } else { (b'a' + digit - 10) as char });
+                val /= r;
+            }
+            if n_i64 < 0 { result.push('-'); }
+            result.chars().rev().collect()
+        };
+        crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
     }
 }
 
@@ -728,8 +893,54 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
         return if crate::string::js_string_equals(a_str, b_str) { 1 } else { 0 };
     }
 
-    // Different types or different values → not equal
+    // Regular f64 numbers (not NaN-boxed): use IEEE 754 equality
+    // This handles -0.0 === 0.0 correctly (both are equal per IEEE 754)
+    // Also correctly handles NaN !== NaN (IEEE 754 NaN comparison returns false)
+    if abits < 0x7FF8_0000_0000_0000 && bbits < 0x7FF8_0000_0000_0000 {
+        return if a == b { 1 } else { 0 };
+    }
+
+    // Different types or different NaN-boxed values → not equal
     0
+}
+
+/// Compare two JSValues for relational ordering (< <= > >=).
+/// Returns -1 if a < b, 0 if a == b, 1 if a > b.
+/// Handles BigInt, String, Number, and INT32 types.
+#[no_mangle]
+pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
+    let abits = a.to_bits();
+    let bbits = b.to_bits();
+
+    let a_val = JSValue::from_bits(abits);
+    let b_val = JSValue::from_bits(bbits);
+
+    // BigInt comparison
+    if a_val.is_bigint() && b_val.is_bigint() {
+        let a_ptr = a_val.as_bigint_ptr();
+        let b_ptr = b_val.as_bigint_ptr();
+        return crate::bigint::js_bigint_cmp(a_ptr, b_ptr);
+    }
+
+    // INT32 comparison
+    if a_val.is_int32() && b_val.is_int32() {
+        let ai = a_val.as_int32();
+        let bi = b_val.as_int32();
+        return if ai < bi { -1 } else if ai > bi { 1 } else { 0 };
+    }
+
+    // Convert to f64 for numeric comparison (handles Number, INT32 mixed with Number, etc.)
+    // Return 2 (sentinel) for undefined/null/string — makes all comparisons false
+    let af = if a_val.is_int32() { a_val.as_int32() as f64 }
+             else if a_val.is_bigint() { crate::bigint::js_bigint_to_f64(a_val.as_bigint_ptr()) }
+             else if abits < 0x7FF8_0000_0000_0000 { a }
+             else { return 2; }; // undefined/null/string → incomparable sentinel
+    let bf = if b_val.is_int32() { b_val.as_int32() as f64 }
+             else if b_val.is_bigint() { crate::bigint::js_bigint_to_f64(b_val.as_bigint_ptr()) }
+             else if bbits < 0x7FF8_0000_0000_0000 { b }
+             else { return 2; }; // undefined/null/string → incomparable sentinel
+
+    if af < bf { -1 } else if af > bf { 1 } else { 0 }
 }
 
 /// Check if a JavaScript value is truthy.
@@ -903,11 +1114,17 @@ pub extern "C" fn js_dynamic_array_get(value: f64, index: i32) -> f64 {
         return f64::from_bits(TAG_UNDEFINED);
     }
 
-    // Not a JS handle - it's a native array pointer
+    // Not a JS handle - it's a native array/buffer pointer
     let ptr = js_nanbox_get_pointer(value);
     if ptr == 0 {
         // Invalid pointer - return undefined
         return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    // Check if this is a buffer (Uint8Array) - read individual bytes, not f64 values
+    if crate::buffer::is_registered_buffer(ptr as usize) {
+        let byte_val = crate::buffer::js_buffer_get(ptr as *const crate::buffer::BufferHeader, index);
+        return byte_val as f64;
     }
 
     // Call the native array get function
@@ -1095,6 +1312,46 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         return crate::closure::closure_get_dynamic_prop(ptr as usize, property_name);
     }
 
+    // Handle Buffer/Uint8Array properties (buffer, byteOffset, byteLength, length)
+    // BufferHeader has same layout as ArrayHeader (length u32, capacity u32, data...)
+    // and doesn't have ObjectHeader fields, so we must check before treating as ObjectHeader.
+    if crate::buffer::is_registered_buffer(ptr as usize) {
+        let buf = ptr as *const crate::buffer::BufferHeader;
+        match property_name {
+            "length" | "byteLength" => {
+                return (*buf).length as f64;
+            }
+            "byteOffset" => {
+                return 0.0;
+            }
+            "buffer" => {
+                // Return the buffer itself (Perry doesn't separate ArrayBuffer)
+                return obj_value;
+            }
+            _ => {
+                return f64::from_bits(TAG_UNDEFINED);
+            }
+        }
+    }
+
+    // Check if this is a registered Map
+    if crate::map::is_registered_map(ptr as usize) {
+        let map_ptr = ptr as *const crate::map::MapHeader;
+        if name_slice == b"size" {
+            return (*map_ptr).size as f64;
+        }
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    // Check if this is a registered Set
+    if crate::set::is_registered_set(ptr as usize) {
+        let set_ptr = ptr as *const crate::set::SetHeader;
+        if name_slice == b"size" {
+            return (*set_ptr).size as f64;
+        }
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
     // Check the object type tag (first u32 field of both ObjectHeader and ErrorHeader)
     let object_type = *(ptr as *const u32);
 
@@ -1155,10 +1412,86 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
     );
 
     // Call native object property access
-    crate::object::js_object_get_field_by_name_f64(
+    let result = crate::object::js_object_get_field_by_name_f64(
         ptr as *const crate::object::ObjectHeader,
         key_ptr,
-    )
+    );
+
+    result
+}
+
+/// Dynamic method dispatch for Map/Set collection types.
+/// Checks the magic tag of the object and dispatches known methods.
+/// Returns TAG_UNDEFINED if the object is not a Map/Set or method is unknown.
+/// This handles cases like `map.get(key).add(value)` where the intermediate
+/// result type is unknown at codegen time.
+#[no_mangle]
+pub unsafe extern "C" fn js_collection_method_dispatch(
+    obj_value: f64,
+    method_ptr: *const u8,
+    method_len: usize,
+    arg0: f64,
+    arg1: f64,
+) -> f64 {
+    let ptr = js_nanbox_get_pointer(obj_value);
+    if ptr == 0 || ptr < 0x10000 {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+
+    let method = std::slice::from_raw_parts(method_ptr, method_len);
+
+    // Check if this is a registered Map
+    if crate::map::is_registered_map(ptr as usize) {
+        let map = ptr as *mut crate::map::MapHeader;
+        return match method {
+            b"get" => crate::map::js_map_get(map, arg0),
+            b"set" => {
+                let result = crate::map::js_map_set(map, arg0, arg1);
+                js_nanbox_pointer(result as i64)
+            }
+            b"has" => crate::map::js_map_has(map, arg0) as f64,
+            b"delete" => crate::map::js_map_delete(map, arg0) as f64,
+            b"size" => crate::map::js_map_size(map) as f64,
+            b"clear" => {
+                crate::map::js_map_clear(map);
+                f64::from_bits(TAG_UNDEFINED)
+            }
+            b"entries" => {
+                let arr = crate::map::js_map_entries(map);
+                js_nanbox_pointer(arr as i64)
+            }
+            b"keys" => {
+                let arr = crate::map::js_map_keys(map);
+                js_nanbox_pointer(arr as i64)
+            }
+            b"values" => {
+                let arr = crate::map::js_map_values(map);
+                js_nanbox_pointer(arr as i64)
+            }
+            _ => f64::from_bits(TAG_UNDEFINED),
+        };
+    }
+
+    // Check if this is a registered Set
+    if crate::set::is_registered_set(ptr as usize) {
+        let set = ptr as *mut crate::set::SetHeader;
+        return match method {
+            b"add" => {
+                let result = crate::set::js_set_add(set, arg0);
+                js_nanbox_pointer(result as i64)
+            }
+            b"has" => crate::set::js_set_has(set, arg0) as f64,
+            b"delete" => crate::set::js_set_delete(set, arg0) as f64,
+            b"size" => crate::set::js_set_size(set) as f64,
+            b"clear" => {
+                crate::set::js_set_clear(set);
+                f64::from_bits(TAG_UNDEFINED)
+            }
+            _ => f64::from_bits(TAG_UNDEFINED),
+        };
+    }
+
+    f64::from_bits(TAG_UNDEFINED)
 }
 
 /// Dynamic Object.keys() that handles both regular objects and Error objects.

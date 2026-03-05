@@ -38,22 +38,23 @@ define_class!(
         #[unsafe(method(toggleChanged:))]
         fn toggle_changed(&self, sender: &AnyObject) {
             let key = self.ivars().callback_key.get();
-            TOGGLE_CALLBACKS.with(|cbs| {
-                if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                    // Get the switch state
-                    let state: i64 = unsafe { msg_send![sender, state] };
-                    let value = if state != 0 {
-                        f64::from_bits(TAG_TRUE)
-                    } else {
-                        f64::from_bits(TAG_FALSE)
-                    };
+            crate::catch_callback_panic("toggle callback", std::panic::AssertUnwindSafe(|| {
+                TOGGLE_CALLBACKS.with(|cbs| {
+                    if let Some(&closure_f64) = cbs.borrow().get(&key) {
+                        let state: i64 = unsafe { msg_send![sender, state] };
+                        let value = if state != 0 {
+                            f64::from_bits(TAG_TRUE)
+                        } else {
+                            f64::from_bits(TAG_FALSE)
+                        };
 
-                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                    unsafe {
-                        js_closure_call1(closure_ptr as *const u8, value);
+                        let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                        unsafe {
+                            js_closure_call1(closure_ptr as *const u8, value);
+                        }
                     }
-                }
-            });
+                });
+            }));
         }
     }
 );

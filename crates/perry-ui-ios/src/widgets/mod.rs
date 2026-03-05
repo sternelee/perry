@@ -350,6 +350,11 @@ pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
 /// Set on-hover (no-op on iOS).
 pub fn set_on_hover(_handle: i64, _callback: f64) {}
 
+/// Set a single-tap handler for any widget.
+pub fn set_on_click(handle: i64, callback: f64) {
+    button::set_on_tap(handle, callback);
+}
+
 /// Set a double-tap handler.
 pub fn set_on_double_click(handle: i64, callback: f64) {
     DOUBLE_CLICK_CALLBACKS.with(|cbs| {

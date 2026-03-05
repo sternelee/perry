@@ -28,41 +28,33 @@ unsafe fn make_query(key: &str) -> objc2::rc::Retained<objc2::runtime::AnyObject
     let dict: objc2::rc::Retained<objc2::runtime::AnyObject> = objc2::msg_send![dict_cls, new];
 
     // kSecClass = kSecClassGenericPassword
-    let sec_class_key: *const c_void = *CoreFoundation_kSecClass();
-    let sec_class_val: *const c_void = *CoreFoundation_kSecClassGenericPassword();
+    let sec_class_key: *const c_void = kSecClass;
+    let sec_class_val: *const c_void = kSecClassGenericPassword;
     let _: () = objc2::msg_send![&*dict, setObject: sec_class_val as *const objc2::runtime::AnyObject, forKey: sec_class_key as *const objc2::runtime::AnyObject];
 
     // kSecAttrAccount = key
-    let attr_account_key: *const c_void = *CoreFoundation_kSecAttrAccount();
+    let attr_account_key: *const c_void = kSecAttrAccount;
     let ns_key = objc2_foundation::NSString::from_str(key);
     let _: () = objc2::msg_send![&*dict, setObject: &*ns_key, forKey: attr_account_key as *const objc2::runtime::AnyObject];
 
     // kSecAttrService = "perry"
-    let attr_service_key: *const c_void = *CoreFoundation_kSecAttrService();
+    let attr_service_key: *const c_void = kSecAttrService;
     let ns_service = objc2_foundation::NSString::from_str("perry");
     let _: () = objc2::msg_send![&*dict, setObject: &*ns_service, forKey: attr_service_key as *const objc2::runtime::AnyObject];
 
     dict
 }
 
-// Link against Security framework constants
+// Link against Security framework constants (data symbols, not functions)
 extern "C" {
-    #[link_name = "kSecClass"]
-    fn CoreFoundation_kSecClass() -> &'static *const c_void;
-    #[link_name = "kSecClassGenericPassword"]
-    fn CoreFoundation_kSecClassGenericPassword() -> &'static *const c_void;
-    #[link_name = "kSecAttrAccount"]
-    fn CoreFoundation_kSecAttrAccount() -> &'static *const c_void;
-    #[link_name = "kSecAttrService"]
-    fn CoreFoundation_kSecAttrService() -> &'static *const c_void;
-    #[link_name = "kSecValueData"]
-    fn CoreFoundation_kSecValueData() -> &'static *const c_void;
-    #[link_name = "kSecReturnData"]
-    fn CoreFoundation_kSecReturnData() -> &'static *const c_void;
-    #[link_name = "kSecMatchLimit"]
-    fn CoreFoundation_kSecMatchLimit() -> &'static *const c_void;
-    #[link_name = "kSecMatchLimitOne"]
-    fn CoreFoundation_kSecMatchLimitOne() -> &'static *const c_void;
+    static kSecClass: *const c_void;
+    static kSecClassGenericPassword: *const c_void;
+    static kSecAttrAccount: *const c_void;
+    static kSecAttrService: *const c_void;
+    static kSecValueData: *const c_void;
+    static kSecReturnData: *const c_void;
+    static kSecMatchLimit: *const c_void;
+    static kSecMatchLimitOne: *const c_void;
 }
 
 /// Save a key-value pair to the keychain.
@@ -81,7 +73,7 @@ pub fn save(key_ptr: *const u8, value_ptr: *const u8) {
             let ns_str = objc2_foundation::NSString::from_str(value);
             objc2::msg_send![&*ns_str, dataUsingEncoding: 4u64] // NSUTF8StringEncoding = 4
         };
-        let value_data_key: *const c_void = *CoreFoundation_kSecValueData();
+        let value_data_key: *const c_void = kSecValueData;
         let _: () = objc2::msg_send![&*dict, setObject: &*value_data, forKey: value_data_key as *const objc2::runtime::AnyObject];
 
         SecItemAdd(&*dict as *const _ as *const c_void, std::ptr::null_mut());
@@ -96,15 +88,15 @@ pub fn get(key_ptr: *const u8) -> f64 {
         let dict = make_query(key);
 
         // Add kSecReturnData = true
-        let return_data_key: *const c_void = *CoreFoundation_kSecReturnData();
+        let return_data_key: *const c_void = kSecReturnData;
         let cf_true: *const objc2::runtime::AnyObject = objc2::msg_send![
             objc2::runtime::AnyClass::get(c"NSNumber").unwrap(), numberWithBool: true
         ];
         let _: () = objc2::msg_send![&*dict, setObject: cf_true, forKey: return_data_key as *const objc2::runtime::AnyObject];
 
         // Add kSecMatchLimit = kSecMatchLimitOne
-        let limit_key: *const c_void = *CoreFoundation_kSecMatchLimit();
-        let limit_one: *const c_void = *CoreFoundation_kSecMatchLimitOne();
+        let limit_key: *const c_void = kSecMatchLimit;
+        let limit_one: *const c_void = kSecMatchLimitOne;
         let _: () = objc2::msg_send![&*dict, setObject: limit_one as *const objc2::runtime::AnyObject, forKey: limit_key as *const objc2::runtime::AnyObject];
 
         let mut result: *const c_void = std::ptr::null();

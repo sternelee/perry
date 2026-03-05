@@ -1,5 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 extern "C" {
     fn js_closure_call0(closure: *const u8) -> f64;
@@ -8,55 +9,78 @@ extern "C" {
     fn js_nanbox_get_pointer(value: f64) -> i64;
     fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
     fn js_nanbox_string(ptr: i64) -> f64;
+    fn js_promise_run_microtasks() -> i32;
     fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
 }
 
-thread_local! {
-    /// Maps callback key (i64) to NaN-boxed closure f64.
-    static CALLBACKS: RefCell<HashMap<i64, f64>> = RefCell::new(HashMap::new());
-    static NEXT_KEY: RefCell<i64> = RefCell::new(1);
+/// Drain the promise microtask queue — must be called after each callback
+/// so that async/await continuations (.then chains) execute.
+fn pump_microtasks() {
+    unsafe {
+        let ran = js_promise_run_microtasks();
+        if ran > 0 {
+            __android_log_print(
+                3, b"PerryCallback\0".as_ptr(),
+                b"pump_microtasks: ran %d tasks\0".as_ptr(),
+                ran,
+            );
+            // Keep pumping until no more tasks
+            loop {
+                let more = js_promise_run_microtasks();
+                if more == 0 { break; }
+                __android_log_print(
+                    3, b"PerryCallback\0".as_ptr(),
+                    b"pump_microtasks: ran %d more tasks\0".as_ptr(),
+                    more,
+                );
+            }
+        }
+    }
 }
+
+/// Global callback store — callbacks are registered on the native thread but
+/// invoked on the UI thread, so thread_local won't work.
+static CALLBACKS: Mutex<Option<HashMap<i64, f64>>> = Mutex::new(None);
+static NEXT_KEY: AtomicI64 = AtomicI64::new(1);
 
 /// Register a NaN-boxed closure and return a unique key for it.
 pub fn register(closure_f64: f64) -> i64 {
-    NEXT_KEY.with(|k| {
-        let key = *k.borrow();
-        *k.borrow_mut() = key + 1;
-        CALLBACKS.with(|cbs| {
-            cbs.borrow_mut().insert(key, closure_f64);
-        });
-        unsafe {
-            __android_log_print(
-                3, b"PerryCallback\0".as_ptr(),
-                b"register: key=%lld bits=0x%llx\0".as_ptr(),
-                key as i64, closure_f64.to_bits() as i64,
-            );
-        }
-        key
-    })
+    let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    let mut guard = CALLBACKS.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(key, closure_f64);
+    unsafe {
+        __android_log_print(
+            3, b"PerryCallback\0".as_ptr(),
+            b"register: key=%lld bits=0x%llx\0".as_ptr(),
+            key, closure_f64.to_bits() as i64,
+        );
+    }
+    key
 }
 
 /// Invoke a registered callback with 0 arguments.
-/// IMPORTANT: Extract closure_f64 and DROP the RefCell borrow BEFORE calling
+/// IMPORTANT: Extract closure_f64 and DROP the Mutex guard BEFORE calling
 /// js_closure_call0. The closure may re-enter callback::register() which needs
-/// to borrow_mut() CALLBACKS. (Same fix as iOS re-entrant borrow issue.)
+/// to lock CALLBACKS.
 pub fn invoke0(key: i64) {
-    let closure_f64 = CALLBACKS.with(|cbs| {
-        cbs.borrow().get(&key).copied()
-    });
+    let closure_f64 = {
+        let guard = CALLBACKS.lock().unwrap();
+        guard.as_ref().and_then(|m| m.get(&key).copied())
+    };
     if let Some(closure_f64) = closure_f64 {
         let closure_ptr = closure_f64.to_bits() as *const u8;
         unsafe {
             __android_log_print(
                 3, b"PerryCallback\0".as_ptr(),
                 b"invoke0: key=%lld ptr=%p\0".as_ptr(),
-                key as i64, closure_ptr,
+                key, closure_ptr,
             );
             js_closure_call0(closure_ptr);
             __android_log_print(
                 3, b"PerryCallback\0".as_ptr(),
                 b"invoke0: closure returned for key=%lld\0".as_ptr(),
-                key as i64,
+                key,
             );
         }
     } else {
@@ -64,18 +88,18 @@ pub fn invoke0(key: i64) {
             __android_log_print(
                 3, b"PerryCallback\0".as_ptr(),
                 b"invoke0: key=%lld NOT FOUND\0".as_ptr(),
-                key as i64,
+                key,
             );
         }
     }
 }
 
 /// Invoke a registered callback with 1 argument.
-/// Same re-entrant borrow fix as invoke0.
 pub fn invoke1(key: i64, arg: f64) {
-    let closure_f64 = CALLBACKS.with(|cbs| {
-        cbs.borrow().get(&key).copied()
-    });
+    let closure_f64 = {
+        let guard = CALLBACKS.lock().unwrap();
+        guard.as_ref().and_then(|m| m.get(&key).copied())
+    };
     if let Some(closure_f64) = closure_f64 {
         let closure_ptr = closure_f64.to_bits() as *const u8;
         unsafe {
@@ -85,11 +109,11 @@ pub fn invoke1(key: i64, arg: f64) {
 }
 
 /// Invoke a registered callback with 2 arguments.
-/// Same re-entrant borrow fix as invoke0.
 pub fn invoke2(key: i64, arg1: f64, arg2: f64) {
-    let closure_f64 = CALLBACKS.with(|cbs| {
-        cbs.borrow().get(&key).copied()
-    });
+    let closure_f64 = {
+        let guard = CALLBACKS.lock().unwrap();
+        guard.as_ref().and_then(|m| m.get(&key).copied())
+    };
     if let Some(closure_f64) = closure_f64 {
         let closure_ptr = closure_f64.to_bits() as *const u8;
         unsafe {
@@ -99,7 +123,7 @@ pub fn invoke2(key: i64, arg1: f64, arg2: f64) {
 }
 
 /// JNI entry point: called from Java PerryBridge.nativeInvokeCallback0(long key).
-/// This runs on the UI thread.
+/// This runs on the UI thread. Pumps microtasks after to drive async/await.
 #[no_mangle]
 pub extern "C" fn Java_com_perry_app_PerryBridge_nativeInvokeCallback0(
     _env: jni::JNIEnv,
@@ -107,10 +131,11 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeInvokeCallback0(
     key: jni::sys::jlong,
 ) {
     invoke0(key as i64);
+    pump_microtasks();
 }
 
 /// JNI entry point: called from Java PerryBridge.nativeInvokeCallback1(long key, double arg).
-/// This runs on the UI thread.
+/// This runs on the UI thread. Pumps microtasks after to drive async/await.
 #[no_mangle]
 pub extern "C" fn Java_com_perry_app_PerryBridge_nativeInvokeCallback1(
     _env: jni::JNIEnv,
@@ -119,10 +144,11 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeInvokeCallback1(
     arg: jni::sys::jdouble,
 ) {
     invoke1(key as i64, arg);
+    pump_microtasks();
 }
 
 /// JNI entry point: called from Java PerryBridge.nativeInvokeCallback2(long key, double arg1, double arg2).
-/// This runs on the UI thread.
+/// This runs on the UI thread. Pumps microtasks after to drive async/await.
 #[no_mangle]
 pub extern "C" fn Java_com_perry_app_PerryBridge_nativeInvokeCallback2(
     _env: jni::JNIEnv,
@@ -132,6 +158,7 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeInvokeCallback2(
     arg2: jni::sys::jdouble,
 ) {
     invoke2(key as i64, arg1, arg2);
+    pump_microtasks();
 }
 
 /// JNI entry point: called from Java PerryBridge.nativeInvokeCallbackWithString(long key, String text).
@@ -152,4 +179,5 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeInvokeCallbackWithString(
         js_nanbox_string(str_ptr as i64)
     };
     invoke1(key as i64, nanboxed);
+    pump_microtasks();
 }

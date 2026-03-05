@@ -10,5 +10,5 @@ pub mod monomorph;
 
 pub use ir::*;
 pub use js_transform::{transform_js_imports, fix_cross_module_native_instances, fix_local_native_instances, ExportedNativeInstance};
-pub use lower::{lower_module, lower_module_with_class_id, lower_module_with_class_id_and_types, fix_imported_enums};
+pub use lower::{lower_module, lower_module_with_class_id, lower_module_with_class_id_and_types, fix_imported_enums, collect_local_refs_stmt, collect_local_refs_expr};
 pub use monomorph::monomorphize_module;

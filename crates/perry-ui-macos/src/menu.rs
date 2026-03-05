@@ -32,15 +32,17 @@ define_class!(
     impl PerryMenuItemTarget {
         #[unsafe(method(menuItemClicked:))]
         fn menu_item_clicked(&self, _sender: &AnyObject) {
-            let key = self.ivars().callback_key.get();
-            MENU_ITEM_CALLBACKS.with(|cbs| {
-                if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                    unsafe {
-                        js_closure_call0(closure_ptr as *const u8);
+            crate::catch_callback_panic("menu callback", std::panic::AssertUnwindSafe(|| {
+                let key = self.ivars().callback_key.get();
+                MENU_ITEM_CALLBACKS.with(|cbs| {
+                    if let Some(&closure_f64) = cbs.borrow().get(&key) {
+                        let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                        unsafe {
+                            js_closure_call0(closure_ptr as *const u8);
+                        }
                     }
-                }
-            });
+                });
+            }));
         }
     }
 );
@@ -246,21 +248,37 @@ pub fn set_context_menu(widget_handle: i64, menu_handle: i64) {
 }
 
 /// Parse a shortcut string like "Cmd+Shift+N" into (key, NSEventModifierFlags).
+/// If only a key is given (e.g. "n"), defaults to Cmd modifier.
+/// Uppercase single char (e.g. "S") means Cmd+Shift.
 fn parse_shortcut(s: &str) -> (String, NSEventModifierFlags) {
     let mut flags = NSEventModifierFlags::empty();
     let parts: Vec<&str> = s.split('+').collect();
     let mut key = String::new();
+    let mut has_explicit_modifier = false;
 
     for part in &parts {
         let trimmed = part.trim();
         match trimmed.to_lowercase().as_str() {
-            "cmd" | "command" => flags |= NSEventModifierFlags::Command,
-            "shift" => flags |= NSEventModifierFlags::Shift,
-            "option" | "alt" => flags |= NSEventModifierFlags::Option,
-            "ctrl" | "control" => flags |= NSEventModifierFlags::Control,
-            _ => key = trimmed.to_lowercase(),
+            "cmd" | "command" => { flags |= NSEventModifierFlags::Command; has_explicit_modifier = true; },
+            "shift" => { flags |= NSEventModifierFlags::Shift; has_explicit_modifier = true; },
+            "option" | "alt" => { flags |= NSEventModifierFlags::Option; has_explicit_modifier = true; },
+            "ctrl" | "control" => { flags |= NSEventModifierFlags::Control; has_explicit_modifier = true; },
+            _ => key = trimmed.to_string(),
         }
     }
 
-    (key, flags)
+    // If just a key with no explicit modifiers, default to Cmd
+    // Uppercase single char (e.g. "S") means Cmd+Shift
+    if !has_explicit_modifier && !key.is_empty() {
+        flags |= NSEventModifierFlags::Command;
+        if key.len() == 1 {
+            let ch = key.chars().next().unwrap();
+            if ch.is_ascii_uppercase() {
+                flags |= NSEventModifierFlags::Shift;
+                key = ch.to_lowercase().to_string();
+            }
+        }
+    }
+
+    (key.to_lowercase(), flags)
 }

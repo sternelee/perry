@@ -123,15 +123,7 @@ fn refresh_adapter(handle: i64, items: &[String]) {
             let _ = env.set_object_array_element(&arr, i as i32, &jstr);
         }
 
-        // Create ArrayAdapter with simple_spinner_item layout
-        let adapter = env.call_static_method(
-            "android/widget/ArrayAdapter",
-            "createFromResource",
-            "(Landroid/content/Context;I[Ljava/lang/CharSequence;)Landroid/widget/ArrayAdapter;",
-            &[JValue::Object(&activity), JValue::Int(0x01090008), JValue::Object(&arr)],
-        );
-
-        // Simpler approach: new ArrayAdapter(context, android.R.layout.simple_spinner_item, items)
+        // Create ArrayAdapter(context, android.R.layout.simple_spinner_item, items)
         let adapter = env.new_object(
             "android/widget/ArrayAdapter",
             "(Landroid/content/Context;I[Ljava/lang/Object;)V",
@@ -157,7 +149,6 @@ fn refresh_adapter(handle: i64, items: &[String]) {
             &[JValue::Object(&adapter)],
         );
 
-        let _ = adapter; // suppress unused warning from first attempt
         unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
     }
 }

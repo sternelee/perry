@@ -47,6 +47,41 @@ pub fn open_dialog(callback: f64) {
     }
 }
 
+/// Open a folder dialog. Calls callback with the selected directory path (NaN-boxed string).
+/// If user cancels, callback is called with TAG_UNDEFINED.
+pub fn open_folder_dialog(callback: f64) {
+    let _mtm = MainThreadMarker::new().expect("perry/ui must run on the main thread");
+    unsafe {
+        let panel: objc2::rc::Retained<NSOpenPanel> = msg_send![
+            objc2::runtime::AnyClass::get(c"NSOpenPanel").unwrap(),
+            openPanel
+        ];
+        panel.setCanChooseFiles(false);
+        panel.setCanChooseDirectories(true);
+        panel.setAllowsMultipleSelection(false);
+
+        let response: isize = msg_send![&*panel, runModal];
+        let closure_ptr = js_nanbox_get_pointer(callback) as *const u8;
+
+        if response == 1 {
+            let urls = panel.URLs();
+            if !urls.is_empty() {
+                let url = &urls.objectAtIndex(0);
+                let path_str: objc2::rc::Retained<NSString> = msg_send![url, path];
+                let rust_str = path_str.to_string();
+                let bytes = rust_str.as_bytes();
+                let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+                let nanboxed = js_nanbox_string(str_ptr as i64);
+                js_closure_call1(closure_ptr, nanboxed);
+            } else {
+                js_closure_call1(closure_ptr, f64::from_bits(0x7FFC_0000_0000_0001));
+            }
+        } else {
+            js_closure_call1(closure_ptr, f64::from_bits(0x7FFC_0000_0000_0001));
+        }
+    }
+}
+
 /// Save file dialog. Calls callback with selected path (NaN-boxed string) or TAG_UNDEFINED.
 pub fn save_dialog(callback: f64, default_name_ptr: *const u8, _allowed_types_ptr: *const u8) {
     fn str_from_header(ptr: *const u8) -> &'static str {

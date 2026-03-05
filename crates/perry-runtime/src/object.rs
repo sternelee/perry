@@ -280,7 +280,9 @@ unsafe fn call_vtable_method(
     match param_count {
         0 => {
             let f: extern "C" fn(i64) -> f64 = std::mem::transmute(func_ptr);
-            f(this)
+            let result = f(this);
+            // eprintln!("[vtable_call] func=0x{:x} this=0x{:x} pc=0 result_bits=0x{:016x} result_f64={}", func_ptr, this, result.to_bits(), result);
+            result
         }
         1 => {
             let f: extern "C" fn(i64, f64) -> f64 = std::mem::transmute(func_ptr);
@@ -678,6 +680,15 @@ pub unsafe extern "C" fn js_object_clone_with_extra(
     }
 
     (*new_ptr).keys_array = new_keys_arr;
+
+    // Debug: log all spread clones
+    {
+        let static_keys_slice = if static_keys_len > 0 && !static_keys_ptr.is_null() {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(static_keys_ptr, static_keys_len as usize))
+        } else { "" };
+        // Debug logging removed
+    }
+
     new_ptr
 }
 
@@ -717,7 +728,12 @@ pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32
     if obj.is_null() || (obj as usize) < 0x10000 { return JSValue::undefined(); }
     unsafe {
         // Bounds check: return undefined for out-of-range field indices
-        if field_index >= (*obj).field_count {
+        let fc = (*obj).field_count;
+        if field_index >= fc {
+            return JSValue::undefined();
+        }
+        // Guard: corrupted objects with unreasonably large field_count
+        if fc > 10000 {
             return JSValue::undefined();
         }
         let fields_ptr = (obj as *const u8).add(std::mem::size_of::<ObjectHeader>()) as *const JSValue;
@@ -971,25 +987,19 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         return JSValue::undefined();
     }
     unsafe {
-        // Validate that this is actually an ObjectHeader, not some other heap type.
-        // object_type == 0: static/const objects from codegen (not heap-allocated via js_object_alloc)
-        // object_type == 1: OBJECT_TYPE_REGULAR (heap-allocated objects)
-        // object_type == 2: OBJECT_TYPE_ERROR (ErrorHeader — different layout)
-        // Other values: likely type confusion (ArrayHeader.length, ClosureHeader.func_ptr bits, etc.)
-        let object_type = (*obj).object_type;
-        if object_type != crate::error::OBJECT_TYPE_REGULAR && object_type != 0 {
-            if object_type == crate::error::OBJECT_TYPE_ERROR {
+        // Validate this is an ObjectHeader, not some other heap type.
+        // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
+        // for static/const objects that don't have GcHeaders.
+        let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        let gc_type = (*gc_header).obj_type;
+        if gc_type != crate::gc::GC_TYPE_OBJECT {
+            let object_type = (*obj).object_type;
+            if object_type != crate::error::OBJECT_TYPE_REGULAR {
                 return JSValue::undefined();
             }
-            // Check for ClosureHeader (CLOSURE_MAGIC at offset 12)
-            let type_tag_at_12 = *((obj as *const u8).add(12) as *const u32);
-            if type_tag_at_12 == crate::closure::CLOSURE_MAGIC {
-                return JSValue::undefined();
-            }
-            // Likely an ArrayHeader or other non-object struct — return undefined to avoid crash
-            return JSValue::undefined();
         }
-        // Check for CLOSURE_MAGIC at offset 12 in case func_ptr low bits happen to be 0 or 1
+
+        // Check for CLOSURE_MAGIC at offset 12 (closures may share GC_TYPE_OBJECT arena slot)
         {
             let type_tag_at_12 = *((obj as *const u8).add(12) as *const u32);
             if type_tag_at_12 == crate::closure::CLOSURE_MAGIC {
@@ -1014,6 +1024,10 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         // Extra safety: detect ASCII-like pointer values (e.g., 0x656e6f6c63 = "clone")
         // that indicate a string value leaked into the keys_array pointer field.
         // Valid ARM64 heap pointers from mmap on macOS have top_byte (bits 32-39) < 0x20.
+        // NOTE: This heuristic is macOS-specific. On Linux/Android, mmap can return
+        // pointers with top_byte in the printable ASCII range (0x20-0x7E), so we skip
+        // this check on non-macOS platforms.
+        #[cfg(target_os = "macos")]
         {
             let top_byte = (keys_ptr >> 32) as u8;
             let byte4 = ((keys_ptr >> 24) & 0xFF) as u8;
@@ -1127,6 +1141,19 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
     }
     // Safety: obj is a valid heap pointer (> 0x10000) at this point
     unsafe {
+        // Validate this is an ObjectHeader, not some other heap type.
+        // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
+        // for static/const objects that don't have GcHeaders.
+        let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        let gc_type = (*gc_header).obj_type;
+        if gc_type != crate::gc::GC_TYPE_OBJECT && gc_type != crate::gc::GC_TYPE_CLOSURE {
+            // Not a heap object/closure — only accept object_type == 1 (OBJECT_TYPE_REGULAR)
+            let object_type = (*obj).object_type;
+            if object_type != crate::error::OBJECT_TYPE_REGULAR {
+                return;
+            }
+        }
+
         // Check if this is a ClosureHeader — closures support dynamic props via separate storage.
         // ClosureHeader has CLOSURE_MAGIC (0x434C4F53) at offset 12.
         // Without this check, (*obj).keys_array reads capture[0] → corruption/crash.
@@ -1370,7 +1397,30 @@ pub extern "C" fn js_object_rest(src: *const ObjectHeader, exclude_keys: *const 
 /// Returns 1.0 for true, 0.0 for false
 #[no_mangle]
 pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
-    let jsval = crate::JSValue::from_bits(value.to_bits());
+    let bits = value.to_bits();
+    let jsval = crate::JSValue::from_bits(bits);
+
+    // Special handling for Uint8Array/Buffer (class_id 0xFFFF0004)
+    // Perry buffers are raw BufferHeader pointers bitcast to f64 (not NaN-boxed),
+    // so the normal POINTER_TAG check doesn't work for them.
+    // We use a thread-local buffer registry to identify buffer pointers.
+    if class_id == crate::buffer::BUFFER_TYPE_ID {
+        // Check if NaN-boxed pointer
+        if jsval.is_pointer() {
+            let addr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+            if crate::buffer::is_registered_buffer(addr) {
+                return 1.0;
+            }
+        }
+        // Check if raw pointer (buffer values are bitcast, not NaN-boxed)
+        let top16 = (bits >> 48) as u16;
+        if top16 == 0 && bits >= 0x1000 {
+            if crate::buffer::is_registered_buffer(bits as usize) {
+                return 1.0;
+            }
+        }
+        return 0.0;
+    }
 
     // Only objects (pointers) can be instances of classes
     if !jsval.is_pointer() {
@@ -1459,6 +1509,45 @@ pub unsafe extern "C" fn js_native_call_method(
 
     let jsval = JSValue::from_bits(object.to_bits());
 
+    // Handle BigInt method calls (NaN-boxed with BIGINT_TAG 0x7FFA)
+    if jsval.is_bigint() {
+        let bigint_ptr = crate::bigint::clean_bigint_ptr(
+            (object.to_bits() & 0x0000_FFFF_FFFF_FFFF) as *const crate::bigint::BigIntHeader
+        );
+        match method_name {
+            "isZero" => {
+                let result = crate::bigint::js_bigint_is_zero(bigint_ptr);
+                return f64::from_bits(JSValue::bool(result != 0).bits());
+            }
+            "isNeg" | "isNegative" => {
+                let result = crate::bigint::js_bigint_is_negative(bigint_ptr);
+                return f64::from_bits(JSValue::bool(result != 0).bits());
+            }
+            "toNumber" => {
+                return crate::bigint::js_bigint_to_f64(bigint_ptr);
+            }
+            "toString" => {
+                let result_ptr = if args_len > 0 && !args_ptr.is_null() {
+                    let radix_f64 = *args_ptr;
+                    let radix = radix_f64 as i32;
+                    crate::bigint::js_bigint_to_string_radix(bigint_ptr, radix)
+                } else {
+                    crate::bigint::js_bigint_to_string(bigint_ptr)
+                };
+                return f64::from_bits(JSValue::string_ptr(result_ptr).bits());
+            }
+            "add" | "sub" | "mul" | "div" | "mod" | "umod" | "pow"
+            | "and" | "or" | "xor" | "shln" | "shrn" | "maskn"
+            | "eq" | "lt" | "lte" | "gt" | "gte" | "cmp"
+            | "fromTwos" | "toTwos" => {
+                return dispatch_bigint_binary_method(bigint_ptr, method_name, args_ptr, args_len);
+            }
+            _ => {
+                // Unknown BigInt method - fall through to general dispatch
+            }
+        }
+    }
+
     // Check for raw handle integer: Perry may bit-cast an i64 handle directly to f64,
     // producing a subnormal float (bits == handle_id, no NaN-box tag). Values 0 < bits < 0x100000
     // with no tag are raw handle IDs from Perry's integer-typed handle parameters.
@@ -1505,8 +1594,136 @@ pub unsafe extern "C" fn js_native_call_method(
 
         // Check if this is a native module namespace object (e.g., fs, os, path)
         let obj = jsval.as_pointer::<ObjectHeader>();
-        if (*obj).class_id == NATIVE_MODULE_CLASS_ID {
+        // Validate GcHeader to confirm this is actually an object before reading class_id
+        let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_OBJECT && (*obj).class_id == NATIVE_MODULE_CLASS_ID {
             return dispatch_native_module_method(obj, method_name, args_ptr, args_len);
+        }
+    }
+
+    // Check Map/Set registries for raw or NaN-boxed pointers.
+    // Maps/Sets are allocated with plain alloc (no GcHeader), so they can't be
+    // dispatched through the ObjectHeader path below.
+    {
+        let check_ptr = if jsval.is_pointer() {
+            (raw_bits & 0x0000_FFFF_FFFF_FFFF) as usize
+        } else if !object.is_nan() && raw_bits >= 0x100000 && (raw_bits >> 48) == 0 {
+            raw_bits as usize
+        } else {
+            0
+        };
+        if check_ptr >= 0x10000 {
+            if crate::map::is_registered_map(check_ptr) {
+                let map = check_ptr as *mut crate::map::MapHeader;
+                let args = if !args_ptr.is_null() && args_len > 0 {
+                    std::slice::from_raw_parts(args_ptr, args_len)
+                } else {
+                    &[]
+                };
+                return match method_name {
+                    "get" if !args.is_empty() => crate::map::js_map_get(map, args[0]),
+                    "set" if args.len() >= 2 => {
+                        let result = crate::map::js_map_set(map, args[0], args[1]);
+                        f64::from_bits(JSValue::pointer(result as *mut u8).bits())
+                    }
+                    "has" if !args.is_empty() => crate::map::js_map_has(map, args[0]) as f64,
+                    "delete" if !args.is_empty() => crate::map::js_map_delete(map, args[0]) as f64,
+                    "clear" => { crate::map::js_map_clear(map); f64::from_bits(crate::value::TAG_UNDEFINED) }
+                    "size" => crate::map::js_map_size(map) as f64,
+                    "entries" => f64::from_bits(JSValue::pointer(crate::map::js_map_entries(map) as *mut u8).bits()),
+                    "keys" => f64::from_bits(JSValue::pointer(crate::map::js_map_keys(map) as *mut u8).bits()),
+                    "values" => f64::from_bits(JSValue::pointer(crate::map::js_map_values(map) as *mut u8).bits()),
+                    "forEach" if !args.is_empty() => { crate::map::js_map_foreach(map, args[0]); f64::from_bits(crate::value::TAG_UNDEFINED) }
+                    _ => f64::from_bits(crate::value::TAG_UNDEFINED),
+                };
+            }
+            if crate::set::is_registered_set(check_ptr) {
+                let set = check_ptr as *mut crate::set::SetHeader;
+                let args = if !args_ptr.is_null() && args_len > 0 {
+                    std::slice::from_raw_parts(args_ptr, args_len)
+                } else {
+                    &[]
+                };
+                return match method_name {
+                    "add" if !args.is_empty() => {
+                        let result = crate::set::js_set_add(set, args[0]);
+                        f64::from_bits(JSValue::pointer(result as *mut u8).bits())
+                    }
+                    "has" if !args.is_empty() => crate::set::js_set_has(set, args[0]) as f64,
+                    "delete" if !args.is_empty() => crate::set::js_set_delete(set, args[0]) as f64,
+                    "clear" => { crate::set::js_set_clear(set); f64::from_bits(crate::value::TAG_UNDEFINED) }
+                    "size" => crate::set::js_set_size(set) as f64,
+                    _ => f64::from_bits(crate::value::TAG_UNDEFINED),
+                };
+            }
+        }
+    }
+
+    // Handle raw pointer values without NaN-box tags.
+    // Perry sometimes bitcasts I64 pointers to F64 without NaN-boxing (POINTER_TAG).
+    // These appear as subnormal floats with bits in the valid heap address range
+    // (0x100000 .. 0x0000_FFFF_FFFF_FFFF, upper 16 bits = 0).
+    if !jsval.is_pointer() && !object.is_nan() && raw_bits >= 0x100000 && (raw_bits >> 48) == 0 {
+        // Looks like a raw heap pointer — re-wrap as POINTER_TAG and retry
+        let reboxed = f64::from_bits(0x7FFD_0000_0000_0000u64 | raw_bits);
+        let reboxed_jsval = JSValue::from_bits(reboxed.to_bits());
+        let obj = reboxed_jsval.as_pointer::<ObjectHeader>();
+        // Validate GcHeader before accessing
+        let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_OBJECT {
+            // Check for native module namespace
+            if (*obj).class_id == NATIVE_MODULE_CLASS_ID {
+                return dispatch_native_module_method(obj, method_name, args_ptr, args_len);
+            }
+
+            // Field name scan on this object
+            let keys = (*obj).keys_array;
+            if !keys.is_null() {
+                let keys_ptr = keys as usize;
+                if keys_ptr >> 48 == 0 && keys_ptr >= 0x10000 {
+                    let key_count = crate::array::js_array_length(keys) as usize;
+                    if key_count <= 65536 {
+                        let method_key = crate::string::js_string_from_bytes(
+                            method_name.as_ptr(),
+                            method_name.len() as u32,
+                        );
+                        for i in 0..key_count {
+                            let key_val = crate::array::js_array_get(keys, i as u32);
+                            if key_val.is_string() {
+                                let stored_key = key_val.as_string_ptr();
+                                if crate::string::js_string_equals(method_key, stored_key) {
+                                    let field_val = js_object_get_field(obj as *mut _, i as u32);
+                                    if field_val.is_pointer() {
+                                        return crate::closure::js_native_call_value(
+                                            f64::from_bits(field_val.bits()),
+                                            args_ptr,
+                                            args_len,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Vtable lookup
+            let class_id = (*obj).class_id;
+            if class_id != 0 {
+                if let Ok(registry) = CLASS_VTABLE_REGISTRY.read() {
+                    if let Some(ref reg) = *registry {
+                        if let Some(vtable) = reg.get(&class_id) {
+                            if let Some(entry) = vtable.methods.get(method_name) {
+                                let this_i64 = raw_bits as i64;
+                                return call_vtable_method(
+                                    entry.func_ptr, this_i64,
+                                    args_ptr, args_len, entry.param_count,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1577,11 +1794,56 @@ pub unsafe extern "C" fn js_native_call_method(
     // try to find and call it
     if jsval.is_pointer() {
         let obj = jsval.as_pointer::<ObjectHeader>();
+
+        // Validate this is an ObjectHeader, not some other heap type.
+        // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
+        // for static/const objects that don't have GcHeaders.
+        let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        let gc_type = (*gc_header).obj_type;
+        if gc_type != crate::gc::GC_TYPE_OBJECT {
+            // Only accept object_type == 1 (OBJECT_TYPE_REGULAR)
+            let object_type = (*obj).object_type;
+            if object_type != crate::error::OBJECT_TYPE_REGULAR {
+                let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+                return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
+            }
+        }
+
+        // Check for CLOSURE_MAGIC at offset 12 — closures have different layout
+        let type_tag_at_12 = *((obj as *const u8).add(12) as *const u32);
+        if type_tag_at_12 == crate::closure::CLOSURE_MAGIC {
+            let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+            return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
+        }
+
         let keys = (*obj).keys_array;
 
         if !keys.is_null() {
+            // Validate keys_array pointer before dereferencing
+            let keys_ptr = keys as usize;
+            if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+                let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+                return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
+            }
+            // Detect ASCII-like pointer values (corrupted keys_array) — macOS only
+            // On Linux/Android, valid mmap pointers can have bytes 32-39 in ASCII range
+            #[cfg(target_os = "macos")]
+            {
+                let top_byte = (keys_ptr >> 32) as u8;
+                let byte4 = ((keys_ptr >> 24) & 0xFF) as u8;
+                if top_byte >= 0x20 && top_byte <= 0x7E && byte4 >= 0x20 && byte4 <= 0x7E {
+                    let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+                    return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
+                }
+            }
+
             // Search for the method in the object's fields
             let key_count = crate::array::js_array_length(keys) as usize;
+            // Sanity check key_count
+            if key_count > 65536 {
+                let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
+                return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
+            }
             let method_key = crate::string::js_string_from_bytes(
                 method_name.as_ptr(),
                 method_name.len() as u32,
@@ -2002,5 +2264,115 @@ mod tests {
         assert_eq!(f0.as_number(), 123.0);
 
         js_object_free(obj);
+    }
+}
+
+/// Dispatch BigInt binary methods (add, sub, mul, div, mod, etc.)
+/// Called from js_native_call_method when object is BIGINT_TAG.
+unsafe fn dispatch_bigint_binary_method(
+    a: *const crate::bigint::BigIntHeader,
+    method: &str,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    // Extract second operand from args (if any)
+    let b = if args_len > 0 && !args_ptr.is_null() {
+        let arg_f64 = *args_ptr;
+        let arg_jsval = JSValue::from_bits(arg_f64.to_bits());
+        if arg_jsval.is_bigint() {
+            crate::bigint::clean_bigint_ptr(
+                (arg_f64.to_bits() & 0x0000_FFFF_FFFF_FFFF) as *const crate::bigint::BigIntHeader
+            )
+        } else {
+            // Try to convert number to BigInt
+            crate::bigint::js_bigint_from_f64(arg_f64)
+        }
+    } else {
+        std::ptr::null()
+    };
+
+    match method {
+        // Binary arithmetic → returns BigInt
+        "add" => {
+            let result = crate::bigint::js_bigint_add(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "sub" => {
+            let result = crate::bigint::js_bigint_sub(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "mul" => {
+            let result = crate::bigint::js_bigint_mul(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "div" => {
+            let result = crate::bigint::js_bigint_div(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "mod" | "umod" => {
+            let result = crate::bigint::js_bigint_mod(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "pow" => {
+            let result = crate::bigint::js_bigint_pow(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "and" => {
+            let result = crate::bigint::js_bigint_and(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "or" => {
+            let result = crate::bigint::js_bigint_or(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "xor" => {
+            let result = crate::bigint::js_bigint_xor(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "shln" => {
+            let result = crate::bigint::js_bigint_shl(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "shrn" => {
+            let result = crate::bigint::js_bigint_shr(a, b);
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        "maskn" => {
+            // maskn(bits) — mask to lowest N bits
+            let result = crate::bigint::js_bigint_and(a, b); // approximate
+            return f64::from_bits(JSValue::bigint_ptr(result).bits());
+        }
+        // Comparison → returns boolean/number
+        "eq" => {
+            let result = crate::bigint::js_bigint_eq(a, b);
+            return f64::from_bits(JSValue::bool(result).bits());
+        }
+        "lt" => {
+            let result = crate::bigint::js_bigint_cmp(a, b);
+            return f64::from_bits(JSValue::bool(result < 0).bits());
+        }
+        "lte" => {
+            let result = crate::bigint::js_bigint_cmp(a, b);
+            return f64::from_bits(JSValue::bool(result <= 0).bits());
+        }
+        "gt" => {
+            let result = crate::bigint::js_bigint_cmp(a, b);
+            return f64::from_bits(JSValue::bool(result > 0).bits());
+        }
+        "gte" => {
+            let result = crate::bigint::js_bigint_cmp(a, b);
+            return f64::from_bits(JSValue::bool(result >= 0).bits());
+        }
+        "cmp" => {
+            let result = crate::bigint::js_bigint_cmp(a, b);
+            return result as f64;
+        }
+        "fromTwos" | "toTwos" => {
+            // TODO: implement proper two's complement conversion
+            return f64::from_bits(JSValue::bigint_ptr(a as *mut crate::bigint::BigIntHeader).bits());
+        }
+        _ => {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
     }
 }

@@ -4,6 +4,10 @@ use std::cell::RefCell;
 use crate::jni_bridge;
 use crate::widgets;
 
+extern "C" {
+    fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+}
+
 thread_local! {
     static PENDING_CONFIG: RefCell<Option<AppConfig>> = RefCell::new(None);
     static PENDING_BODY: RefCell<Option<i64>> = RefCell::new(None);
@@ -50,39 +54,87 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
     1 // Single app handle
 }
 
+/// Global body handle — set from any thread, read from any thread.
+/// Workaround: Perry's App() intrinsic extracts the body handle using
+/// js_nanbox_get_pointer, which returns 0 for NaN-boxed integers (widget handles
+/// are small integers, not heap pointers). We store the last widget added via
+/// widgetAddChild as a fallback.
+static GLOBAL_BODY: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
 /// Set the root widget (body) of the app.
 pub fn app_set_body(_app_handle: i64, root_handle: i64) {
+    unsafe {
+        __android_log_print(
+            3, b"PerryApp\0".as_ptr(),
+            b"app_set_body: root_handle=%lld\0".as_ptr(),
+            root_handle,
+        );
+    }
+    if root_handle > 0 {
+        GLOBAL_BODY.store(root_handle, std::sync::atomic::Ordering::Relaxed);
+    }
     PENDING_BODY.with(|b| {
         *b.borrow_mut() = Some(root_handle);
     });
+}
+
+/// Called from widgetClearChildren to track which handle is the root.
+/// The first widget that has clearChildren called on it is likely the root.
+pub fn track_root_candidate(handle: i64) {
+    // Only set if not already set by app_set_body
+    let current = GLOBAL_BODY.load(std::sync::atomic::Ordering::Relaxed);
+    if current == 0 {
+        GLOBAL_BODY.store(handle, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Attach the root widget to the Activity's content view.
 /// Called from the native init thread after all widgets are built.
 /// Posts to the UI thread to add the root view to the FrameLayout.
 fn attach_root_to_activity() {
-    PENDING_BODY.with(|b| {
-        if let Some(root_handle) = b.borrow().as_ref() {
-            let root_handle = *root_handle;
+    unsafe {
+        __android_log_print(
+            3, b"PerryApp\0".as_ptr(),
+            b"attach_root_to_activity: called\0".as_ptr(),
+        );
+    }
+    // Get root handle: prefer PENDING_BODY, fall back to GLOBAL_BODY
+    let mut root_handle = PENDING_BODY.with(|b| {
+        b.borrow().unwrap_or(0)
+    });
+    // If body handle is invalid (0), use the global fallback
+    if root_handle <= 0 {
+        root_handle = GLOBAL_BODY.load(std::sync::atomic::Ordering::Relaxed);
+    }
+    unsafe {
+        __android_log_print(
+            3, b"PerryApp\0".as_ptr(),
+            b"attach_root_to_activity: final root_handle=%lld\0".as_ptr(),
+            root_handle,
+        );
+    }
+    if root_handle > 0 {
+        if let Some(root_ref) = widgets::get_widget(root_handle) {
             let mut env = jni_bridge::get_env();
-
-            // Get the root View jobject
-            if let Some(root_ref) = widgets::get_widget(root_handle) {
-                // Call PerryBridge.setContentView(View) on UI thread
-                let root_obj = root_ref.as_obj();
-                let bridge_class = jni_bridge::with_cache(|c| {
-                    env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
-                });
-                let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
-                let _ = env.call_static_method(
-                    bridge_cls,
-                    "setContentView",
-                    "(Landroid/view/View;)V",
-                    &[JValue::Object(root_obj)],
+            let root_obj = root_ref.as_obj();
+            let bridge_class = jni_bridge::with_cache(|c| {
+                env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+            });
+            let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+            let _ = env.call_static_method(
+                bridge_cls,
+                "setContentView",
+                "(Landroid/view/View;)V",
+                &[JValue::Object(root_obj)],
+            );
+            unsafe {
+                __android_log_print(
+                    3, b"PerryApp\0".as_ptr(),
+                    b"attach_root_to_activity: setContentView called\0".as_ptr(),
                 );
             }
         }
-    });
+    }
 }
 
 /// Run the app event loop.
@@ -90,6 +142,12 @@ fn attach_root_to_activity() {
 /// This just attaches the root widget to the Activity and returns.
 /// Unlike macOS/iOS, this does NOT block — the Activity keeps running.
 pub fn app_run(_app_handle: i64) {
+    unsafe {
+        __android_log_print(
+            3, b"PerryApp\0".as_ptr(),
+            b"app_run: called\0".as_ptr(),
+        );
+    }
     // Attach the root widget to the Activity
     attach_root_to_activity();
 

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.169
+**Current Version:** 0.2.170
 
 ## Workflow Requirements
 
@@ -152,6 +152,18 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.170
+- **FFI safety**: `catch_callback_panic` helper wraps all ObjC callback methods (timer, pump, shortcut, button, textfield, securefield, picker, toggle, slider, toolbar, table, menu, click) in `catch_unwind` — prevents `abort()` from Rust panics crossing FFI boundary
+- **Accessibility**: Button and Text widgets now set `setAccessibilityLabel:` for UI automation tools
+- **BigInt bitwise ops**: `js_dynamic_shr`, `js_dynamic_shl`, `js_dynamic_bitand`, `js_dynamic_bitor`, `js_dynamic_bitxor`, `js_dynamic_bitnot` — full BigInt + Number support
+- **Button enhancements**: `setImage` (SF Symbols), `setContentTintColor`, `setImagePosition` — 3 new FFI functions
+- **ScrollView**: pull-to-refresh (`setRefreshControl`/`endRefreshing`), flipped coordinate system for top-origin layout
+- **Widget tree**: `removeChild`, `reorderChild` FFI functions for dynamic child management
+- **File dialog**: `openFolderDialog` for directory selection
+- **Closure ref collection**: `collect_local_refs_expr`/`collect_local_refs_stmt` now public for cross-crate use
+- **Cross-platform**: Android canvas, picker, scrollview, button, callback improvements; iOS button/scrollview enhancements
+- **Fetch**: extended HTTP client support in stdlib
 
 ### v0.2.169
 - Type inference: `infer_type_from_expr()` infers types from literals, binary ops, variable propagation, known method returns, and user-defined function return types — eliminates `Type::Any` for common patterns (`let x = 5` → `Number`, `let s = "hi".trim()` → `String`, etc.)

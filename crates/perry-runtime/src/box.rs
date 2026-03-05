@@ -5,6 +5,10 @@
 //! both scopes share the same storage location.
 
 use std::alloc::{alloc, Layout};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static BOX_GET_NULL_COUNT: AtomicU64 = AtomicU64::new(0);
+static BOX_SET_NULL_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// A box is simply a heap-allocated f64
 #[repr(C)]
@@ -19,7 +23,8 @@ pub extern "C" fn js_box_alloc(initial_value: f64) -> *mut Box {
         let layout = Layout::new::<Box>();
         let ptr = alloc(layout) as *mut Box;
         if ptr.is_null() {
-            panic!("Failed to allocate box");
+            eprintln!("[PERRY WARN] js_box_alloc: allocation failed — returning null");
+            return std::ptr::null_mut();
         }
         (*ptr).value = initial_value;
         ptr
@@ -31,7 +36,7 @@ pub extern "C" fn js_box_alloc(initial_value: f64) -> *mut Box {
 pub extern "C" fn js_box_get(ptr: *mut Box) -> f64 {
     unsafe {
         if ptr.is_null() {
-            panic!("Null box pointer");
+            return f64::NAN;
         }
         (*ptr).value
     }
@@ -42,7 +47,20 @@ pub extern "C" fn js_box_get(ptr: *mut Box) -> f64 {
 pub extern "C" fn js_box_set(ptr: *mut Box, value: f64) {
     unsafe {
         if ptr.is_null() {
-            panic!("Null box pointer");
+            let count = BOX_SET_NULL_COUNT.fetch_add(1, Ordering::Relaxed);
+            if count < 5 {
+                let ra: *const u8;
+                #[cfg(target_arch = "aarch64")]
+                {
+                    core::arch::asm!("mov {}, x30", out(reg) ra, options(nomem, nostack));
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    ra = std::ptr::null();
+                }
+                eprintln!("[PERRY WARN] js_box_set: null box pointer #{} (return addr: {:?}, value bits: 0x{:016x}) — ignoring", count, ra, value.to_bits());
+            }
+            return;
         }
         (*ptr).value = value;
     }

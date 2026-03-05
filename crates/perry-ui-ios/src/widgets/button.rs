@@ -165,3 +165,72 @@ pub fn set_title(handle: i64, title_ptr: *const u8) {
         }
     }
 }
+
+thread_local! {
+    static TAP_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+}
+
+pub struct PerryTapTargetIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryTapTarget"]
+    #[ivars = PerryTapTargetIvars]
+    pub struct PerryTapTarget;
+
+    impl PerryTapTarget {
+        #[unsafe(method(handleTap:))]
+        fn handle_tap(&self, _sender: &AnyObject) {
+            let key = self.ivars().callback_key.get();
+            TAP_CALLBACKS.with(|cbs| {
+                if let Some(&closure_f64) = cbs.borrow().get(&key) {
+                    unsafe {
+                        dispatch_async_f(
+                            &_dispatch_main_q as *const _ as *const std::ffi::c_void,
+                            closure_f64.to_bits() as *mut std::ffi::c_void,
+                            button_callback_trampoline,
+                        );
+                    }
+                }
+            });
+        }
+    }
+);
+
+impl PerryTapTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryTapTargetIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Attach a single-tap gesture recognizer to any widget view.
+pub fn set_on_tap(handle: i64, callback: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let target = PerryTapTarget::new();
+            let target_addr = Retained::as_ptr(&target) as usize;
+            target.ivars().callback_key.set(target_addr);
+
+            TAP_CALLBACKS.with(|cbs| {
+                cbs.borrow_mut().insert(target_addr, callback);
+            });
+
+            let sel = Sel::register(c"handleTap:");
+            let gr_cls = objc2::runtime::AnyClass::get(c"UITapGestureRecognizer").unwrap();
+            let recognizer: *mut AnyObject = msg_send![gr_cls, alloc];
+            let recognizer: *mut AnyObject = msg_send![
+                recognizer, initWithTarget: &*target, action: sel
+            ];
+            let _: () = msg_send![recognizer, setNumberOfTapsRequired: 1i64];
+            let _: () = msg_send![&*view, setUserInteractionEnabled: true];
+            let _: () = msg_send![&*view, addGestureRecognizer: recognizer];
+
+            std::mem::forget(target);
+        }
+    }
+}

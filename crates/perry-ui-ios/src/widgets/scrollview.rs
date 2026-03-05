@@ -1,7 +1,70 @@
 use objc2::rc::Retained;
-use objc2::msg_send;
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass};
 use objc2_ui_kit::{UIScrollView, UIView};
+use objc2_foundation::NSObject;
 use objc2_core_foundation::CGPoint;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+extern "C" {
+    fn js_closure_call0(closure: *const u8) -> f64;
+    fn js_nanbox_get_pointer(value: f64) -> i64;
+    static _dispatch_main_q: std::ffi::c_void;
+    fn dispatch_async_f(
+        queue: *const std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        work: unsafe extern "C" fn(*mut std::ffi::c_void),
+    );
+}
+
+unsafe extern "C" fn refresh_callback_trampoline(context: *mut std::ffi::c_void) {
+    let closure_f64 = f64::from_bits(context as u64);
+    let closure_ptr = js_nanbox_get_pointer(closure_f64);
+    js_closure_call0(closure_ptr as *const u8);
+}
+
+thread_local! {
+    static REFRESH_CALLBACKS: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+}
+
+pub struct PerryRefreshTargetIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryRefreshTarget"]
+    #[ivars = PerryRefreshTargetIvars]
+    pub struct PerryRefreshTarget;
+
+    impl PerryRefreshTarget {
+        #[unsafe(method(handleRefresh:))]
+        fn handle_refresh(&self, _sender: &AnyObject) {
+            let key = self.ivars().callback_key.get();
+            REFRESH_CALLBACKS.with(|cbs| {
+                if let Some(&closure_f64) = cbs.borrow().get(&key) {
+                    unsafe {
+                        dispatch_async_f(
+                            &_dispatch_main_q as *const _ as *const std::ffi::c_void,
+                            closure_f64.to_bits() as *mut std::ffi::c_void,
+                            refresh_callback_trampoline,
+                        );
+                    }
+                }
+            });
+        }
+    }
+);
+
+impl PerryRefreshTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryRefreshTargetIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 /// Create a UIScrollView. Returns widget handle.
 pub fn create() -> i64 {
@@ -97,6 +160,40 @@ pub fn set_offset(scroll_handle: i64, offset: f64) {
         unsafe {
             let point = CGPoint::new(0.0, offset);
             let _: () = msg_send![&*scroll_view, setContentOffset: point, animated: true];
+        }
+    }
+}
+
+/// Attach a UIRefreshControl to a UIScrollView. The callback is invoked when the user pulls to refresh.
+pub fn set_refresh_control(scroll_handle: i64, callback: f64) {
+    if let Some(scroll_view) = super::get_widget(scroll_handle) {
+        unsafe {
+            let target = PerryRefreshTarget::new();
+            let target_addr = Retained::as_ptr(&target) as usize;
+            target.ivars().callback_key.set(target_addr);
+            REFRESH_CALLBACKS.with(|cbs| {
+                cbs.borrow_mut().insert(target_addr, callback);
+            });
+
+            let sel = Sel::register(c"handleRefresh:");
+            let rc_cls = objc2::runtime::AnyClass::get(c"UIRefreshControl").unwrap();
+            let rc: *mut AnyObject = msg_send![rc_cls, new];
+            let _: () = msg_send![rc, addTarget: &*target, action: sel, forControlEvents: 1u64 << 12]; // UIControlEventValueChanged
+            let _: () = msg_send![&*scroll_view, setRefreshControl: rc];
+
+            std::mem::forget(target); // keep alive
+        }
+    }
+}
+
+/// End the refresh animation on a UIScrollView's UIRefreshControl.
+pub fn end_refreshing(scroll_handle: i64) {
+    if let Some(scroll_view) = super::get_widget(scroll_handle) {
+        unsafe {
+            let rc: *const AnyObject = msg_send![&*scroll_view, refreshControl];
+            if !rc.is_null() {
+                let _: () = msg_send![rc, endRefreshing];
+            }
         }
     }
 }

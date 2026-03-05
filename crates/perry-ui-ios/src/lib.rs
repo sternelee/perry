@@ -275,6 +275,16 @@ pub extern "C" fn perry_ui_scrollview_set_offset(scroll_handle: i64, offset: f64
     widgets::scrollview::set_offset(scroll_handle, offset);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_set_refresh_control(scroll_handle: i64, callback: f64) {
+    widgets::scrollview::set_refresh_control(scroll_handle, callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_scrollview_end_refreshing(scroll_handle: i64) {
+    widgets::scrollview::end_refreshing(scroll_handle);
+}
+
 // =============================================================================
 // Phase A.5: Context Menus, File Dialog & Window Sizing
 // =============================================================================
@@ -577,6 +587,12 @@ pub extern "C" fn perry_ui_widget_set_control_size(handle: i64, size: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_on_hover(handle: i64, callback: f64) {
     widgets::set_on_hover(handle, callback);
+}
+
+/// Set a single-tap handler for any widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_on_click(handle: i64, callback: f64) {
+    widgets::set_on_click(handle, callback);
 }
 
 /// Set a double-click/tap handler for a widget.

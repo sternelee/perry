@@ -245,23 +245,21 @@ pub fn keychain_get(key_ptr: *const u8) -> f64 {
         &[JValue::Object(&jkey), JValue::Object(&jni::objects::JObject::null())],
     );
 
-    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
-
+    let mut ret_val = f64::from_bits(0x7FFC_0000_0000_0001u64); // undefined
     if let Ok(val) = result {
         if let Ok(obj) = val.l() {
             if !obj.is_null() {
-                let mut env2 = jni_bridge::get_env();
                 let jstr: jni::objects::JString = obj.into();
-                let s: String = env2.get_string(&jstr).expect("get string").into();
+                let s: String = env.get_string(&jstr).expect("get string").into();
                 let bytes = s.as_bytes();
                 let ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len()) };
-                return unsafe { js_nanbox_string(ptr) };
+                ret_val = unsafe { js_nanbox_string(ptr) };
             }
         }
     }
 
-    // Return undefined
-    f64::from_bits(0x7FFC_0000_0000_0001u64)
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    ret_val
 }
 
 /// Delete a value from the keychain.

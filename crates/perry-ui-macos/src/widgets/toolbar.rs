@@ -52,16 +52,18 @@ define_class!(
     impl PerryToolbarTarget {
         #[unsafe(method(toolbarItemClicked:))]
         fn toolbar_item_clicked(&self, _sender: &AnyObject) {
-            let key = self.ivars().callback_key.get();
-            let closure_f64 = TOOLBAR_CALLBACKS.with(|cbs| {
-                cbs.borrow().get(&key).copied()
-            });
-            if let Some(closure_f64) = closure_f64 {
-                let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                unsafe {
-                    js_closure_call0(closure_ptr as *const u8);
+            crate::catch_callback_panic("toolbar callback", std::panic::AssertUnwindSafe(|| {
+                let key = self.ivars().callback_key.get();
+                let closure_f64 = TOOLBAR_CALLBACKS.with(|cbs| {
+                    cbs.borrow().get(&key).copied()
+                });
+                if let Some(closure_f64) = closure_f64 {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
                 }
-            }
+            }));
         }
     }
 );

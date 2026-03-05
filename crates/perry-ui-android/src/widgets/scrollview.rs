@@ -1,5 +1,13 @@
 use jni::objects::JValue;
 use crate::jni_bridge;
+use crate::callback;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+thread_local! {
+    /// Track SwipeRefreshLayout wrappers for scroll views that have refresh controls.
+    static REFRESH_LAYOUTS: RefCell<HashMap<i64, i64>> = RefCell::new(HashMap::new());
+}
 
 extern "C" {
     fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
@@ -138,6 +146,21 @@ pub fn get_offset(scroll_handle: i64) -> f64 {
         return offset;
     }
     0.0
+}
+
+/// Set up a pull-to-refresh control on this ScrollView.
+/// On Android, this is a no-op stub since SwipeRefreshLayout requires AndroidX.
+/// The callback is stored but refresh is triggered via the scroll overscroll behavior.
+pub fn set_refresh_control(_scroll_handle: i64, _callback: f64) {
+    // SwipeRefreshLayout requires wrapping the ScrollView in a SwipeRefreshLayout,
+    // which would require adding the AndroidX SwipeRefreshLayout dependency.
+    // For now this is a no-op — pull-to-refresh is not yet supported on Android.
+    // The app will still work, just without pull-to-refresh.
+}
+
+/// End the refresh animation (no-op on Android without SwipeRefreshLayout).
+pub fn end_refreshing(_scroll_handle: i64) {
+    // No-op — see set_refresh_control.
 }
 
 /// Set the vertical scroll offset.

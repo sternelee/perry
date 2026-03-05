@@ -5,8 +5,22 @@
 //! without changing the MapHeader address.
 
 use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ptr;
 use crate::string::StringHeader;
+
+thread_local! {
+    static MAP_REGISTRY: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+fn register_map(ptr: *mut MapHeader) {
+    MAP_REGISTRY.with(|r| r.borrow_mut().insert(ptr as usize));
+}
+
+pub fn is_registered_map(addr: usize) -> bool {
+    MAP_REGISTRY.with(|r| r.borrow().contains(&addr))
+}
 
 /// Strip NaN-boxing tags from a map pointer (defensive guard).
 /// If the pointer has NaN-boxing tags in the upper 16 bits, strip them.
@@ -166,6 +180,9 @@ pub extern "C" fn js_map_alloc(capacity: u32) -> *mut MapHeader {
         (*ptr).size = 0;
         (*ptr).capacity = cap;
         (*ptr).entries = entries;
+
+        // Register in map registry for runtime type detection
+        register_map(ptr);
 
         ptr
     }

@@ -110,7 +110,8 @@ pub extern "C" fn js_bigint_from_f64(value: f64) -> *mut BigIntHeader {
             unsafe {
                 let len = (*ptr).length as u32;
                 let data = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
-                return js_bigint_from_string(data, len);
+                let result = js_bigint_from_string(data, len);
+                return result;
             }
         }
         return js_bigint_from_i64(0);
@@ -129,11 +130,16 @@ pub extern "C" fn js_bigint_from_f64(value: f64) -> *mut BigIntHeader {
 /// Create a BigInt from a string (decimal or hex with 0x prefix)
 #[no_mangle]
 pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIntHeader {
-    let ptr = bigint_alloc();
     unsafe {
-
         let bytes = std::slice::from_raw_parts(data, len as usize);
         let s = std::str::from_utf8_unchecked(bytes);
+
+        // Handle negative prefix
+        let (is_negative, s) = if s.starts_with('-') {
+            (true, &s[1..])
+        } else {
+            (false, s)
+        };
 
         // Parse the string
         let (is_hex, s) = if s.starts_with("0x") || s.starts_with("0X") {
@@ -142,6 +148,7 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
             (false, s)
         };
 
+        let ptr = bigint_alloc();
         let mut limbs = ZERO_LIMBS;
 
         if is_hex {
@@ -180,7 +187,137 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
         }
 
         (*ptr).limbs = limbs;
+
+        if is_negative && !limbs.iter().all(|&l| l == 0) {
+            return js_bigint_neg(ptr);
+        }
         ptr
+    }
+}
+
+/// Create a BigInt from a string with a given radix (for BN.js compatibility)
+/// Handles decimal (10), hex (16), and other bases.
+#[no_mangle]
+pub extern "C" fn js_bigint_from_string_radix(data: *const u8, len: u32, radix: i32) -> *mut BigIntHeader {
+    if data.is_null() || len == 0 {
+        // Null input
+        return js_bigint_from_i64(0);
+    }
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data, len as usize);
+        let s = std::str::from_utf8_unchecked(bytes);
+        // Debug removed
+
+        // Handle negative
+        let (is_negative, s) = if s.starts_with('-') {
+            (true, &s[1..])
+        } else {
+            (false, s)
+        };
+
+        // Strip 0x prefix for hex
+        let s = if radix == 16 && (s.starts_with("0x") || s.starts_with("0X")) {
+            &s[2..]
+        } else {
+            s
+        };
+
+        let ptr = bigint_alloc();
+        let mut limbs = ZERO_LIMBS;
+        let radix = radix as u64;
+
+        if radix == 16 {
+            // Optimized hex parsing
+            let mut chars = s.chars().rev();
+            for limb in limbs.iter_mut() {
+                let mut value = 0u64;
+                for i in 0..16 {
+                    if let Some(c) = chars.next() {
+                        let digit = match c {
+                            '0'..='9' => c as u64 - '0' as u64,
+                            'a'..='f' => c as u64 - 'a' as u64 + 10,
+                            'A'..='F' => c as u64 - 'A' as u64 + 10,
+                            _ => continue,
+                        };
+                        value |= digit << (i * 4);
+                    } else {
+                        break;
+                    }
+                }
+                *limb = value;
+            }
+        } else {
+            // General radix parsing using long multiplication
+            for c in s.chars() {
+                let digit = match c {
+                    '0'..='9' => (c as u64) - ('0' as u64),
+                    'a'..='z' => (c as u64) - ('a' as u64) + 10,
+                    'A'..='Z' => (c as u64) - ('A' as u64) + 10,
+                    _ => continue,
+                };
+                if digit >= radix { continue; }
+                let mut carry = digit;
+                for limb in limbs.iter_mut() {
+                    let product = (*limb as u128) * (radix as u128) + carry as u128;
+                    *limb = product as u64;
+                    carry = (product >> 64) as u64;
+                }
+            }
+        }
+
+        (*ptr).limbs = limbs;
+
+        if is_negative && !limbs.iter().all(|&l| l == 0) {
+            // Negate: two's complement
+            return js_bigint_neg(ptr);
+        }
+        ptr
+    }
+}
+
+/// Convert BigInt to a byte array (big-endian, for BN.toArrayLike/toArray)
+/// Returns a buffer of the specified length, zero-padded on the left.
+#[no_mangle]
+pub extern "C" fn js_bigint_to_buffer(a: *const BigIntHeader, length: i32) -> *mut crate::buffer::BufferHeader {
+    let a = clean_bigint_ptr(a);
+    let length = if length <= 0 { 32 } else { length as usize };
+
+    let result = crate::buffer::buffer_alloc(length as u32);
+    unsafe {
+        (*result).length = length as u32;
+        let data = crate::buffer::buffer_data_mut(result);
+
+        if !a.is_null() {
+            // Extract bytes from limbs (little-endian in memory)
+            let limbs = &(*a).limbs;
+            let mut all_bytes = Vec::with_capacity(64);
+            for limb in limbs.iter() {
+                all_bytes.extend_from_slice(&limb.to_le_bytes());
+            }
+            // Write in big-endian: pad on left with zeros
+            let significant = all_bytes.len().min(length);
+            // Zero-fill the output
+            std::ptr::write_bytes(data, 0, length);
+            // Copy bytes in big-endian order
+            for i in 0..significant {
+                *data.add(length - 1 - i) = all_bytes[i];
+            }
+        } else {
+            std::ptr::write_bytes(data, 0, length);
+        }
+    }
+    result
+}
+
+/// Check if BigInt is negative (MSB set in two's complement)
+#[no_mangle]
+pub extern "C" fn js_bigint_is_negative(a: *const BigIntHeader) -> i32 {
+    let a = clean_bigint_ptr(a);
+    if a.is_null() { return 0; }
+    unsafe {
+        // In two's complement, negative numbers have MSB set in highest limb
+        let msb = (*a).limbs[7];
+        if msb & (1u64 << 63) != 0 { 1 } else { 0 }
     }
 }
 
@@ -211,13 +348,10 @@ pub extern "C" fn js_bigint_neg(a: *const BigIntHeader) -> *mut BigIntHeader {
 #[no_mangle]
 pub extern "C" fn js_bigint_is_zero(a: *const BigIntHeader) -> i32 {
     let a = clean_bigint_ptr(a);
-    if a.is_null() { return 1; } // null/undefined treated as zero
+    if a.is_null() { return 1; }
     unsafe {
-        let limbs = (*a).limbs;
         for i in 0..BIGINT_LIMBS {
-            if limbs[i] != 0 {
-                return 0;
-            }
+            if (*a).limbs[i] != 0 { return 0; }
         }
         1
     }
@@ -226,6 +360,7 @@ pub extern "C" fn js_bigint_is_zero(a: *const BigIntHeader) -> i32 {
 /// Add two BigInts
 #[no_mangle]
 pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     if a.is_null() && b.is_null() { return bigint_alloc(); }
@@ -250,6 +385,7 @@ pub extern "C" fn js_bigint_add(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Subtract two BigInts (a - b)
 #[no_mangle]
 pub extern "C" fn js_bigint_sub(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
@@ -382,6 +518,7 @@ pub extern "C" fn js_bigint_div(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Modulo of two BigInts (a % b) — result has sign of dividend (like JavaScript)
 #[no_mangle]
 pub extern "C" fn js_bigint_mod(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
@@ -512,6 +649,7 @@ pub extern "C" fn js_bigint_shl(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Note: b is interpreted as a u64 (only lower 64 bits are used)
 #[no_mangle]
 pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
@@ -552,6 +690,7 @@ pub extern "C" fn js_bigint_shr(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Bitwise AND of two BigInts (a & b)
 #[no_mangle]
 pub extern "C" fn js_bigint_and(a: *const BigIntHeader, b: *const BigIntHeader) -> *mut BigIntHeader {
+
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     let ptr = bigint_alloc();
@@ -705,6 +844,47 @@ fn limbs_to_decimal_string(limbs: &[u64; BIGINT_LIMBS]) -> String {
     }
 }
 
+fn limbs_to_radix_string(limbs: &[u64; BIGINT_LIMBS], radix: u32) -> String {
+    let radix = if radix < 2 || radix > 36 { 10 } else { radix };
+    if radix == 10 {
+        return limbs_to_decimal_string(limbs);
+    }
+
+    let mut digits = Vec::new();
+
+    if *limbs == ZERO_LIMBS {
+        return "0".to_string();
+    }
+
+    let negative = is_negative(limbs);
+    let mut temp = if negative {
+        negate_limbs(limbs)
+    } else {
+        *limbs
+    };
+
+    let radix_u128 = radix as u128;
+    while temp != ZERO_LIMBS {
+        let mut remainder = 0u128;
+        for i in (0..BIGINT_LIMBS).rev() {
+            let dividend = (remainder << 64) + temp[i] as u128;
+            temp[i] = (dividend / radix_u128) as u64;
+            remainder = dividend % radix_u128;
+        }
+        let digit = remainder as u8;
+        let ch = if digit < 10 { b'0' + digit } else { b'a' + (digit - 10) };
+        digits.push(ch as char);
+    }
+
+    digits.reverse();
+    let s: String = digits.into_iter().collect();
+    if negative {
+        format!("-{}", s)
+    } else {
+        s
+    }
+}
+
 /// Convert BigInt to string
 #[no_mangle]
 pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::string::StringHeader {
@@ -713,6 +893,18 @@ pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::str
             return std::ptr::null_mut();
         }
         let s = limbs_to_decimal_string(&(*a).limbs);
+        crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
+    }
+}
+
+/// Convert BigInt to string with radix
+#[no_mangle]
+pub extern "C" fn js_bigint_to_string_radix(a: *const BigIntHeader, radix: i32) -> *mut crate::string::StringHeader {
+    unsafe {
+        if a.is_null() || (a as usize) < 0x10000 || (a as usize) >> 48 != 0 {
+            return std::ptr::null_mut();
+        }
+        let s = limbs_to_radix_string(&(*a).limbs, radix as u32);
         crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
     }
 }

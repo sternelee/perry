@@ -963,8 +963,14 @@ fn resolve_import(
     // Handle node_modules (bare specifiers)
     let (package_name, subpath) = parse_package_specifier(import_source);
 
-    // Find node_modules starting from importer, then project root
-    let search_paths = [importer_path.parent(), Some(project_root)];
+    // For compile_packages, search project root first to prefer ESM versions
+    // over nested CJS copies (e.g., @solana/web3.js/node_modules/bs58 is CJS,
+    // but the top-level node_modules/bs58 has ESM support)
+    let search_paths = if compile_packages.contains(&package_name) {
+        [Some(project_root), importer_path.parent()]
+    } else {
+        [importer_path.parent(), Some(project_root)]
+    };
 
     for start in search_paths.iter().flatten() {
         if let Some(node_modules) = find_node_modules(start) {
@@ -1116,7 +1122,16 @@ fn collect_modules(
     let is_in_node_modules = canonical.to_string_lossy().contains("node_modules");
     let is_perry_native = is_in_node_modules && is_in_perry_native_package(&canonical);
     let is_in_compiled_pkg = (is_in_node_modules && is_in_compile_package(&canonical, &ctx.compile_packages))
-        || ctx.compile_package_dirs.values().any(|dir| canonical.starts_with(dir));
+        || ctx.compile_package_dirs.values().any(|dir| {
+            if canonical.starts_with(dir) {
+                // Exclude nested node_modules/ inside the compiled package
+                // (e.g., @solana/web3.js/node_modules/bs58/ is NOT part of @solana/web3.js)
+                let relative = canonical.strip_prefix(dir).unwrap_or(canonical.as_ref());
+                !relative.to_string_lossy().contains("node_modules/")
+            } else {
+                false
+            }
+        });
     let should_use_js_runtime = (is_js_file(&canonical) && !is_in_compiled_pkg)
         || is_declaration_file(&canonical)
         || is_json
@@ -2052,6 +2067,26 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 exported_func_return_types.insert((path_str.clone(), func.name.clone()), func.return_type.clone());
             }
         }
+        // Also register exported_functions aliases (e.g., "default" → actual function)
+        // This handles `export default funcName` where the export name differs from the function name
+        for (export_name, func_id) in &hir_module.exported_functions {
+            if let Some(func) = hir_module.functions.iter().find(|f| f.id == *func_id) {
+                let key = (path_str.clone(), export_name.clone());
+                exported_func_param_counts.entry(key.clone()).or_insert(func.params.len());
+                exported_func_return_types.entry(key).or_insert_with(|| func.return_type.clone());
+            }
+        }
+        // Debug: print superstruct exports
+        if path_str.contains("superstruct") {
+            eprintln!("[DEBUG] superstruct: {} functions ({} exported), {} exported_functions entries",
+                hir_module.functions.len(),
+                hir_module.functions.iter().filter(|f| f.is_exported).count(),
+                hir_module.exported_functions.len());
+            for (name, _fid) in &hir_module.exported_functions {
+                eprintln!("[DEBUG]   exported_function: {}", name);
+            }
+        }
+
         // Also scan init statements for exported closures (arrow functions assigned to const)
         // These are in exported_objects but not in functions, so they need param counts too
         let exported_set: std::collections::HashSet<&String> = hir_module.exported_objects.iter().collect();
@@ -2471,7 +2506,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         if let Some(exports) = all_module_exports.get(&resolved_path_str) {
                             for (export_name, origin_path) in exports {
                                 let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
-                                let _ = compiler.pre_declare_import_export(export_name, &origin_prefix);
+                                let _ = compiler.pre_declare_import_export(export_name, export_name, &origin_prefix);
 
                                 // Also handle functions if re-exported
                                 let key = (origin_path.clone(), export_name.clone());
@@ -2498,7 +2533,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
                 let (local_name, exported_name) = match spec {
                     perry_hir::ImportSpecifier::Named { imported, local } => (local.clone(), imported.clone()),
-                    perry_hir::ImportSpecifier::Default { local } => (local.clone(), local.clone()),
+                    perry_hir::ImportSpecifier::Default { local } => (local.clone(), "default".to_string()),
                     perry_hir::ImportSpecifier::Namespace { .. } => unreachable!(),
                 };
 
@@ -2535,6 +2570,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 if let Some(&param_count) = exported_func_param_counts.get(&key) {
                     compiler.register_imported_func_param_count(exported_name.clone(), param_count);
                     let _ = compiler.pre_declare_import_wrapper(&exported_name, &effective_prefix, param_count);
+                    // When local name differs (e.g., default imports), also register wrapper under local name
+                    if local_name != exported_name {
+                        compiler.register_imported_func_param_count(local_name.clone(), param_count);
+                        compiler.register_import_wrapper_alias(&local_name, &exported_name, param_count);
+                    }
                 }
                 // Register the imported function's return type for await type resolution
                 if let Some(return_type) = exported_func_return_types.get(&key) {
@@ -2542,7 +2582,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 }
 
                 // Pre-declare scoped export global for this import
-                let _ = compiler.pre_declare_import_export(&exported_name, &effective_prefix);
+                let _ = compiler.pre_declare_import_export(&exported_name, &local_name, &effective_prefix);
 
                 // Check if this import is an enum from another module
                 if let Some(members) = exported_enums.get(&key) {
@@ -2640,7 +2680,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
                         let (st, sn) = if parts.len() == 3 { (parts[1], parts[2]) } else { (parts[0], parts[1]) };
-                        let cn = if strip_underscore { sn.strip_prefix('_').unwrap_or(sn) } else { sn };
+                        // On macOS, nm adds a leading '_' prefix to all C symbols.
+                        // On Linux, nm shows symbols as-is. Only strip on macOS.
+                        let cn = if cfg!(target_os = "macos") {
+                            sn.strip_prefix('_').unwrap_or(sn)
+                        } else {
+                            sn
+                        };
                         if st == "U" {
                             // Add export/wrapper symbols to undefined list
                             if cn.starts_with("__export_") || cn.starts_with("__wrapper_") {
@@ -2852,7 +2898,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          .arg("-fPIC")
          .arg("-target").arg("aarch64-linux-android24")
          .arg("-Wl,-z,max-page-size=16384")
-         .arg("-Wl,-z,separate-loadable-segments");
+         .arg("-Wl,-z,separate-loadable-segments")
+         // Allow unresolved symbols from namespace imports (import * as X).
+         // The codegen emits short-name extern refs (__export_X) for namespace
+         // imports that may not have a corresponding definition when the module
+         // only exports individually-scoped symbols.
+         .arg("-Wl,--warn-unresolved-symbols");
         c
     } else if is_linux {
         // Linux target: when running on Linux natively, just use "cc".
