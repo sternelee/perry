@@ -105,6 +105,24 @@ pub fn set_detaches_hidden_views(handle: i64, detaches: bool) {
     }
 }
 
+/// Set distribution on an NSStackView.
+/// 0 = Fill, 1 = FillEqually, 2 = FillProportionally,
+/// 3 = EqualSpacing, 4 = EqualCentering, -1 = GravityAreas.
+pub fn set_distribution(handle: i64, distribution: i64) {
+    if let Some(view) = get_widget(handle) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            view.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            unsafe {
+                let _: () = msg_send![&*view, setDistribution: distribution];
+            }
+        }
+    }
+}
+
 /// Remove all arranged subviews from a container (NSStackView).
 pub fn clear_children(handle: i64) {
     if let Some(parent) = get_widget(handle) {

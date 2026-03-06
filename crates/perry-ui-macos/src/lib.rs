@@ -201,6 +201,14 @@ pub extern "C" fn perry_ui_stack_set_detaches_hidden(handle: i64, flag: i64) {
     widgets::set_detaches_hidden_views(handle, flag != 0);
 }
 
+/// Set distribution on an NSStackView.
+/// 0 = Fill (default), 1 = FillEqually, 2 = FillProportionally,
+/// 3 = EqualSpacing, 4 = EqualCentering, -1 = GravityAreas.
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64) {
+    widgets::set_distribution(handle, distribution as i64);
+}
+
 /// Initialize a ForEach dynamic list binding.
 #[no_mangle]
 pub extern "C" fn perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64) {

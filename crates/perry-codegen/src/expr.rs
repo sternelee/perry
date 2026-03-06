@@ -1043,6 +1043,17 @@ pub(crate) fn compile_expr(
                 Ok(result)
             }
         }
+        Expr::MathImul(a_expr, b_expr) => {
+            // Math.imul(a, b): 32-bit integer multiply
+            let a = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a_expr, this_ctx)?;
+            let b = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, b_expr, this_ctx)?;
+            let a_f64 = ensure_f64(builder, a);
+            let b_f64 = ensure_f64(builder, b);
+            let a_i32 = builder.ins().fcvt_to_sint_sat(types::I32, a_f64);
+            let b_i32 = builder.ins().fcvt_to_sint_sat(types::I32, b_f64);
+            let result = builder.ins().imul(a_i32, b_i32);
+            Ok(builder.ins().fcvt_from_sint(types::F64, result))
+        }
         Expr::MathRandom => {
             // Call js_math_random runtime function
             let func = extern_funcs.get("js_math_random")
@@ -15406,7 +15417,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetSetHidden" | "stackSetDetachesHidden" | "textSetFontSize" | "textSetSelectable" |
+                    "widgetSetHidden" | "stackSetDetachesHidden" | "stackSetDistribution" | "textSetFontSize" | "textSetSelectable" |
                     "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" |
                     "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
@@ -15420,6 +15431,7 @@ pub(crate) fn compile_expr(
                         let ffi_name = match method.as_str() {
                             "widgetSetHidden" => "perry_ui_set_widget_hidden",
                             "stackSetDetachesHidden" => "perry_ui_stack_set_detaches_hidden",
+                            "stackSetDistribution" => "perry_ui_stack_set_distribution",
                             "textSetFontSize" => "perry_ui_text_set_font_size",
                             "textSetSelectable" => "perry_ui_text_set_selectable",
                             "buttonSetBordered" => "perry_ui_button_set_bordered",
