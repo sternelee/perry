@@ -36,6 +36,7 @@ pub const GC_TYPE_CLOSURE: u8 = 4;
 pub const GC_TYPE_PROMISE: u8 = 5;
 pub const GC_TYPE_BIGINT: u8 = 6;
 pub const GC_TYPE_ERROR: u8 = 7;
+pub const GC_TYPE_MAP: u8 = 8;
 
 // Flag constants
 pub const GC_FLAG_MARKED: u8 = 0x01;
@@ -556,11 +557,70 @@ fn trace_marked_objects(valid_ptrs: &HashSet<usize>) {
                 GC_TYPE_ERROR => {
                     trace_error(user_ptr, valid_ptrs, &mut worklist);
                 }
+                GC_TYPE_MAP => {
+                    trace_map(user_ptr, valid_ptrs, &mut worklist);
+                }
                 GC_TYPE_STRING | GC_TYPE_BIGINT => {
                     // Leaf nodes - no children to trace
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// Trace Map entries — scan all key-value pairs in the Map's entries array.
+/// Maps store NaN-boxed JSValues (strings, arrays, objects) as keys and values.
+/// Values may also be raw I64 pointers (for typed arrays/maps stored in maps).
+unsafe fn trace_map(user_ptr: *mut u8, valid_ptrs: &HashSet<usize>, worklist: &mut Vec<*mut GcHeader>) {
+    let map = user_ptr as *const crate::map::MapHeader;
+    let size = (*map).size;
+    let capacity = (*map).capacity;
+
+    // Sanity check
+    if size > capacity || size > 100_000 {
+        return;
+    }
+
+    let entries = (*map).entries as *const u64;
+    if entries.is_null() {
+        return;
+    }
+
+    // Each entry is 2 x f64 (key + value)
+    for i in 0..(size as usize) {
+        let key_bits = *entries.add(i * 2);
+        let val_bits = *entries.add(i * 2 + 1);
+
+        // Mark and trace key
+        if try_mark_value_or_raw(key_bits, valid_ptrs) {
+            // Newly marked — add to worklist for transitive tracing
+            let ptr_val = extract_ptr_from_bits(key_bits);
+            if ptr_val > 0 && valid_ptrs.contains(&ptr_val) {
+                worklist.push(header_from_user_ptr(ptr_val as *const u8));
+            }
+        }
+        // Mark and trace value
+        if try_mark_value_or_raw(val_bits, valid_ptrs) {
+            let ptr_val = extract_ptr_from_bits(val_bits);
+            if ptr_val > 0 && valid_ptrs.contains(&ptr_val) {
+                worklist.push(header_from_user_ptr(ptr_val as *const u8));
+            }
+        }
+    }
+}
+
+/// Extract a raw pointer value from NaN-boxed or raw bits.
+fn extract_ptr_from_bits(bits: u64) -> usize {
+    let tag = bits & TAG_MASK;
+    match tag {
+        t if t == POINTER_TAG || t == STRING_TAG || t == BIGINT_TAG => {
+            (bits & POINTER_MASK) as usize
+        }
+        _ => {
+            // Raw pointer (no NaN-boxing tag)
+            let raw = bits as usize;
+            if raw >= 0x1000 && raw <= 0x0000_FFFF_FFFF_FFFF { raw } else { 0 }
         }
     }
 }
@@ -768,6 +828,22 @@ fn sweep() -> u64 {
                     // Unmarked: free it
                     let total_size = (*header).size as usize;
                     freed_bytes += total_size as u64;
+
+                    // For Maps, also free the separately-allocated entries array
+                    if (*header).obj_type == GC_TYPE_MAP {
+                        let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
+                        let map = user_ptr as *const crate::map::MapHeader;
+                        let entries = (*map).entries;
+                        if !entries.is_null() {
+                            let cap = (*map).capacity as usize;
+                            if cap > 0 {
+                                let ent_size = (cap * 16).max(8); // ENTRY_SIZE = 16
+                                let ent_layout = Layout::from_size_align(ent_size, 8).unwrap();
+                                dealloc(entries as *mut u8, ent_layout);
+                            }
+                        }
+                    }
+
                     let layout = Layout::from_size_align(total_size, 8).unwrap();
                     // Remove from tracking set BEFORE dealloc
                     MALLOC_SET.with(|set| {

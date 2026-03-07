@@ -628,6 +628,18 @@ impl crate::codegen::Compiler {
                     let ptr = builder.ins().global_value(types::I64, global_val);
                     builder.ins().call(gc_root_ref, &[ptr]);
                 }
+
+                // Also register static field data slots as GC roots.
+                // Static fields (e.g., TickMath.MIN_SQRT_RATIO = 4295128739n) store
+                // gc-allocated values (BigInts, strings, arrays) in global data slots.
+                // Without GC root registration, these get collected → dangling pointers.
+                for (_class_name, class_meta) in &self.classes {
+                    for (_field_name, data_id) in &class_meta.static_field_ids {
+                        let global_val = self.module.declare_data_in_func(*data_id, builder.func);
+                        let ptr = builder.ins().global_value(types::I64, global_val);
+                        builder.ins().call(gc_root_ref, &[ptr]);
+                    }
+                }
             }
 
             // For dylib plugins, call the user's exported activate(api) function

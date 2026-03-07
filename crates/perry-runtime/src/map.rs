@@ -164,13 +164,17 @@ fn jsvalue_eq(a: f64, b: f64) -> bool {
 #[no_mangle]
 pub extern "C" fn js_map_alloc(capacity: u32) -> *mut MapHeader {
     let cap = if capacity == 0 { 4 } else { capacity };
-    let header_layout = Layout::new::<MapHeader>();
     let ent_layout = entries_layout(cap as usize);
+
+    // Allocate header via GC so the GC can trace Map entries (keys/values)
+    // and keep gc-allocated strings/arrays/objects alive
+    let ptr = crate::gc::gc_malloc(
+        std::mem::size_of::<MapHeader>(),
+        crate::gc::GC_TYPE_MAP,
+    ) as *mut MapHeader;
+
     unsafe {
-        let ptr = alloc(header_layout) as *mut MapHeader;
-        if ptr.is_null() {
-            panic!("Failed to allocate map header");
-        }
+        // Entries array uses standard alloc (not gc-tracked, just data)
         let entries = alloc(ent_layout) as *mut f64;
         if entries.is_null() {
             panic!("Failed to allocate map entries");
