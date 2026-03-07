@@ -176,11 +176,7 @@ pub(crate) fn compile_async_stmt(
                 let value_f64 = if is_object_expr(expr, locals, async_func_ids) {
                     // Object pointer needs NaN-boxing with POINTER_TAG
                     let ptr = ensure_i64(builder, value);
-                    let nanbox_func = extern_funcs.get("js_nanbox_pointer")
-                        .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
-                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
-                    let call = builder.ins().call(nanbox_ref, &[ptr]);
-                    builder.inst_results(call)[0]
+                    inline_nanbox_pointer(builder, ptr)
                 } else if is_string_expr(expr, locals) {
                     // String pointer needs NaN-boxing with STRING_TAG
                     let ptr = ensure_i64(builder, value);
@@ -456,7 +452,7 @@ pub(crate) fn compile_stmt(
             }
 
             // Helper to detect if an expression produces a BigInt
-            fn is_bigint_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+            fn is_bigint_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>, classes: &BTreeMap<String, ClassMeta>) -> bool {
                 match expr {
                     Expr::BigInt(_) => true,
                     Expr::BigIntCoerce(_) => true,
@@ -464,9 +460,9 @@ pub(crate) fn compile_stmt(
                     Expr::New { class_name, .. } if class_name == "BN" => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
                     Expr::Binary { left, right, .. } => {
-                        is_bigint_expr(left, locals, func_hir_return_types) || is_bigint_expr(right, locals, func_hir_return_types)
+                        is_bigint_expr(left, locals, func_hir_return_types, classes) || is_bigint_expr(right, locals, func_hir_return_types, classes)
                     }
-                    Expr::Unary { operand, .. } => is_bigint_expr(operand, locals, func_hir_return_types),
+                    Expr::Unary { operand, .. } => is_bigint_expr(operand, locals, func_hir_return_types, classes),
                     // Function calls that return BigInt
                     Expr::Call { callee, .. } => {
                         match callee.as_ref() {
@@ -488,6 +484,13 @@ pub(crate) fn compile_stmt(
                             }
                             _ => false,
                         }
+                    }
+                    // Static method calls that return BigInt
+                    Expr::StaticMethodCall { class_name, method_name, .. } => {
+                        classes.get(class_name)
+                            .and_then(|meta| meta.static_method_return_types.get(method_name))
+                            .map(|t| matches!(t, perry_types::Type::BigInt))
+                            .unwrap_or(false)
                     }
                     // NativeMethodCall methods that return BigInt
                     Expr::NativeMethodCall { module, method, .. } => {
@@ -672,18 +675,18 @@ pub(crate) fn compile_stmt(
                         }
                     }
                     Some(Expr::StaticMethodCall { class_name: static_class, method_name, .. }) => {
-                        // For singleton pattern (getInstance() etc.), check if the static method returns a class instance
-                        let class_name_from_return = classes.get(static_class)
-                            .and_then(|meta| meta.static_method_return_types.get(method_name))
-                            .and_then(|ret_type| {
-                                if let perry_types::Type::Named(name) = ret_type {
-                                    Some(name.clone())
-                                } else {
-                                    None
-                                }
-                            });
-                        if let Some(name) = class_name_from_return {
-                            // Check if it's a native handle-based class
+                        // Check the static method's return type
+                        let ret_type = classes.get(static_class)
+                            .and_then(|meta| meta.static_method_return_types.get(method_name));
+                        if let Some(perry_types::Type::BigInt) = ret_type {
+                            // Static method returns BigInt
+                            (None, false, false, false, true, false, false, false, false, false)
+                        } else if let Some(perry_types::Type::String) = ret_type {
+                            // Static method returns String
+                            (None, false, false, true, false, false, false, false, false, false)
+                        } else if let Some(perry_types::Type::Named(name)) = ret_type {
+                            // Static method returns a class instance (singleton pattern etc.)
+                            let name = name.clone();
                             let is_native_handle_class = matches!(name.as_str(),
                                 "Decimal" | "Big" | "BigNumber" | "LRUCache" | "Command" | "EventEmitter" | "Redis");
                             let is_event_emitter = name == "EventEmitter";
@@ -709,7 +712,7 @@ pub(crate) fn compile_stmt(
                     Some(Expr::Closure { .. }) => (None, true, false, false, false, true, false, false, false, false),
                     // BigInt literals - stored as NaN-boxed F64 (is_pointer = false)
                     Some(Expr::BigInt(_)) => (None, false, false, false, true, false, false, false, false, false),
-                    Some(expr) if is_bigint_expr(expr, locals, func_hir_return_types) => (None, false, false, false, true, false, false, false, false, false),
+                    Some(expr) if is_bigint_expr(expr, locals, func_hir_return_types, classes) => (None, false, false, false, true, false, false, false, false, false),
                     Some(expr) if is_string_expr(expr, locals) => (None, false, false, true, false, false, false, false, false, false),
                     Some(expr) if is_closure_expr(expr, locals, closure_returning_funcs) => (None, true, false, false, false, true, false, false, false, false),
                     // JsonParse returns any type - mark as union for dynamic typeof
@@ -1072,7 +1075,7 @@ pub(crate) fn compile_stmt(
                                 Expr::MapEntries(_) | Expr::MapKeys(_) | Expr::MapValues(_) => true,
                                 // Map.get() returns NaN-boxed value (may be POINTER_TAG object)
                                 Expr::MapGet { .. } => true,
-                                Expr::New { .. } => true,
+                                Expr::New { .. } | Expr::NewDynamic { .. } => true,
                                 // Await returns NaN-boxed value from js_promise_value (F64 with POINTER_TAG)
                                 Expr::Await(_) => true,
                                 Expr::PropertyGet { object, property } => {

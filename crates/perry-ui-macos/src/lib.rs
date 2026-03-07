@@ -299,6 +299,12 @@ pub extern "C" fn perry_ui_text_set_font_weight(handle: i64, size: f64, weight: 
     widgets::text::set_font_weight(handle, size, weight);
 }
 
+/// Enable word wrapping on a Text widget with a max width.
+#[no_mangle]
+pub extern "C" fn perry_ui_text_set_wraps(handle: i64, max_width: f64) {
+    widgets::text::set_wraps(handle, max_width);
+}
+
 /// Set whether a Text widget is selectable.
 #[no_mangle]
 pub extern "C" fn perry_ui_text_set_selectable(handle: i64, selectable: f64) {
@@ -479,6 +485,17 @@ pub extern "C" fn perry_ui_app_set_max_size(app_handle: i64, w: f64, h: f64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_textfield_set_string(handle: i64, text_ptr: i64) {
     widgets::textfield::set_string_value(handle, text_ptr as *const u8);
+}
+
+/// Get the current text content of a TextField.
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
+    widgets::textfield::get_string_value(handle) as i64
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64) {
+    widgets::textfield::set_on_submit(handle, on_submit);
 }
 
 /// Add a child widget to a parent widget at a specific position.

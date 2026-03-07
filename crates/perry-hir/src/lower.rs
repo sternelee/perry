@@ -586,7 +586,56 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
         }
     }
 
-    // Second pass: lower everything
+    // Pre-register all class declarations so that static method calls between
+    // classes declared in the same file resolve correctly regardless of declaration order.
+    // Without this, SqrtPriceMath.getAmount0Delta calling FullMath.mulDivRoundingUp
+    // fails if FullMath is declared after SqrtPriceMath.
+    for item in &ast_module.body {
+        let class_decl = match item {
+            ast::ModuleItem::Stmt(ast::Stmt::Decl(ast::Decl::Class(cd))) => Some(cd),
+            ast::ModuleItem::ModuleDecl(ast::ModuleDecl::ExportDecl(export_decl)) => {
+                if let ast::Decl::Class(cd) = &export_decl.decl {
+                    Some(cd)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(cd) = class_decl {
+            let name = cd.ident.sym.to_string();
+            if ctx.lookup_class(&name).is_none() {
+                let id = ctx.fresh_class();
+                ctx.classes.push((name.clone(), id));
+            }
+            // Collect static field/method names
+            let mut static_field_names = Vec::new();
+            let mut static_method_names = Vec::new();
+            for member in &cd.class.body {
+                match member {
+                    ast::ClassMember::Method(method) if method.is_static => {
+                        if let ast::PropName::Ident(ident) = &method.key {
+                            static_method_names.push(ident.sym.to_string());
+                        }
+                    }
+                    ast::ClassMember::ClassProp(prop) if prop.is_static => {
+                        if let ast::PropName::Ident(ident) = &prop.key {
+                            static_field_names.push(ident.sym.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !static_field_names.is_empty() || !static_method_names.is_empty() {
+                // Only register if not already registered (lower_class_decl will re-register)
+                if !ctx.class_statics.iter().any(|(cn, _, _)| cn == &name) {
+                    ctx.register_class_statics(name, static_field_names, static_method_names);
+                }
+            }
+        }
+    }
+
+    // Main pass: lower everything
     for item in &ast_module.body {
         match item {
             ast::ModuleItem::Stmt(stmt) => {
@@ -4058,39 +4107,56 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
 
                                             for prop in &obj.props {
                                                 if let ast::PropOrSpread::Prop(prop) = prop {
-                                                    if let ast::Prop::KeyValue(kv) = prop.as_ref() {
-                                                        let key = match &kv.key {
-                                                            ast::PropName::Ident(ident) => ident.sym.to_string(),
-                                                            ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
-                                                            _ => continue,
-                                                        };
-                                                        match key.as_str() {
-                                                            "method" => {
-                                                                method = lower_expr(ctx, &kv.value)?;
-                                                            }
-                                                            "body" => {
-                                                                body = lower_expr(ctx, &kv.value)?;
-                                                            }
-                                                            "headers" => {
-                                                                // Extract headers object
-                                                                if let ast::Expr::Object(headers_ast) = &*kv.value {
-                                                                    for hprop in &headers_ast.props {
-                                                                        if let ast::PropOrSpread::Prop(hprop) = hprop {
-                                                                            if let ast::Prop::KeyValue(hkv) = hprop.as_ref() {
-                                                                                let hkey = match &hkv.key {
-                                                                                    ast::PropName::Ident(ident) => ident.sym.to_string(),
-                                                                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
-                                                                                    _ => continue,
-                                                                                };
-                                                                                let hval = lower_expr(ctx, &hkv.value)?;
-                                                                                headers_obj.push((hkey, hval));
+                                                    match prop.as_ref() {
+                                                        ast::Prop::KeyValue(kv) => {
+                                                            let key = match &kv.key {
+                                                                ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                                                ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                                _ => continue,
+                                                            };
+                                                            match key.as_str() {
+                                                                "method" => {
+                                                                    method = lower_expr(ctx, &kv.value)?;
+                                                                }
+                                                                "body" => {
+                                                                    body = lower_expr(ctx, &kv.value)?;
+                                                                }
+                                                                "headers" => {
+                                                                    // Extract headers object
+                                                                    if let ast::Expr::Object(headers_ast) = &*kv.value {
+                                                                        for hprop in &headers_ast.props {
+                                                                            if let ast::PropOrSpread::Prop(hprop) = hprop {
+                                                                                if let ast::Prop::KeyValue(hkv) = hprop.as_ref() {
+                                                                                    let hkey = match &hkv.key {
+                                                                                        ast::PropName::Ident(ident) => ident.sym.to_string(),
+                                                                                        ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                                                        _ => continue,
+                                                                                    };
+                                                                                    let hval = lower_expr(ctx, &hkv.value)?;
+                                                                                    headers_obj.push((hkey, hval));
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
                                                                 }
+                                                                _ => {}
                                                             }
-                                                            _ => {}
                                                         }
+                                                        ast::Prop::Shorthand(ident) => {
+                                                            // Handle shorthand properties like { body } which means { body: body }
+                                                            let key = ident.sym.to_string();
+                                                            let value = if let Some(local_id) = ctx.lookup_local(&key) {
+                                                                Expr::LocalGet(local_id)
+                                                            } else {
+                                                                continue;
+                                                            };
+                                                            match key.as_str() {
+                                                                "method" => method = value,
+                                                                "body" => body = value,
+                                                                _ => {}
+                                                            }
+                                                        }
+                                                        _ => {}
                                                     }
                                                 }
                                             }

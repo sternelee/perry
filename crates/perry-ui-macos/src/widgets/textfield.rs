@@ -9,6 +9,8 @@ use std::collections::HashMap;
 thread_local! {
     /// Map from observer object address to (closure_f64, textfield_view_ptr)
     static TEXTFIELD_CALLBACKS: RefCell<HashMap<usize, (f64, *const AnyObject)>> = RefCell::new(HashMap::new());
+    /// Map from observer address to (submit_closure_f64, textfield_view_ptr)
+    static TEXTFIELD_SUBMIT_CALLBACKS: RefCell<HashMap<usize, (f64, *const AnyObject)>> = RefCell::new(HashMap::new());
 }
 
 extern "C" {
@@ -72,6 +74,67 @@ define_class!(
 impl PerryTextFieldObserver {
     fn new() -> Retained<Self> {
         let this = Self::alloc().set_ivars(PerryTextFieldObserverIvars {
+            callback_key: std::cell::Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Observer for NSControlTextDidEndEditingNotification (Enter/Return key).
+pub struct PerryTextFieldSubmitObserverIvars {
+    callback_key: std::cell::Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryTextFieldSubmitObserver"]
+    #[ivars = PerryTextFieldSubmitObserverIvars]
+    pub struct PerryTextFieldSubmitObserver;
+
+    impl PerryTextFieldSubmitObserver {
+        #[unsafe(method(textDidEndEditing:))]
+        fn text_did_end_editing(&self, notification: &NSNotification) {
+            let key = self.ivars().callback_key.get();
+            crate::catch_callback_panic("textfield submit callback", std::panic::AssertUnwindSafe(|| {
+                TEXTFIELD_SUBMIT_CALLBACKS.with(|cbs| {
+                    if let Some(&(closure_f64, tf_ptr)) = cbs.borrow().get(&key) {
+                        if tf_ptr.is_null() {
+                            return;
+                        }
+
+                        let notif_obj = notification.object();
+                        if let Some(obj) = notif_obj {
+                            let obj_ptr = &*obj as *const AnyObject;
+                            if obj_ptr != tf_ptr {
+                                return;
+                            }
+                        } else {
+                            return;
+                        }
+
+                        // Read current text value
+                        let text_field = tf_ptr as *const NSTextField;
+                        let text: Retained<NSString> = unsafe { (*text_field).stringValue() };
+                        let rust_str = text.to_string();
+                        let bytes = rust_str.as_bytes();
+
+                        let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) };
+                        let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+
+                        let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
+                        unsafe {
+                            js_closure_call1(closure_ptr as *const u8, nanboxed);
+                        }
+                    }
+                });
+            }));
+        }
+    }
+);
+
+impl PerryTextFieldSubmitObserver {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryTextFieldSubmitObserverIvars {
             callback_key: std::cell::Cell::new(0),
         });
         unsafe { msg_send![super(this), init] }
@@ -156,6 +219,44 @@ pub fn set_string_value(handle: i64, text_ptr: *const u8) {
         unsafe {
             let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
             tf.setStringValue(&ns_string);
+        }
+    }
+}
+
+/// Get the current string value from a textfield, returns a NaN-boxed string pointer.
+pub fn get_string_value(handle: i64) -> *const u8 {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            let value = tf.stringValue();
+            let bytes = value.to_string();
+            return js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64);
+        }
+    }
+    unsafe { js_string_from_bytes(std::ptr::null(), 0) }
+}
+
+/// Set an onSubmit callback (fires when user presses Enter/Return).
+/// `on_submit` is a NaN-boxed closure that receives the text as a NaN-boxed string.
+pub fn set_on_submit(handle: i64, on_submit: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf_raw: *const AnyObject = Retained::as_ptr(&view) as *const AnyObject;
+
+            let observer = PerryTextFieldSubmitObserver::new();
+            let observer_addr = Retained::as_ptr(&observer) as usize;
+            observer.ivars().callback_key.set(observer_addr);
+
+            TEXTFIELD_SUBMIT_CALLBACKS.with(|cbs| {
+                cbs.borrow_mut().insert(observer_addr, (on_submit, tf_raw));
+            });
+
+            let center = NSNotificationCenter::defaultCenter();
+            let notif_name = NSString::from_str("NSControlTextDidEndEditingNotification");
+            let sel = Sel::register(c"textDidEndEditing:");
+            let _: () = msg_send![&center, addObserver: &*observer, selector: sel, name: &*notif_name, object: tf_raw];
+
+            std::mem::forget(observer);
         }
     }
 }

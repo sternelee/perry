@@ -2037,6 +2037,12 @@ pub extern "C" fn js_native_module_bind_method(
         return val;
     }
 
+    // Try V8 JS runtime fallback for unknown properties (e.g., ethers.Contract)
+    let js_val = crate::value::native_module_try_js_property(module_name, property_name);
+    if js_val.to_bits() != crate::value::TAG_UNDEFINED {
+        return js_val;
+    }
+
     // Not a constant — create a bound method closure
     let heap_name = unsafe {
         let layout = std::alloc::Layout::from_size_align(property_name_len, 1).unwrap();

@@ -358,6 +358,7 @@ pub unsafe extern "C" fn js_fetch_with_options(
     let body = string_from_header(body_ptr);
     let headers_json = string_from_header(headers_json_ptr).unwrap_or_else(|| "{}".to_string());
 
+
     // Parse headers from JSON
     let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
 

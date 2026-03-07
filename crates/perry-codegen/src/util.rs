@@ -170,11 +170,17 @@ pub(crate) fn ensure_i64(builder: &mut FunctionBuilder, val: Value) -> Value {
         // Extend i32 to i64
         builder.ins().uextend(types::I64, val)
     } else {
-        // F64 NaN-boxed pointer - must strip the tag bits (top 16 bits)
-        // to get the raw pointer address
+        // F64 NaN-boxed pointer - strip the tag bits (top 16 bits)
+        // to get the raw pointer address, BUT preserve JS_HANDLE_TAG (0x7FFB)
+        // which represents V8 object handles that must keep their tag for dispatch.
         let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), val);
         let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
-        builder.ins().band(val_i64, mask)
+        let masked = builder.ins().band(val_i64, mask);
+        // Check for JS_HANDLE_TAG: top16 == 0x7FFB → preserve full bits
+        let top16 = builder.ins().ushr_imm(val_i64, 48);
+        let js_handle_tag = builder.ins().iconst(types::I64, 0x7FFB);
+        let is_js_handle = builder.ins().icmp(IntCC::Equal, top16, js_handle_tag);
+        builder.ins().select(is_js_handle, val_i64, masked)
     }
 }
 
@@ -365,19 +371,30 @@ pub(crate) fn expr_type_name(expr: &Expr) -> &'static str {
 /// ptr must be I64, returns F64.
 pub(crate) fn inline_nanbox_pointer(builder: &mut FunctionBuilder, ptr: Value) -> Value {
     // Guard: null pointer (ptr == 0) → TAG_NULL (JS null) instead of null POINTER_TAG.
-    // Null POINTER_TAG (0x7FFD_0000_0000_0000) is never valid and causes crashes when
-    // code dereferences it as an ObjectHeader to read class_id at offset 4.
     let zero_i64 = builder.ins().iconst(types::I64, 0);
     let is_null = builder.ins().icmp(IntCC::Equal, ptr, zero_i64);
+
+    // Guard: if value already has a NaN-box tag (top 16 bits >= 0x7FF8),
+    // preserve it via bitcast — e.g., JS_HANDLE_TAG (0x7FFB), STRING_TAG (0x7FFF).
+    let top16 = builder.ins().ushr_imm(ptr, 48);
+    let threshold = builder.ins().iconst(types::I64, 0x7FF8);
+    let already_tagged = builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, top16, threshold);
+    let already_nanboxed = builder.ins().bitcast(types::F64, MemFlags::new(), ptr);
+
+    // Normal path: mask lower 48 bits and add POINTER_TAG
     let mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
     let masked = builder.ins().band(ptr, mask);
     let tag = builder.ins().iconst(types::I64, 0x7FFD_0000_0000_0000u64 as i64);
     let tagged = builder.ins().bor(masked, tag);
     let ptr_nanboxed = builder.ins().bitcast(types::F64, MemFlags::new(), tagged);
+
     // TAG_NULL = 0x7FFC_0000_0000_0002
     let tag_null_bits = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
     let tag_null_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), tag_null_bits);
-    builder.ins().select(is_null, tag_null_f64, ptr_nanboxed)
+
+    // Select: null → TAG_NULL, already_tagged → preserve, else → POINTER_TAG
+    let non_null_result = builder.ins().select(already_tagged, already_nanboxed, ptr_nanboxed);
+    builder.ins().select(is_null, tag_null_f64, non_null_result)
 }
 
 pub(crate) fn inline_nanbox_bigint(builder: &mut FunctionBuilder, ptr: Value) -> Value {

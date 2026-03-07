@@ -37,6 +37,9 @@ thread_local! {
     static WIDTH_CONSTRAINTS: RefCell<std::collections::HashMap<i64, Retained<AnyObject>>> = RefCell::new(std::collections::HashMap::new());
     /// Stored height constraints per widget handle, so set_height can update instead of duplicate.
     static HEIGHT_CONSTRAINTS: RefCell<std::collections::HashMap<i64, Retained<AnyObject>>> = RefCell::new(std::collections::HashMap::new());
+    /// Parent tracking: child_handle -> (parent_handle, insertion_index)
+    /// Used by set_hidden to re-insert views that NSStackView detached.
+    static PARENT_MAP: RefCell<std::collections::HashMap<i64, (i64, usize)>> = RefCell::new(std::collections::HashMap::new());
 }
 
 /// Store an NSView and return its handle (1-based i64).
@@ -81,10 +84,46 @@ pub fn get_widget(handle: i64) -> Option<Retained<NSView>> {
 }
 
 /// Set the hidden state of a widget.
+/// When unhiding a view that NSStackView detached (no superview), re-inserts it
+/// into its parent NSStackView at the original position.
 pub fn set_hidden(handle: i64, hidden: bool) {
     if let Some(view) = get_widget(handle) {
         unsafe {
             let _: () = objc2::msg_send![&*view, setHidden: hidden];
+        }
+
+        if !hidden {
+            // Check if the view got orphaned (no superview) after unhiding.
+            // This happens when NSStackView's detachesHiddenViews=true removed it.
+            let needs_reattach = unsafe {
+                let sv: *const NSView = objc2::msg_send![&*view, superview];
+                sv.is_null()
+            };
+
+            if needs_reattach {
+                let parent_info = PARENT_MAP.with(|m| {
+                    m.borrow().get(&handle).copied()
+                });
+                if let Some((parent_handle, index)) = parent_info {
+                    if let Some(parent) = get_widget(parent_handle) {
+                        let is_stack = AnyClass::get(c"NSStackView")
+                            .map(|cls| parent.isKindOfClass(cls))
+                            .unwrap_or(false);
+                        if is_stack {
+                            let stack: &NSStackView = unsafe {
+                                &*(Retained::as_ptr(&parent) as *const NSStackView)
+                            };
+                            let count = stack.arrangedSubviews().len();
+                            let insert_idx = index.min(count);
+                            unsafe {
+                                let _: () = objc2::msg_send![
+                                    stack, insertArrangedSubview: &*view, atIndex: insert_idx
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -157,6 +196,10 @@ pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
             unsafe {
                 let _: () = objc2::msg_send![stack, insertArrangedSubview: &*child, atIndex: index as usize];
             }
+            // Track parent-child for re-attachment after hide/show
+            PARENT_MAP.with(|m| {
+                m.borrow_mut().insert(child_handle, (parent_handle, index as usize));
+            });
         } else {
             parent.addSubview(&child);
         }
@@ -177,7 +220,12 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
         if is_stack {
             // Safety: we verified the type with isKindOfClass
             let stack: &NSStackView = unsafe { &*(Retained::as_ptr(&parent) as *const NSStackView) };
+            let index = stack.arrangedSubviews().len();
             stack.addArrangedSubview(&child);
+            // Track parent-child for re-attachment after hide/show
+            PARENT_MAP.with(|m| {
+                m.borrow_mut().insert(child_handle, (parent_handle, index));
+            });
         } else {
             parent.addSubview(&child);
         }

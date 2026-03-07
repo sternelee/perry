@@ -60,6 +60,9 @@ thread_local! {
     /// Malloc-allocated objects tracked for GC (strings, closures, bigints, promises, errors)
     static MALLOC_OBJECTS: RefCell<Vec<*mut GcHeader>> = RefCell::new(Vec::new());
 
+    /// O(1) lookup set for validating malloc pointers (mirrors MALLOC_OBJECTS)
+    static MALLOC_SET: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+
     /// Free list of arena slots available for reuse: (user_ptr, payload_size)
     pub(crate) static ARENA_FREE_LIST: RefCell<Vec<(*mut u8, usize)>> = RefCell::new(Vec::new());
 
@@ -104,6 +107,9 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
         MALLOC_OBJECTS.with(|list| {
             list.borrow_mut().push(header);
         });
+        MALLOC_SET.with(|set| {
+            set.borrow_mut().insert(header as usize);
+        });
 
         user_ptr
     }
@@ -112,12 +118,45 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
 /// Reallocate a malloc-tracked object, preserving GcHeader.
 /// `old_user_ptr` is the pointer previously returned by gc_malloc.
 /// Returns new user pointer (after header).
+///
+/// Safety: validates the pointer is actually tracked before dereferencing.
+/// If the pointer was freed by GC or is arena-allocated, falls back to
+/// fresh allocation to prevent SIGABRT from invalid realloc.
 pub fn gc_realloc(old_user_ptr: *mut u8, new_payload_size: usize) -> *mut u8 {
     if old_user_ptr.is_null() {
-        panic!("gc_realloc: null pointer");
+        // Graceful fallback: allocate fresh instead of panicking
+        return gc_malloc(new_payload_size, GC_TYPE_STRING);
     }
 
     let old_header = unsafe { old_user_ptr.sub(GC_HEADER_SIZE) as *mut GcHeader };
+
+    // Validate the pointer is in our tracked set before dereferencing the header.
+    // This prevents SIGABRT when gc_realloc is called on a pointer that was
+    // freed by GC (use-after-free) or was never allocated by gc_malloc.
+    let is_tracked = MALLOC_SET.with(|set| {
+        set.borrow().contains(&(old_header as usize))
+    });
+
+    if !is_tracked {
+        // Pointer is not tracked — it was freed by GC, is arena-allocated,
+        // or was never allocated by gc_malloc. Allocate fresh.
+        eprintln!("[perry] gc_realloc: untracked pointer {:p}, allocating fresh ({} bytes)",
+            old_user_ptr, new_payload_size);
+        return gc_malloc(new_payload_size, GC_TYPE_STRING);
+    }
+
+    // Also check arena flag — arena objects must not be passed to system realloc
+    unsafe {
+        if (*old_header).gc_flags & GC_FLAG_ARENA != 0 {
+            eprintln!("[perry] gc_realloc: arena pointer {:p}, allocating fresh", old_user_ptr);
+            let new_ptr = gc_malloc(new_payload_size, (*old_header).obj_type);
+            let old_payload_size = (*old_header).size as usize - GC_HEADER_SIZE;
+            let copy_size = old_payload_size.min(new_payload_size);
+            std::ptr::copy_nonoverlapping(old_user_ptr, new_ptr, copy_size);
+            return new_ptr;
+        }
+    }
+
     let old_total = unsafe { (*old_header).size as usize };
     let new_total = GC_HEADER_SIZE + new_payload_size;
 
@@ -132,7 +171,7 @@ pub fn gc_realloc(old_user_ptr: *mut u8, new_payload_size: usize) -> *mut u8 {
         let new_header = new_raw as *mut GcHeader;
         (*new_header).size = new_total as u32;
 
-        // Update pointer in MALLOC_OBJECTS if it changed
+        // Update pointer in MALLOC_OBJECTS and MALLOC_SET if it changed
         if new_header != old_header {
             MALLOC_OBJECTS.with(|list| {
                 let mut list = list.borrow_mut();
@@ -142,6 +181,11 @@ pub fn gc_realloc(old_user_ptr: *mut u8, new_payload_size: usize) -> *mut u8 {
                         break;
                     }
                 }
+            });
+            MALLOC_SET.with(|set| {
+                let mut set = set.borrow_mut();
+                set.remove(&(old_header as usize));
+                set.insert(new_header as usize);
             });
         }
 
@@ -725,6 +769,10 @@ fn sweep() -> u64 {
                     let total_size = (*header).size as usize;
                     freed_bytes += total_size as u64;
                     let layout = Layout::from_size_align(total_size, 8).unwrap();
+                    // Remove from tracking set BEFORE dealloc
+                    MALLOC_SET.with(|set| {
+                        set.borrow_mut().remove(&(header as usize));
+                    });
                     dealloc(header as *mut u8, layout);
                     list.swap_remove(i);
                     // Don't increment i — swap_remove moved last element here

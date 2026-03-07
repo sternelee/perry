@@ -7994,6 +7994,15 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_text_set_font_weight".to_string(), func_id);
         }
 
+        // perry_ui_text_set_wraps(handle: i64, max_width: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // max_width
+            let func_id = self.module.declare_function("perry_ui_text_set_wraps", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_text_set_wraps".to_string(), func_id);
+        }
+
         // perry_ui_text_set_selectable(handle: i64, selectable: f64)
         {
             let mut sig = self.module.make_signature();
@@ -8113,6 +8122,24 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::I64)); // text string ptr
             let func_id = self.module.declare_function("perry_ui_textfield_set_string", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_textfield_set_string".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_get_string(handle: i64) -> i64 (string ptr)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.returns.push(AbiParam::new(types::I64)); // string ptr
+            let func_id = self.module.declare_function("perry_ui_textfield_get_string", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_get_string".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // widget handle
+            sig.params.push(AbiParam::new(types::F64)); // callback closure
+            let func_id = self.module.declare_function("perry_ui_textfield_set_on_submit", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_set_on_submit".to_string(), func_id);
         }
 
         // perry_ui_scrollview_scroll_to(scroll_handle: i64, child_handle: i64)

@@ -209,6 +209,36 @@ pub fn app_run(_app_handle: i64) {
         let apps = a.borrow();
         for entry in apps.iter() {
             entry.window.center();
+
+            // Validate window is on a visible screen — if the position was
+            // restored from a previous session with a different display setup,
+            // the window could be completely off-screen.
+            unsafe {
+                let frame: CGRect = msg_send![&*entry.window, frame];
+                let screens: Retained<AnyObject> = msg_send![
+                    objc2::class!(NSScreen), screens
+                ];
+                let screen_count: usize = msg_send![&*screens, count];
+
+                let mut on_screen = false;
+                for i in 0..screen_count {
+                    let screen: *const AnyObject = msg_send![&*screens, objectAtIndex: i];
+                    let visible_frame: CGRect = msg_send![screen, visibleFrame];
+                    if frame.origin.x >= visible_frame.origin.x - frame.size.width * 0.5
+                        && frame.origin.x < visible_frame.origin.x + visible_frame.size.width
+                        && frame.origin.y >= visible_frame.origin.y - frame.size.height * 0.5
+                        && frame.origin.y < visible_frame.origin.y + visible_frame.size.height
+                    {
+                        on_screen = true;
+                        break;
+                    }
+                }
+
+                if !on_screen {
+                    entry.window.center();
+                }
+            }
+
             entry.window.makeKeyAndOrderFront(None);
         }
     });

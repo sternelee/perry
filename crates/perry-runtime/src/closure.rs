@@ -572,64 +572,10 @@ pub fn closure_set_dynamic_prop(ptr: usize, prop: &str, value: f64) {
 }
 
 /// Create a new instance of a class by name from a module handle.
-/// In AOT mode, class constructors are compiled to direct calls. This function is a fallback
-/// for dynamic instantiation (e.g., from JS modules). In pure AOT builds, it returns undefined.
-#[no_mangle]
-pub unsafe extern "C" fn js_new_instance(
-    _module_handle: u64,
-    _class_name_ptr: i64,
-    _class_name_len: i64,
-    _args_ptr: i64,
-    _args_len: i64,
-) -> f64 {
-    f64::from_bits(crate::value::TAG_UNDEFINED)
-}
-
-/// Create a callback from a function pointer for AOT-compiled closures.
-#[no_mangle]
-pub extern "C" fn js_create_callback(func_ptr: i64, _closure_env: i64, _param_count: i64) -> f64 {
-    crate::value::js_nanbox_pointer(func_ptr)
-}
-
-/// Construct a new instance by calling a constructor function with arguments.
-#[no_mangle]
-pub unsafe extern "C" fn js_new_from_handle(constructor: f64, args_ptr: i64, args_len: i64) -> f64 {
-    js_native_call_value(constructor, args_ptr as *const f64, args_len as usize)
-}
-
-// =============================================================================
-// AOT stubs for V8 jsruntime interop functions
-// =============================================================================
-
-#[no_mangle]
-pub extern "C" fn js_call_function(_func: f64, _args_ptr: i64, _args_len: i64) -> f64 {
-    f64::from_bits(crate::value::TAG_UNDEFINED)
-}
-
-#[no_mangle]
-pub extern "C" fn js_load_module(_path_ptr: i64, _path_len: i64) -> f64 {
-    0.0
-}
-
-#[no_mangle]
-pub extern "C" fn js_runtime_init() -> f64 {
-    0.0
-}
-
-#[no_mangle]
-pub extern "C" fn js_set_property(_obj: f64, _name_ptr: i64, _name_len: i64, _value: f64) -> f64 {
-    f64::from_bits(crate::value::TAG_UNDEFINED)
-}
-
-#[no_mangle]
-pub extern "C" fn js_get_export(_module: f64, _name_ptr: i64, _name_len: i64) -> f64 {
-    f64::from_bits(crate::value::TAG_UNDEFINED)
-}
-
-#[no_mangle]
-pub extern "C" fn js_await_js_promise(value: f64) -> f64 {
-    value
-}
+// All V8 interop stubs removed — real implementations are in perry-jsruntime/src/interop.rs
+// (V8 builds). For V8-free builds, compile.rs generates Cranelift-level stubs.
+// Removed: js_new_from_handle, js_call_function, js_load_module, js_new_instance,
+// js_create_callback, js_runtime_init, js_set_property, js_get_export, js_await_js_promise
 
 // =============================================================================
 // AOT stubs for unconditionally-declared extern functions

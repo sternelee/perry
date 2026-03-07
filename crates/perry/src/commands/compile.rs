@@ -2513,7 +2513,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
 
         // If we need JS runtime, tell the compiler to generate init code
-        if ctx.needs_js_runtime {
+        // Also enable when --enable-js-runtime is passed (for native modules
+        // that need V8 fallback, e.g., ethers.Contract)
+        if ctx.needs_js_runtime || args.enable_js_runtime {
             compiler.set_needs_js_runtime(true);
             // Pass JS module paths for loading
             for (specifier, _module) in &ctx.js_modules {
@@ -2734,7 +2736,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             }
                             // Only add jsruntime symbols if jsruntime is NOT being used
                             // (these are defined in libperry_jsruntime.a)
-                            else if !use_jsruntime && (cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle") {
+                            else if !use_jsruntime && (cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle"
+                                || cn == "js_new_instance" || cn == "js_create_callback" || cn == "js_runtime_init"
+                                || cn == "js_set_property" || cn == "js_get_export" || cn == "js_await_js_promise") {
                                 undefined_syms.insert(cn.to_string());
                             }
                         } else if matches!(st, "T" | "t" | "D" | "d" | "S" | "s" | "B" | "b") {

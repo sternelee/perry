@@ -97,6 +97,26 @@ pub fn set_font_weight(handle: i64, size: f64, weight: f64) {
     }
 }
 
+/// Enable word wrapping on a Text widget.
+/// max_width sets the preferred wrapping width (0 = use intrinsic width).
+pub fn set_wraps(handle: i64, max_width: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            // Enable wrapping on the cell
+            let cell = tf.cell().unwrap();
+            let _: () = objc2::msg_send![&*cell, setWraps: true];
+            let _: () = objc2::msg_send![&*cell, setLineBreakMode: 0u64]; // NSLineBreakByWordWrapping = 0
+            // Unlimited lines
+            let _: () = objc2::msg_send![tf, setMaximumNumberOfLines: 0i64];
+            // Set preferred max layout width for Auto Layout wrapping
+            if max_width > 0.0 {
+                let _: () = objc2::msg_send![tf, setPreferredMaxLayoutWidth: max_width as objc2_core_foundation::CGFloat];
+            }
+        }
+    }
+}
+
 /// Set whether a Text widget is selectable.
 pub fn set_selectable(handle: i64, selectable: bool) {
     if let Some(view) = super::get_widget(handle) {

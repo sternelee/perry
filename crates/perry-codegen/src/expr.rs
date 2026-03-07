@@ -2636,6 +2636,15 @@ pub(crate) fn compile_expr(
                     builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
                 };
                 builder.def_var(info.var, store_val);
+
+                // Write back to module-level global slot so other functions
+                // see the updated array pointer after push may reallocate
+                if let Some(data_id) = info.module_var_data_id {
+                    let current = builder.use_var(info.var);
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), current, ptr, 0);
+                }
             }
 
             // Get and return the new length
@@ -2698,6 +2707,15 @@ pub(crate) fn compile_expr(
                     builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
                 };
                 builder.def_var(info.var, store_val);
+
+                // Write back to module-level global slot so other functions
+                // see the updated array pointer after concat may reallocate
+                if let Some(data_id) = info.module_var_data_id {
+                    let current = builder.use_var(info.var);
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), current, ptr, 0);
+                }
             }
 
             // Get and return the new length
@@ -2844,6 +2862,15 @@ pub(crate) fn compile_expr(
                     builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
                 };
                 builder.def_var(info.var, store_val);
+
+                // Write back to module-level global slot so other functions
+                // see the updated array pointer after unshift may reallocate
+                if let Some(data_id) = info.module_var_data_id {
+                    let current = builder.use_var(info.var);
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), current, ptr, 0);
+                }
             }
 
             // Get and return the new length
@@ -3151,6 +3178,17 @@ pub(crate) fn compile_expr(
             } else {
                 let new_arr_f64 = builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr);
                 builder.def_var(info.var, new_arr_f64);
+            }
+
+            // Write back to module-level global slot so other functions
+            // see the updated array pointer after splice may reallocate
+            if !info.is_boxed {
+                if let Some(data_id) = info.module_var_data_id {
+                    let current = builder.use_var(info.var);
+                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                    let ptr = builder.ins().global_value(types::I64, global_val);
+                    builder.ins().store(MemFlags::new(), current, ptr, 0);
+                }
             }
 
             // Return deleted elements array as f64
@@ -4744,15 +4782,15 @@ pub(crate) fn compile_expr(
             }
 
             // Check if this is BigInt arithmetic (recursive check for nested BigInt expressions)
-            fn is_bigint_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+            fn is_bigint_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>, classes: &BTreeMap<String, ClassMeta>) -> bool {
                 match expr {
                     Expr::BigInt(_) => true,
                     Expr::BigIntCoerce(_) => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
                     Expr::Binary { left, right, .. } => {
-                        is_bigint_operand(left, locals, func_hir_return_types) || is_bigint_operand(right, locals, func_hir_return_types)
+                        is_bigint_operand(left, locals, func_hir_return_types, classes) || is_bigint_operand(right, locals, func_hir_return_types, classes)
                     }
-                    Expr::Unary { operand, .. } => is_bigint_operand(operand, locals, func_hir_return_types),
+                    Expr::Unary { operand, .. } => is_bigint_operand(operand, locals, func_hir_return_types, classes),
                     // Function calls that return BigInt
                     Expr::Call { callee, .. } => {
                         match callee.as_ref() {
@@ -4775,14 +4813,21 @@ pub(crate) fn compile_expr(
                             _ => false,
                         }
                     }
+                    // Static method calls that return BigInt
+                    Expr::StaticMethodCall { class_name, method_name, .. } => {
+                        classes.get(class_name)
+                            .and_then(|meta| meta.static_method_return_types.get(method_name))
+                            .map(|t| matches!(t, perry_types::Type::BigInt))
+                            .unwrap_or(false)
+                    }
                     Expr::NativeMethodCall { module, method, .. } => {
                         module == "ethers" && (method == "parseUnits" || method == "parseEther")
                     }
                     _ => false,
                 }
             }
-            let is_bigint_left = is_bigint_operand(left.as_ref(), locals, func_hir_return_types);
-            let is_bigint_right = is_bigint_operand(right.as_ref(), locals, func_hir_return_types);
+            let is_bigint_left = is_bigint_operand(left.as_ref(), locals, func_hir_return_types, classes);
+            let is_bigint_right = is_bigint_operand(right.as_ref(), locals, func_hir_return_types, classes);
 
             if is_bigint_left || is_bigint_right {
                 // BigInt arithmetic
@@ -5182,15 +5227,15 @@ pub(crate) fn compile_expr(
         Expr::Unary { op, operand } => {
             // Check if operand is a bigint expression for unary negation
             if matches!(op, UnaryOp::Neg) {
-                fn is_bigint_unary_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>) -> bool {
+                fn is_bigint_unary_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, func_hir_return_types: &BTreeMap<u32, perry_types::Type>, classes: &BTreeMap<String, ClassMeta>) -> bool {
                     match expr {
                         Expr::BigInt(_) => true,
                         Expr::BigIntCoerce(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
                         Expr::Binary { left, right, .. } => {
-                            is_bigint_unary_operand(left, locals, func_hir_return_types) || is_bigint_unary_operand(right, locals, func_hir_return_types)
+                            is_bigint_unary_operand(left, locals, func_hir_return_types, classes) || is_bigint_unary_operand(right, locals, func_hir_return_types, classes)
                         }
-                        Expr::Unary { operand, .. } => is_bigint_unary_operand(operand, locals, func_hir_return_types),
+                        Expr::Unary { operand, .. } => is_bigint_unary_operand(operand, locals, func_hir_return_types, classes),
                         Expr::Call { callee, .. } => {
                             match callee.as_ref() {
                                 Expr::FuncRef(id) => {
@@ -5199,10 +5244,16 @@ pub(crate) fn compile_expr(
                                 _ => false,
                             }
                         }
+                        Expr::StaticMethodCall { class_name, method_name, .. } => {
+                            classes.get(class_name)
+                                .and_then(|meta| meta.static_method_return_types.get(method_name))
+                                .map(|t| matches!(t, perry_types::Type::BigInt))
+                                .unwrap_or(false)
+                        }
                         _ => false,
                     }
                 }
-                if is_bigint_unary_operand(operand, locals, func_hir_return_types) {
+                if is_bigint_unary_operand(operand, locals, func_hir_return_types, classes) {
                     let val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, operand, this_ctx)?;
                     let val = ensure_f64(builder, val_raw);
 
@@ -5545,18 +5596,24 @@ pub(crate) fn compile_expr(
                 }
             } else {
                 // Check if this is a BigInt comparison
-                fn is_bigint_compare_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                fn is_bigint_compare_expr(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, classes: &BTreeMap<String, ClassMeta>) -> bool {
                     match expr {
                         Expr::BigInt(_) => true,
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
                         Expr::Binary { left, right, .. } => {
-                            is_bigint_compare_expr(left, locals) || is_bigint_compare_expr(right, locals)
+                            is_bigint_compare_expr(left, locals, classes) || is_bigint_compare_expr(right, locals, classes)
+                        }
+                        Expr::StaticMethodCall { class_name, method_name, .. } => {
+                            classes.get(class_name)
+                                .and_then(|meta| meta.static_method_return_types.get(method_name))
+                                .map(|t| matches!(t, perry_types::Type::BigInt))
+                                .unwrap_or(false)
                         }
                         _ => false,
                     }
                 }
 
-                let is_bigint_compare = is_bigint_compare_expr(left, locals) || is_bigint_compare_expr(right, locals);
+                let is_bigint_compare = is_bigint_compare_expr(left, locals, classes) || is_bigint_compare_expr(right, locals, classes);
 
                 if is_bigint_compare {
                     // BigInt comparison - use js_bigint_cmp
@@ -6508,6 +6565,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
+                                    || (module == "perry/ui" && method == "textfieldGetString")
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 // Binary Add with string operands (from template literals)
@@ -6928,6 +6986,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
+                                    || (module == "perry/ui" && method == "textfieldGetString")
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -7108,6 +7167,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
+                                    || (module == "perry/ui" && method == "textfieldGetString")
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -11240,7 +11300,6 @@ pub(crate) fn compile_expr(
             // new BN(value) or new BN(value, base) — BN.js big integer
             // BN values are stored as BigInt (BIGINT_TAG NaN-boxed)
             if class_name == "BN" && !classes.contains_key("BN") {
-                eprintln!("[CODEGEN new BN] args.len()={} arg0={:?}", args.len(), std::mem::discriminant(&args[0]));
                 if args.is_empty() {
                     // new BN() → 0n
                     let zero = builder.ins().iconst(types::I64, 0);
@@ -14190,6 +14249,15 @@ pub(crate) fn compile_expr(
                                 builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
                             };
                             builder.def_var(info.var, store_val);
+
+                            // Write back to module-level global slot so other functions
+                            // see the updated array pointer after potential reallocation
+                            if let Some(data_id) = info.module_var_data_id {
+                                let current = builder.use_var(info.var);
+                                let global_val = module.declare_data_in_func(data_id, builder.func);
+                                let ptr = builder.ins().global_value(types::I64, global_val);
+                                builder.ins().store(MemFlags::new(), current, ptr, 0);
+                            }
                         } else {
                             // BOUNDS CHECK ELIMINATION: Check if index is bounded by this array or constant
                             let (is_bounded, has_constant_bound) = if let Expr::LocalGet(idx_id) = index.as_ref() {
@@ -14293,6 +14361,15 @@ pub(crate) fn compile_expr(
                                     builder.ins().bitcast(types::F64, MemFlags::new(), new_arr_ptr)
                                 };
                                 builder.def_var(info.var, store_val);
+
+                                // Write back to module-level global slot so other functions
+                                // see the updated array pointer after reallocation
+                                if let Some(data_id) = info.module_var_data_id {
+                                    let current = builder.use_var(info.var);
+                                    let global_val = module.declare_data_in_func(data_id, builder.func);
+                                    let ptr = builder.ins().global_value(types::I64, global_val);
+                                    builder.ins().store(MemFlags::new(), current, ptr, 0);
+                                }
                             }
                             builder.ins().jump(continue_block, &[]);
 
@@ -15468,7 +15545,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetSetOnClick" => {
+                    "widgetSetOnClick" | "textfieldSetOnSubmit" => {
                         // (handle, callback) — extract handle as i64, pass callback as f64
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -15478,14 +15555,20 @@ pub(crate) fn compile_expr(
                         let handle = builder.inst_results(ptr_call)[0];
                         let callback = ensure_f64(builder, arg_vals[1]);
 
-                        let func = extern_funcs.get("perry_ui_widget_set_on_click")
-                            .ok_or_else(|| anyhow!("perry_ui_widget_set_on_click not declared"))?;
+                        let ffi_name = if method == "textfieldSetOnSubmit" {
+                            "perry_ui_textfield_set_on_submit"
+                        } else {
+                            "perry_ui_widget_set_on_click"
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         builder.ins().call(func_ref, &[handle, callback]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
                     "widgetSetHidden" | "stackSetDetachesHidden" | "stackSetDistribution" | "textSetFontSize" | "textSetSelectable" |
+                    "textSetWraps" |
                     "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" |
                     "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
@@ -15502,6 +15585,7 @@ pub(crate) fn compile_expr(
                             "stackSetDistribution" => "perry_ui_stack_set_distribution",
                             "textSetFontSize" => "perry_ui_text_set_font_size",
                             "textSetSelectable" => "perry_ui_text_set_selectable",
+                            "textSetWraps" => "perry_ui_text_set_wraps",
                             "buttonSetBordered" => "perry_ui_button_set_bordered",
                             "textfieldFocus" => "perry_ui_textfield_focus",
                             "widgetClearChildren" => "perry_ui_widget_clear_children",
@@ -15537,6 +15621,28 @@ pub(crate) fn compile_expr(
                         }
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
+                    }
+                    "textfieldGetString" => {
+                        // (handle) -> string: extract handle, call FFI, NaN-box result as string
+                        let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                            .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                        let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                        let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                        let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                        let handle = builder.inst_results(ptr_call)[0];
+
+                        let func = extern_funcs.get("perry_ui_textfield_get_string")
+                            .ok_or_else(|| anyhow!("perry_ui_textfield_get_string not declared"))?;
+                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                        let call = builder.ins().call(func_ref, &[handle]);
+                        let result_i64 = builder.inst_results(call)[0];
+
+                        // NaN-box the i64 string pointer
+                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                        let nanbox_call = builder.ins().call(nanbox_ref, &[result_i64]);
+                        return Ok(builder.inst_results(nanbox_call)[0]);
                     }
                     "textSetColor" | "buttonSetTextColor" | "buttonSetContentTintColor" => {
                         // (handle, r, g, b, a) — extract handle, pass 4 f64 args

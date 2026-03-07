@@ -42,8 +42,8 @@ const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;
 
 /// JS Handle tag: 0x7FFB_XXXX_XXXX_XXXX (48 bits for handle ID)
 /// This is used by perry-jsruntime to reference V8 objects
-const JS_HANDLE_TAG: u64 = 0x7FFB_0000_0000_0000;
-const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+pub(crate) const JS_HANDLE_TAG: u64 = 0x7FFB_0000_0000_0000;
+pub(crate) const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
 
 /// Function pointers for JS handle operations (set by perry-jsruntime)
 /// These allow the unified functions to dispatch to JS runtime when needed
@@ -54,12 +54,16 @@ type JsHandleArrayLengthFn = extern "C" fn(f64) -> i32;
 type JsHandleObjectGetPropertyFn = extern "C" fn(f64, *const i8, usize) -> f64;
 type JsHandleToStringFn = extern "C" fn(f64) -> *mut crate::string::StringHeader;
 type JsHandleCallMethodFn = unsafe extern "C" fn(f64, *const i8, usize, *const f64, usize) -> f64;
+type JsNativeModuleJsLoaderFn = unsafe extern "C" fn(*const u8, usize, *const u8, usize) -> f64;
+type JsNewFromHandleV8Fn = unsafe extern "C" fn(f64, *const f64, usize) -> f64;
 
 static JS_HANDLE_ARRAY_GET: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_ARRAY_LENGTH: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_OBJECT_GET_PROPERTY: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_TO_STRING: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 pub static JS_HANDLE_CALL_METHOD: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+pub static JS_NATIVE_MODULE_JS_LOADER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+pub static JS_NEW_FROM_HANDLE_V8: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Set the JS handle array get function (called by perry-jsruntime)
 #[no_mangle]
@@ -89,6 +93,36 @@ pub extern "C" fn js_set_handle_to_string(func: JsHandleToStringFn) {
 #[no_mangle]
 pub extern "C" fn js_set_handle_call_method(func: JsHandleCallMethodFn) {
     JS_HANDLE_CALL_METHOD.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Set the native module JS property loader (called by perry-jsruntime)
+/// This callback loads a native module via V8 and gets a property from it.
+#[no_mangle]
+pub extern "C" fn js_set_native_module_js_loader(func: JsNativeModuleJsLoaderFn) {
+    JS_NATIVE_MODULE_JS_LOADER.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Set the V8 new-from-handle function (called by perry-jsruntime)
+/// This callback calls V8's new_instance for JS handle constructors.
+#[no_mangle]
+pub extern "C" fn js_set_new_from_handle_v8(func: JsNewFromHandleV8Fn) {
+    JS_NEW_FROM_HANDLE_V8.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Try to load a property from a native module via V8 JS runtime.
+/// Returns TAG_UNDEFINED if JS runtime is not available or property not found.
+pub fn native_module_try_js_property(module_name: &str, property_name: &str) -> f64 {
+    let loader_ptr = JS_NATIVE_MODULE_JS_LOADER.load(Ordering::Relaxed);
+    if loader_ptr.is_null() {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    let loader: JsNativeModuleJsLoaderFn = unsafe { std::mem::transmute(loader_ptr) };
+    unsafe {
+        loader(
+            module_name.as_ptr(), module_name.len(),
+            property_name.as_ptr(), property_name.len(),
+        )
+    }
 }
 
 /// Check if a NaN-boxed value is a JS handle

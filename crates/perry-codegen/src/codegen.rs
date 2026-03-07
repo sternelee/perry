@@ -879,7 +879,12 @@ impl Compiler {
                     is_buffer,
                     is_event_emitter: matches!(init, Some(Expr::New { class_name, .. }) if class_name == "EventEmitter"),
                     is_union: matches!(ty, HirType::Union(_) | HirType::Named(_) | HirType::Object(_) | HirType::Any | HirType::Unknown),
-                    is_mixed_array: false,
+                    is_mixed_array: if let HirType::Array(elem_ty) = ty {
+                        // String/union/any arrays need mixed-array access (NaN-boxed elements)
+                        matches!(elem_ty.as_ref(), HirType::Union(_) | HirType::Any | HirType::String)
+                    } else {
+                        false
+                    },
                     is_integer: false,
                     is_integer_array: false,
                     is_i32: false,

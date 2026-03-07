@@ -38,6 +38,104 @@ pub extern "C" fn js_runtime_init() {
     perry_runtime::js_set_handle_object_get_property(js_handle_object_get_property);
     perry_runtime::js_set_handle_to_string(js_handle_to_string);
     perry_runtime::js_set_handle_call_method(js_call_method);
+    perry_runtime::js_set_native_module_js_loader(native_module_js_property_loader);
+    perry_runtime::js_set_new_from_handle_v8(js_new_from_handle_v8_impl);
+}
+
+/// V8 new_instance implementation — called via callback from perry-runtime's js_new_from_handle
+/// when the constructor is a JS handle (JS_HANDLE_TAG).
+unsafe extern "C" fn js_new_from_handle_v8_impl(
+    constructor_handle: f64,
+    args_ptr: *const f64,
+    args_len: usize,
+) -> f64 {
+    let args = if args_ptr.is_null() || args_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(args_ptr, args_len).to_vec()
+    };
+
+    with_runtime(|state| {
+        let scope = &mut state.runtime.handle_scope();
+
+        let constructor_val = native_to_v8(scope, constructor_handle);
+        if !constructor_val.is_function() {
+            return f64::from_bits(0x7FFC_0000_0000_0001);
+        }
+
+        let constructor = v8::Local::<v8::Function>::try_from(constructor_val).unwrap();
+
+        let v8_args: Vec<v8::Local<v8::Value>> = args
+            .iter()
+            .map(|&arg| {
+                let fixed = fixup_native_for_v8(arg);
+                native_to_v8(scope, fixed)
+            })
+            .collect();
+
+        let tc_scope = &mut v8::TryCatch::new(scope);
+        match constructor.new_instance(tc_scope, &v8_args) {
+            Some(r) => v8_to_native(tc_scope, r.into()),
+            None => {
+                if let Some(exception) = tc_scope.exception() {
+                    let msg = exception.to_rust_string_lossy(tc_scope);
+                    eprintln!("[js_new_from_handle_v8] constructor failed: {}", msg);
+                }
+                f64::from_bits(0x7FFC_0000_0000_0001)
+            }
+        }
+    })
+}
+
+/// V8 fallback for native module property access (e.g., ethers.Contract).
+/// Loads the module via V8, finds the property, and returns a JS handle.
+unsafe extern "C" fn native_module_js_property_loader(
+    module_name_ptr: *const u8,
+    module_name_len: usize,
+    property_name_ptr: *const u8,
+    property_name_len: usize,
+) -> f64 {
+    let module_name = std::str::from_utf8_unchecked(
+        std::slice::from_raw_parts(module_name_ptr, module_name_len),
+    );
+    let property_name = std::str::from_utf8_unchecked(
+        std::slice::from_raw_parts(property_name_ptr, property_name_len),
+    );
+
+    // Load the module via V8
+    let module_handle = js_load_module(
+        module_name.as_ptr() as *const i8,
+        module_name.len(),
+    );
+    if module_handle == 0 {
+        return f64::from_bits(0x7FFC_0000_0000_0001); // undefined
+    }
+
+    // Try getting the property as a direct named export (e.g., Contract from ethers)
+    let direct = js_get_export(
+        module_handle,
+        property_name.as_ptr() as *const i8,
+        property_name.len(),
+    );
+    if direct.to_bits() != 0x7FFC_0000_0000_0001 {
+        return direct;
+    }
+
+    // Try through the namespace export (e.g., ethers.Contract)
+    let namespace = js_get_export(
+        module_handle,
+        module_name.as_ptr() as *const i8,
+        module_name.len(),
+    );
+    if namespace.to_bits() != 0x7FFC_0000_0000_0001 {
+        return js_handle_object_get_property(
+            namespace,
+            property_name.as_ptr() as *const i8,
+            property_name.len(),
+        );
+    }
+
+    f64::from_bits(0x7FFC_0000_0000_0001) // undefined
 }
 
 /// Shutdown the JavaScript runtime and release resources
@@ -758,6 +856,14 @@ pub unsafe extern "C" fn js_new_from_handle(
     args_ptr: *const f64,
     args_len: usize,
 ) -> f64 {
+    let ctor_bits = constructor_handle.to_bits();
+    let tag = ctor_bits >> 48;
+
+    // Only process JS handles — for non-handle constructors, return undefined
+    if tag != 0x7FFB {
+        return f64::from_bits(0x7FFC_0000_0000_0001);
+    }
+
     let args = if args_ptr.is_null() || args_len == 0 {
         Vec::new()
     } else {
@@ -770,40 +876,32 @@ pub unsafe extern "C" fn js_new_from_handle(
         // Get the constructor from the handle
         let constructor_val = native_to_v8(scope, constructor_handle);
         if !constructor_val.is_function() {
-            log::error!("Value is not a constructor");
             return f64::from_bits(0x7FFC_0000_0000_0001);
         }
 
         let constructor = v8::Local::<v8::Function>::try_from(constructor_val).unwrap();
 
         // Convert arguments from native to V8
-        // Fix up raw pointers that weren't NaN-boxed properly
         let v8_args: Vec<v8::Local<v8::Value>> = args
             .iter()
-            .enumerate()
-            .map(|(_, &arg)| {
+            .map(|&arg| {
                 let fixed = fixup_native_for_v8(arg);
                 native_to_v8(scope, fixed)
             })
             .collect();
 
         // Call the constructor with 'new'
-        // Use try_catch to capture any V8 exception
         let tc_scope = &mut v8::TryCatch::new(scope);
-        let result = match constructor.new_instance(tc_scope, &v8_args) {
-            Some(r) => r,
+        match constructor.new_instance(tc_scope, &v8_args) {
+            Some(r) => v8_to_native(tc_scope, r.into()),
             None => {
                 if let Some(exception) = tc_scope.exception() {
                     let msg = exception.to_rust_string_lossy(tc_scope);
-                    eprintln!("[js_new_from_handle] CONSTRUCTOR FAILED: {}", msg);
-                } else {
-                    eprintln!("[js_new_from_handle] CONSTRUCTOR FAILED (no exception)");
+                    eprintln!("[js_new_from_handle] constructor failed: {}", msg);
                 }
-                return f64::from_bits(0x7FFC_0000_0000_0001);
+                f64::from_bits(0x7FFC_0000_0000_0001)
             }
-        };
-
-        v8_to_native(tc_scope, result.into())
+        }
     })
 }
 
