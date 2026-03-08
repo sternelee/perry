@@ -37,12 +37,39 @@ pub extern "C" fn js_fs_read_file_sync(path_value: f64) -> *mut StringHeader {
             Err(_) => return std::ptr::null_mut(),
         };
 
+        // Debug: log path on Android
+        #[cfg(target_os = "android")]
+        {
+            extern "C" {
+                fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+            }
+            let c_path = std::ffi::CString::new(path_str).unwrap_or_default();
+            __android_log_print(3, b"PerryFS\0".as_ptr(), b"readFileSync: path='%s'\0".as_ptr(), c_path.as_ptr());
+        }
+
         match fs::read_to_string(path_str) {
             Ok(content) => {
+                #[cfg(target_os = "android")]
+                {
+                    extern "C" {
+                        fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+                    }
+                    __android_log_print(3, b"PerryFS\0".as_ptr(), b"readFileSync: OK, %d bytes\0".as_ptr(), content.len() as i32);
+                }
                 let bytes = content.as_bytes();
                 js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
             }
-            Err(_) => std::ptr::null_mut(),
+            Err(_e) => {
+                #[cfg(target_os = "android")]
+                {
+                    extern "C" {
+                        fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+                    }
+                    let c_err = std::ffi::CString::new(format!("{}", _e)).unwrap_or_default();
+                    __android_log_print(6, b"PerryFS\0".as_ptr(), b"readFileSync: ERROR: %s\0".as_ptr(), c_err.as_ptr());
+                }
+                std::ptr::null_mut()
+            }
         }
     }
 }

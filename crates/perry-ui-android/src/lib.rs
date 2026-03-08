@@ -26,6 +26,13 @@ extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
 }
 
+pub fn log_debug(msg: &str) {
+    let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+    unsafe {
+        __android_log_print(3, b"PerryDebug\0".as_ptr(), b"%s\0".as_ptr(), c_msg.as_ptr());
+    }
+}
+
 /// Catch panics from widget functions, log them, and return 0 instead of aborting.
 fn catch_panic(name: &str, f: impl FnOnce() -> i64 + std::panic::UnwindSafe) -> i64 {
     match std::panic::catch_unwind(f) {
@@ -1176,14 +1183,54 @@ pub extern "C" fn perry_on_layout_change(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn __wrapper_perry_on_layout_change(_callback: f64) {}
 
-#[no_mangle]
-pub extern "C" fn hone_get_app_files_dir() -> i64 { 0 }
+extern "C" {
+    fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+}
+
+extern "C" {
+    fn js_nanbox_string(ptr: *const u8) -> f64;
+}
+
+fn get_app_files_dir_string() -> f64 {
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+    let result = (|| -> Option<f64> {
+        let activity = env.call_static_method(
+            "com/perry/app/PerryBridge", "getActivity",
+            "()Landroid/app/Activity;", &[],
+        ).ok()?.l().ok()?;
+        if activity.is_null() { return None; }
+        let files_dir = env.call_method(&activity, "getFilesDir",
+            "()Ljava/io/File;", &[]).ok()?.l().ok()?;
+        if files_dir.is_null() { return None; }
+        let abs_path = env.call_method(&files_dir, "getAbsolutePath",
+            "()Ljava/lang/String;", &[]).ok()?.l().ok()?;
+        let rust_str = env.get_string((&abs_path).into()).ok()?;
+        let bytes = rust_str.to_str().unwrap_or("").as_bytes();
+        if bytes.is_empty() { return None; }
+        // Append /workspace to the files dir
+        let mut path = String::from_utf8_lossy(bytes).to_string();
+        path.push_str("/workspace");
+        crate::log_debug(&format!("get_app_files_dir: path={}", path));
+        let path_bytes = path.as_bytes();
+        let str_ptr = unsafe { js_string_from_bytes(path_bytes.as_ptr(), path_bytes.len() as i64) };
+        // NaN-box the string pointer so Perry can use it as a string value
+        let nanboxed = unsafe { js_nanbox_string(str_ptr) };
+        Some(nanboxed)
+    })();
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    // Return empty string NaN-boxed (not 0, which is integer 0)
+    result.unwrap_or_else(|| unsafe { js_nanbox_string(std::ptr::null()) })
+}
 
 #[no_mangle]
-pub extern "C" fn __wrapper_hone_get_app_files_dir() -> i64 { 0 }
+pub extern "C" fn hone_get_app_files_dir() -> f64 { get_app_files_dir_string() }
 
 #[no_mangle]
-pub extern "C" fn hone_get_documents_dir() -> i64 { 0 }
+pub extern "C" fn __wrapper_hone_get_app_files_dir() -> f64 { get_app_files_dir_string() }
 
 #[no_mangle]
-pub extern "C" fn __wrapper_hone_get_documents_dir() -> i64 { 0 }
+pub extern "C" fn hone_get_documents_dir() -> f64 { get_app_files_dir_string() }
+
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_get_documents_dir() -> f64 { get_app_files_dir_string() }

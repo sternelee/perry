@@ -16547,6 +16547,10 @@ pub(crate) fn compile_expr(
             }
 
             // Determine which FFI function to call based on module, class, and method
+            if native_module.contains("mysql") {
+                eprintln!("[CODEGEN-DEBUG] NativeMethodCall: module={:?}, class={:?}, method={:?}, has_object={}, arg_vals.len()={}, is_pool={}, is_pool_connection={}",
+                    native_module, class_name, method, object.is_some(), arg_vals.len(), is_pool, is_pool_connection);
+            }
             let func_name = match (native_module.as_str(), object.is_some(), method.as_str()) {
                 // mysql2 module functions (no object)
                 ("mysql2" | "mysql2/promise", false, "createConnection") => "js_mysql2_create_connection",
@@ -17215,6 +17219,10 @@ pub(crate) fn compile_expr(
                 ("perry/plugin", false, "listTools") => "perry_plugin_list_tools",
 
                 _ => {
+                    if native_module.contains("mysql") {
+                        eprintln!("[CODEGEN-DEBUG] FALLBACK for mysql call: module={:?}, class={:?}, method={:?}, has_object={}, arg_vals.len()={}",
+                            native_module, class_name, method, object.is_some(), arg_vals.len());
+                    }
                     // If JS runtime is enabled, fall back to JS runtime for unsupported native methods
                     // For module-level calls (object is None), use js_call_function
                     // For instance method calls (object is Some), use js_native_call_method
