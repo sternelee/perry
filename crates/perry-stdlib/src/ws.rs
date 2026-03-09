@@ -17,6 +17,13 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use crate::common::async_bridge::{queue_promise_resolution, spawn};
 use crate::common::{register_handle, get_handle_mut, Handle};
 
+fn ws_file_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/hone-ws-macos.log") {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 // On iOS, delegate to native NSURLSessionWebSocketTask implementation (provided by perry-ui-ios)
 #[cfg(target_os = "ios")]
 extern "C" {
@@ -124,8 +131,6 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
     spawn(async move {
         match connect_async(&url).await {
             Ok((ws_stream, _response)) => {
-                let (mut write, mut read) = ws_stream.split();
-
                 // Create command channel
                 let (tx, mut rx) = mpsc::unbounded_channel::<WsCommand>();
 
@@ -147,82 +152,88 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
                     listeners: HashMap::new(),
                 });
 
-                // Spawn task to handle outgoing messages
-                let ws_id_send = ws_id;
+                // Single task handles both read and write (avoids BiLock split issue)
+                let ws_id_io = ws_id;
                 tokio::spawn(async move {
-                    while let Some(cmd) = rx.recv().await {
-                        match cmd {
-                            WsCommand::Send(msg) => {
-                                if let Err(_) = write.send(Message::Text(msg)).await {
-                                    break;
-                                }
-                            }
-                            WsCommand::Close => {
-                                let _ = write.send(Message::Close(None)).await;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Mark as closed
-                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_send) {
-                        conn.is_open = false;
-                    }
-                });
-
-                // Spawn task to handle incoming messages
-                let ws_id_recv = ws_id;
-                tokio::spawn(async move {
-                    while let Some(msg_result) = read.next().await {
-                        match msg_result {
-                            Ok(Message::Text(text)) => {
-                                // Check if there are 'message' listeners
-                                let has_listeners = WS_CLIENT_LISTENERS.lock().unwrap()
-                                    .get(&ws_id_recv)
-                                    .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
-                                    .unwrap_or(false);
-
-                                if has_listeners {
-                                    WS_PENDING_EVENTS.lock().unwrap().push(
-                                        PendingWsEvent::Message(ws_id_recv, text)
-                                    );
-                                } else {
-                                    // Fall back to buffering
-                                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                        conn.messages.push(text);
+                    ws_file_log(&format!("[WS-io] started for id={}", ws_id_io));
+                    let (mut write, mut read) = ws_stream.split();
+                    loop {
+                        tokio::select! {
+                            msg_result = read.next() => {
+                                match msg_result {
+                                    Some(Ok(Message::Text(text))) => {
+                                        let has_listeners = WS_CLIENT_LISTENERS.lock().unwrap()
+                                            .get(&ws_id_io)
+                                            .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
+                                            .unwrap_or(false);
+                                        if has_listeners {
+                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                PendingWsEvent::Message(ws_id_io, text)
+                                            );
+                                        } else {
+                                            if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                                conn.messages.push(text);
+                                            }
+                                        }
+                                    }
+                                    Some(Ok(Message::Close(frame))) => {
+                                        let (code, reason) = frame
+                                            .map(|f| (f.code.into(), f.reason.to_string()))
+                                            .unwrap_or((1000u16, String::new()));
+                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                            conn.is_open = false;
+                                        }
+                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                            PendingWsEvent::Close(ws_id_io, code, reason)
+                                        );
+                                        break;
+                                    }
+                                    Some(Err(e)) => {
+                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                            conn.is_open = false;
+                                        }
+                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                            PendingWsEvent::Error(ws_id_io, format!("{}", e))
+                                        );
+                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                            PendingWsEvent::Close(ws_id_io, 1006, String::new())
+                                        );
+                                        break;
+                                    }
+                                    Some(Ok(_)) => {} // binary, ping, pong — ignore
+                                    None => {
+                                        // Stream ended
+                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                            conn.is_open = false;
+                                        }
+                                        break;
                                     }
                                 }
                             }
-                            Ok(Message::Close(frame)) => {
-                                let (code, reason) = frame
-                                    .map(|f| (f.code.into(), f.reason.to_string()))
-                                    .unwrap_or((1000u16, String::new()));
-
-                                if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                    conn.is_open = false;
+                            cmd = rx.recv() => {
+                                match cmd {
+                                    Some(WsCommand::Send(msg)) => {
+                                        ws_file_log(&format!("[WS-io] sending len={}", msg.len()));
+                                        if let Err(e) = write.send(Message::Text(msg)).await {
+                                            ws_file_log(&format!("[WS-io] send ERR: {}", e));
+                                            break;
+                                        }
+                                        ws_file_log("[WS-io] send OK");
+                                    }
+                                    Some(WsCommand::Close) => {
+                                        let _ = write.send(Message::Close(None)).await;
+                                        break;
+                                    }
+                                    None => break, // channel closed
                                 }
-
-                                // Queue close event
-                                WS_PENDING_EVENTS.lock().unwrap().push(
-                                    PendingWsEvent::Close(ws_id_recv, code, reason)
-                                );
-                                break;
                             }
-                            Err(e) => {
-                                if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                    conn.is_open = false;
-                                }
-                                WS_PENDING_EVENTS.lock().unwrap().push(
-                                    PendingWsEvent::Error(ws_id_recv, format!("{}", e))
-                                );
-                                WS_PENDING_EVENTS.lock().unwrap().push(
-                                    PendingWsEvent::Close(ws_id_recv, 1006, String::new())
-                                );
-                                break;
-                            }
-                            _ => {}
                         }
                     }
+                    // Mark as closed
+                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                        conn.is_open = false;
+                    }
+                    ws_file_log(&format!("[WS-io] task ended for id={}", ws_id_io));
                 });
 
                 // Return WebSocket handle
@@ -280,81 +291,85 @@ pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
     spawn(async move {
         match connect_async(&url).await {
             Ok((ws_stream, _response)) => {
-                let (mut write, mut read) = ws_stream.split();
-
                 // Mark as open
                 if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id) {
                     conn.is_open = true;
                 }
 
-                // Spawn task to handle outgoing messages
-                let ws_id_send = ws_id;
+                // Single task handles both read and write (avoids BiLock split issue)
+                let ws_id_io = ws_id;
                 tokio::spawn(async move {
-                    while let Some(cmd) = rx.recv().await {
-                        match cmd {
-                            WsCommand::Send(msg) => {
-                                if write.send(Message::Text(msg)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            WsCommand::Close => {
-                                let _ = write.send(Message::Close(None)).await;
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_send) {
-                        conn.is_open = false;
-                    }
-                });
-
-                // Spawn task to handle incoming messages
-                let ws_id_recv = ws_id;
-                tokio::spawn(async move {
-                    while let Some(msg_result) = read.next().await {
-                        match msg_result {
-                            Ok(Message::Text(text)) => {
-                                let has_listeners = WS_CLIENT_LISTENERS.lock().unwrap()
-                                    .get(&ws_id_recv)
-                                    .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
-                                    .unwrap_or(false);
-
-                                if has_listeners {
-                                    WS_PENDING_EVENTS.lock().unwrap().push(
-                                        PendingWsEvent::Message(ws_id_recv, text)
-                                    );
-                                } else {
-                                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                        conn.messages.push(text);
+                    let (mut write, mut read) = ws_stream.split();
+                    loop {
+                        tokio::select! {
+                            msg_result = read.next() => {
+                                match msg_result {
+                                    Some(Ok(Message::Text(text))) => {
+                                        let has_listeners = WS_CLIENT_LISTENERS.lock().unwrap()
+                                            .get(&ws_id_io)
+                                            .map(|l| l.listeners.get("message").map(|v| !v.is_empty()).unwrap_or(false))
+                                            .unwrap_or(false);
+                                        if has_listeners {
+                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                PendingWsEvent::Message(ws_id_io, text)
+                                            );
+                                        } else {
+                                            if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                                conn.messages.push(text);
+                                            }
+                                        }
+                                    }
+                                    Some(Ok(Message::Close(frame))) => {
+                                        let (code, reason) = frame
+                                            .map(|f| (f.code.into(), f.reason.to_string()))
+                                            .unwrap_or((1000u16, String::new()));
+                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                            conn.is_open = false;
+                                        }
+                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                            PendingWsEvent::Close(ws_id_io, code, reason)
+                                        );
+                                        break;
+                                    }
+                                    Some(Err(e)) => {
+                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                            conn.is_open = false;
+                                        }
+                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                            PendingWsEvent::Error(ws_id_io, format!("{}", e))
+                                        );
+                                        WS_PENDING_EVENTS.lock().unwrap().push(
+                                            PendingWsEvent::Close(ws_id_io, 1006, String::new())
+                                        );
+                                        break;
+                                    }
+                                    Some(Ok(_)) => {}
+                                    None => {
+                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                            conn.is_open = false;
+                                        }
+                                        break;
                                     }
                                 }
                             }
-                            Ok(Message::Close(frame)) => {
-                                let (code, reason) = frame
-                                    .map(|f| (f.code.into(), f.reason.to_string()))
-                                    .unwrap_or((1000u16, String::new()));
-                                if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                    conn.is_open = false;
+                            cmd = rx.recv() => {
+                                match cmd {
+                                    Some(WsCommand::Send(msg)) => {
+                                        if write.send(Message::Text(msg)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Some(WsCommand::Close) => {
+                                        let _ = write.send(Message::Close(None)).await;
+                                        break;
+                                    }
+                                    None => break,
                                 }
-                                WS_PENDING_EVENTS.lock().unwrap().push(
-                                    PendingWsEvent::Close(ws_id_recv, code, reason)
-                                );
-                                break;
                             }
-                            Err(e) => {
-                                if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                    conn.is_open = false;
-                                }
-                                WS_PENDING_EVENTS.lock().unwrap().push(
-                                    PendingWsEvent::Error(ws_id_recv, format!("{}", e))
-                                );
-                                WS_PENDING_EVENTS.lock().unwrap().push(
-                                    PendingWsEvent::Close(ws_id_recv, 1006, String::new())
-                                );
-                                break;
-                            }
-                            _ => {}
                         }
+                    }
+                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                        conn.is_open = false;
                     }
                 });
             }
@@ -396,13 +411,24 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
 pub unsafe extern "C" fn js_ws_send(handle: i64, message_ptr: *const StringHeader) {
     let ws_id = handle as usize;
     let message = match string_from_header(message_ptr) {
-        Some(m) => m,
-        None => return,
+        Some(m) => {
+            ws_file_log(&format!("[WS-send] id={} len={}", ws_id, m.len()));
+            m
+        },
+        None => {
+            ws_file_log(&format!("[WS-send] id={} string_from_header=None", ws_id));
+            return;
+        },
     };
 
     let guard = WS_CONNECTIONS.lock().unwrap();
     if let Some(conn) = guard.get(&ws_id) {
-        let _ = conn.sender.send(WsCommand::Send(message));
+        match conn.sender.send(WsCommand::Send(message)) {
+            Ok(()) => ws_file_log("[WS-send] channel send OK"),
+            Err(e) => ws_file_log(&format!("[WS-send] channel send ERR: {}", e)),
+        }
+    } else {
+        ws_file_log(&format!("[WS-send] no connection for id={}", ws_id));
     }
 }
 
@@ -742,72 +768,85 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
                                         PendingWsEvent::Connection(handle_id, ws_id)
                                     );
 
-                                    // Spawn outgoing message handler
-                                    let ws_id_send = ws_id;
+                                    // Single task handles both read and write (avoids BiLock split issue)
+                                    let ws_id_io = ws_id;
+                                    ws_file_log(&format!("[WS-srv] spawning io task for id={}", ws_id_io));
                                     tokio::spawn(async move {
-                                        while let Some(cmd) = rx.recv().await {
-                                            match cmd {
-                                                WsCommand::Send(msg) => {
-                                                    if write.send(Message::Text(msg)).await.is_err() {
-                                                        break;
+                                        loop {
+                                            tokio::select! {
+                                                msg_result = read.next() => {
+                                                    match msg_result {
+                                                        Some(Ok(Message::Text(text))) => {
+                                                            ws_file_log(&format!("[WS-srv-io] id={} recv len={}", ws_id_io, text.len()));
+                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                                PendingWsEvent::Message(ws_id_io, text)
+                                                            );
+                                                        }
+                                                        Some(Ok(Message::Binary(data))) => {
+                                                            let text = String::from_utf8_lossy(&data).to_string();
+                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                                PendingWsEvent::Message(ws_id_io, text)
+                                                            );
+                                                        }
+                                                        Some(Ok(Message::Close(frame))) => {
+                                                            let (code, reason) = frame
+                                                                .map(|f| (f.code.into(), f.reason.to_string()))
+                                                                .unwrap_or((1000u16, String::new()));
+                                                            if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                                                conn.is_open = false;
+                                                            }
+                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                                PendingWsEvent::Close(ws_id_io, code, reason)
+                                                            );
+                                                            break;
+                                                        }
+                                                        Some(Err(e)) => {
+                                                            if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                                                conn.is_open = false;
+                                                            }
+                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                                PendingWsEvent::Error(ws_id_io, format!("{}", e))
+                                                            );
+                                                            WS_PENDING_EVENTS.lock().unwrap().push(
+                                                                PendingWsEvent::Close(ws_id_io, 1006, String::new())
+                                                            );
+                                                            break;
+                                                        }
+                                                        Some(Ok(_)) => {}
+                                                        None => {
+                                                            if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
+                                                                conn.is_open = false;
+                                                            }
+                                                            break;
+                                                        }
                                                     }
                                                 }
-                                                WsCommand::Close => {
-                                                    let _ = write.send(Message::Close(None)).await;
-                                                    break;
+                                                cmd = rx.recv() => {
+                                                    match cmd {
+                                                        Some(WsCommand::Send(msg)) => {
+                                                            ws_file_log(&format!("[WS-srv-io] id={} sending len={}", ws_id_io, msg.len()));
+                                                            match write.send(Message::Text(msg)).await {
+                                                                Ok(_) => {
+                                                                    ws_file_log(&format!("[WS-srv-io] id={} send OK", ws_id_io));
+                                                                }
+                                                                Err(e) => {
+                                                                    ws_file_log(&format!("[WS-srv-io] id={} send ERR: {}", ws_id_io, e));
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                        Some(WsCommand::Close) => {
+                                                            ws_file_log(&format!("[WS-srv-io] id={} closing", ws_id_io));
+                                                            let _ = write.send(Message::Close(None)).await;
+                                                            break;
+                                                        }
+                                                        None => break,
+                                                    }
                                                 }
                                             }
                                         }
-                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_send) {
+                                        if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_io) {
                                             conn.is_open = false;
-                                        }
-                                    });
-
-                                    // Spawn incoming message handler
-                                    // For server-connected clients, always queue as events
-                                    // (server-level 'message' listener handles dispatch)
-                                    let ws_id_recv = ws_id;
-                                    tokio::spawn(async move {
-                                        while let Some(msg_result) = read.next().await {
-                                            match msg_result {
-                                                Ok(Message::Text(text)) => {
-                                                    WS_PENDING_EVENTS.lock().unwrap().push(
-                                                        PendingWsEvent::Message(ws_id_recv, text)
-                                                    );
-                                                }
-                                                Ok(Message::Binary(data)) => {
-                                                    let text = String::from_utf8_lossy(&data).to_string();
-                                                    WS_PENDING_EVENTS.lock().unwrap().push(
-                                                        PendingWsEvent::Message(ws_id_recv, text)
-                                                    );
-                                                }
-                                                Ok(Message::Close(frame)) => {
-                                                    let (code, reason) = frame
-                                                        .map(|f| (f.code.into(), f.reason.to_string()))
-                                                        .unwrap_or((1000u16, String::new()));
-
-                                                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                                        conn.is_open = false;
-                                                    }
-                                                    WS_PENDING_EVENTS.lock().unwrap().push(
-                                                        PendingWsEvent::Close(ws_id_recv, code, reason)
-                                                    );
-                                                    break;
-                                                }
-                                                Err(e) => {
-                                                    if let Some(conn) = WS_CONNECTIONS.lock().unwrap().get_mut(&ws_id_recv) {
-                                                        conn.is_open = false;
-                                                    }
-                                                    WS_PENDING_EVENTS.lock().unwrap().push(
-                                                        PendingWsEvent::Error(ws_id_recv, format!("{}", e))
-                                                    );
-                                                    WS_PENDING_EVENTS.lock().unwrap().push(
-                                                        PendingWsEvent::Close(ws_id_recv, 1006, String::new())
-                                                    );
-                                                    break;
-                                                }
-                                                _ => {}
-                                            }
                                         }
                                     });
                                 }
