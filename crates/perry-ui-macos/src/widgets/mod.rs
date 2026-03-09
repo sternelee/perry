@@ -22,6 +22,7 @@ pub mod toolbar;
 pub mod lazyvstack;
 pub mod table;
 pub mod qrcode;
+pub mod textarea;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Sel};

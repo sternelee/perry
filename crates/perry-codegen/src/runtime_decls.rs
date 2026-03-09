@@ -7898,6 +7898,34 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_textfield_create".to_string(), func_id);
         }
 
+        // perry_ui_textarea_create(placeholder_ptr: i64, on_change: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // placeholder string ptr
+            sig.params.push(AbiParam::new(types::F64)); // on_change closure (NaN-boxed)
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_ui_textarea_create", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textarea_create".to_string(), func_id);
+        }
+
+        // perry_ui_textarea_set_string(handle: i64, text_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.params.push(AbiParam::new(types::I64)); // text string ptr
+            let func_id = self.module.declare_function("perry_ui_textarea_set_string", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textarea_set_string".to_string(), func_id);
+        }
+
+        // perry_ui_textarea_get_string(handle: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // handle
+            sig.returns.push(AbiParam::new(types::I64)); // string ptr
+            let func_id = self.module.declare_function("perry_ui_textarea_get_string", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textarea_get_string".to_string(), func_id);
+        }
+
         // perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64
         {
             let mut sig = self.module.make_signature();

@@ -518,6 +518,26 @@ pub extern "C" fn perry_ui_textfield_set_on_submit(handle: i64, on_submit: f64) 
     widgets::textfield::set_on_submit(handle, on_submit);
 }
 
+// --- TextArea (multi-line editor) ---
+
+/// Create a multi-line text area with onChange callback. Returns widget handle.
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    widgets::textarea::create(placeholder_ptr as *const u8, on_change)
+}
+
+/// Set the text of a TextArea.
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_set_string(handle: i64, text_ptr: i64) {
+    widgets::textarea::set_string(handle, text_ptr as *const u8);
+}
+
+/// Get the text of a TextArea as a StringHeader pointer.
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_get_string(handle: i64) -> i64 {
+    widgets::textarea::get_string(handle) as i64
+}
+
 /// Add a child widget to a parent widget at a specific position.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle: i64, index: f64) {

@@ -719,6 +719,11 @@ fn lower_module_decl(
 ) -> Result<()> {
     match decl {
         ast::ModuleDecl::Import(import_decl) => {
+            // Skip type-only imports (import type { ... } from '...') - they have no runtime value
+            if import_decl.type_only {
+                return Ok(());
+            }
+
             // Get the source module path
             let raw_source = import_decl.src.value.as_str().unwrap_or("").to_string();
             // Normalize "node:" prefix (e.g., "node:async_hooks" -> "async_hooks")
@@ -732,6 +737,8 @@ fn lower_module_decl(
             for spec in &import_decl.specifiers {
                 match spec {
                     ast::ImportSpecifier::Named(named) => {
+                        // Skip individual type-only specifiers (import { type Foo, Bar })
+                        if named.is_type_only { continue; }
                         let local = named.local.sym.to_string();
                         let imported = named.imported
                             .as_ref()

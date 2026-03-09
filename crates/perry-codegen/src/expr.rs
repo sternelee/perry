@@ -6587,7 +6587,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
-                                    || (module == "perry/ui" && method == "textfieldGetString")
+                                    || (module == "perry/ui" && (method == "textfieldGetString" || method == "textareaGetString"))
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 // Binary Add with string operands (from template literals)
@@ -7008,7 +7008,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
-                                    || (module == "perry/ui" && method == "textfieldGetString")
+                                    || (module == "perry/ui" && (method == "textfieldGetString" || method == "textareaGetString"))
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -7189,7 +7189,7 @@ pub(crate) fn compile_expr(
                                     || (module == "ws" && method == "receive")
                                     || ((module == "node-fetch" || module == "fetch" || module == "fetchWithAuth" || module == "fetchPostWithAuth") && method == "statusText")
                                     || (module == "node-fetch" && method == "streamPoll")
-                                    || (module == "perry/ui" && method == "textfieldGetString")
+                                    || (module == "perry/ui" && (method == "textfieldGetString" || method == "textareaGetString"))
                                     || (module == "ethers" && (method == "formatUnits" || method == "getAddress" || method == "formatEther"))
                                 }
                                 Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -15391,6 +15391,32 @@ pub(crate) fn compile_expr(
                         let tf_handle = builder.inst_results(tf_call)[0];
                         return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), tf_handle));
                     }
+                    "TextArea" => {
+                        // TextArea("placeholder", (text) => { ... })
+                        let placeholder_i64 = if !arg_vals.is_empty() {
+                            let placeholder_f64 = ensure_f64(builder, arg_vals[0]);
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                            let str_call = builder.ins().call(get_str_ref, &[placeholder_f64]);
+                            builder.inst_results(str_call)[0]
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+
+                        let on_change_f64 = if arg_vals.len() > 1 {
+                            ensure_f64(builder, arg_vals[1])
+                        } else {
+                            builder.ins().f64const(0.0)
+                        };
+
+                        let ta_func = extern_funcs.get("perry_ui_textarea_create")
+                            .ok_or_else(|| anyhow!("perry_ui_textarea_create not declared"))?;
+                        let ta_ref = module.declare_func_in_func(*ta_func, builder.func);
+                        let ta_call = builder.ins().call(ta_ref, &[placeholder_i64, on_change_f64]);
+                        let ta_handle = builder.inst_results(ta_call)[0];
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), ta_handle));
+                    }
                     "Toggle" => {
                         // Toggle("label", (checked) => { ... })
                         // First arg: label string, second arg: onChange closure
@@ -15653,7 +15679,7 @@ pub(crate) fn compile_expr(
                     // ============================================================
                     // Phase A: Handle-extracting widget mutation functions
                     // ============================================================
-                    "textSetString" | "buttonSetTitle" | "buttonSetImage" | "textfieldSetString" | "textSetFontFamily" | "qrCodeSetData" => {
+                    "textSetString" | "buttonSetTitle" | "buttonSetImage" | "textfieldSetString" | "textareaSetString" | "textSetFontFamily" | "qrCodeSetData" => {
                         // (handle, text) — extract handle via js_nanbox_get_pointer, text via js_get_string_pointer_unified
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -15674,6 +15700,7 @@ pub(crate) fn compile_expr(
                             "buttonSetTitle" => "perry_ui_button_set_title",
                             "buttonSetImage" => "perry_ui_button_set_image",
                             "textfieldSetString" => "perry_ui_textfield_set_string",
+                            "textareaSetString" => "perry_ui_textarea_set_string",
                             "textSetFontFamily" => "perry_ui_text_set_font_family",
                             "buttonSetImage" => "perry_ui_button_set_image",
                             "qrCodeSetData" => "perry_ui_qrcode_set_data",
@@ -15765,7 +15792,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "textfieldGetString" => {
+                    "textfieldGetString" | "textareaGetString" => {
                         // (handle) -> string: extract handle, call FFI, NaN-box result as string
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -15774,8 +15801,12 @@ pub(crate) fn compile_expr(
                         let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
                         let handle = builder.inst_results(ptr_call)[0];
 
-                        let func = extern_funcs.get("perry_ui_textfield_get_string")
-                            .ok_or_else(|| anyhow!("perry_ui_textfield_get_string not declared"))?;
+                        let ffi_name = match method.as_str() {
+                            "textareaGetString" => "perry_ui_textarea_get_string",
+                            _ => "perry_ui_textfield_get_string",
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         let call = builder.ins().call(func_ref, &[handle]);
                         let result_i64 = builder.inst_results(call)[0];
