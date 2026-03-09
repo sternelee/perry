@@ -4,8 +4,8 @@
 //! Provides synchronous SQLite database operations.
 
 use perry_runtime::{
-    js_array_alloc, js_array_push, js_object_alloc, js_object_set_field, js_string_from_bytes,
-    ArrayHeader, JSValue, ObjectHeader, StringHeader,
+    js_array_alloc, js_array_push, js_object_alloc, js_object_alloc_with_shape, js_object_set_field,
+    js_string_from_bytes, ArrayHeader, JSValue, ObjectHeader, StringHeader,
 };
 use rusqlite::{Connection, params_from_iter, types::Value as SqliteValue};
 use std::sync::Mutex;
@@ -58,6 +58,24 @@ unsafe fn sqlite_value_to_jsvalue(value: &SqliteValue) -> JSValue {
     }
 }
 
+/// Build packed keys (null-separated) and a shape_id from column names.
+fn build_packed_keys(column_names: &[String]) -> (Vec<u8>, u32) {
+    let mut packed = Vec::new();
+    let mut shape_id: u32 = 0x5143_0000; // "SQ" prefix
+    for (i, name) in column_names.iter().enumerate() {
+        if i > 0 {
+            packed.push(0u8);
+        }
+        packed.extend_from_slice(name.as_bytes());
+        // Simple hash for shape_id
+        for &b in name.as_bytes() {
+            shape_id = shape_id.wrapping_mul(31).wrapping_add(b as u32);
+        }
+    }
+    shape_id = shape_id.wrapping_add(column_names.len() as u32);
+    (packed, shape_id)
+}
+
 /// new Database(filename) -> Database
 ///
 /// Open or create a SQLite database.
@@ -92,13 +110,10 @@ pub unsafe extern "C" fn js_sqlite_exec(db_handle: Handle, sql_ptr: *const Strin
 
     if let Some(db) = get_handle::<SqliteDbHandle>(db_handle) {
         if let Ok(conn) = db.conn.lock() {
-            conn.execute_batch(&sql).is_ok()
-        } else {
-            false
+            return conn.execute_batch(&sql).is_ok();
         }
-    } else {
-        false
     }
+    false
 }
 
 /// db.prepare(sql) -> Statement
@@ -227,10 +242,17 @@ pub unsafe extern "C" fn js_sqlite_stmt_get(
                         .map(|s| s.to_string())
                         .collect();
 
+                    let (packed_keys, shape_id) = build_packed_keys(&column_names);
+
                     let mut rows = prepared.query(param_refs.as_slice());
                     if let Ok(ref mut rows) = rows {
                         if let Ok(Some(row)) = rows.next() {
-                            let obj = js_object_alloc(0, column_names.len() as u32);
+                            let obj = js_object_alloc_with_shape(
+                                shape_id,
+                                column_names.len() as u32,
+                                packed_keys.as_ptr(),
+                                packed_keys.len() as u32,
+                            );
 
                             for (idx, _name) in column_names.iter().enumerate() {
                                 let value: SqliteValue = row.get(idx).unwrap_or(SqliteValue::Null);
@@ -295,10 +317,17 @@ pub unsafe extern "C" fn js_sqlite_stmt_all(
                         .map(|s| s.to_string())
                         .collect();
 
+                    let (packed_keys, shape_id) = build_packed_keys(&column_names);
+
                     let mut rows = prepared.query(param_refs.as_slice());
                     if let Ok(ref mut rows) = rows {
                         while let Ok(Some(row)) = rows.next() {
-                            let obj = js_object_alloc(0, column_names.len() as u32);
+                            let obj = js_object_alloc_with_shape(
+                                shape_id,
+                                column_names.len() as u32,
+                                packed_keys.as_ptr(),
+                                packed_keys.len() as u32,
+                            );
 
                             for (idx, _name) in column_names.iter().enumerate() {
                                 let value: SqliteValue = row.get(idx).unwrap_or(SqliteValue::Null);

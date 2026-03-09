@@ -9016,6 +9016,10 @@ pub(crate) fn compile_expr(
                             ("big.js" | "decimal.js" | "bignumber.js", "div") => Some("js_decimal_div"),
                             ("big.js" | "decimal.js" | "bignumber.js", "toFixed") => Some("js_decimal_to_fixed"),
                             ("big.js" | "decimal.js" | "bignumber.js", "toString") => Some("js_decimal_to_string"),
+                            // better-sqlite3: db.prepare(sql).run/get/all(params)
+                            ("better-sqlite3", "run") => Some("js_sqlite_stmt_run"),
+                            ("better-sqlite3", "get") => Some("js_sqlite_stmt_get"),
+                            ("better-sqlite3", "all") => Some("js_sqlite_stmt_all"),
                             _ => None,
                         };
 
@@ -9048,6 +9052,18 @@ pub(crate) fn compile_expr(
                                     while call_args.len() < 4 {
                                         call_args.push(builder.ins().iconst(types::I64, 0));
                                     }
+                                }
+                            } else if native_module == "better-sqlite3" {
+                                // better-sqlite3 stmt methods: run/get/all take (stmt, params_json_string)
+                                if !arg_vals.is_empty() {
+                                    let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                    let str_call = builder.ins().call(get_str_ref, &[str_f64]);
+                                    call_args.push(builder.inst_results(str_call)[0]);
+                                } else {
+                                    call_args.push(builder.ins().iconst(types::I64, 0));
                                 }
                             } else {
                                 for arg in &arg_vals {
@@ -11370,6 +11386,33 @@ pub(crate) fn compile_expr(
             }
 
             // Handle native module constructors first (only if not user-defined)
+
+            // new Database(filename) — better-sqlite3 compatible
+            if class_name == "Database" && !classes.contains_key("Database") {
+                if args.is_empty() {
+                    // new Database() without filename — return -1 (error)
+                    let neg_one = builder.ins().iconst(types::I64, -1i64);
+                    return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), neg_one));
+                }
+                // Compile the filename argument
+                let filename_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                // Extract raw string pointer
+                let str_f64 = ensure_f64(builder, filename_val);
+                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                let str_call = builder.ins().call(get_str_ref, &[str_f64]);
+                let str_ptr = builder.inst_results(str_call)[0];
+                // Call js_sqlite_open(filename_ptr) -> handle (i64)
+                let open_func = extern_funcs.get("js_sqlite_open")
+                    .ok_or_else(|| anyhow!("js_sqlite_open not declared"))?;
+                let open_ref = module.declare_func_in_func(*open_func, builder.func);
+                let open_call = builder.ins().call(open_ref, &[str_ptr]);
+                let handle = builder.inst_results(open_call)[0];
+                // Return handle as f64 (NaN-boxed pointer)
+                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), handle));
+            }
+
             if class_name == "EventEmitter" && !classes.contains_key("EventEmitter") {
                 // new EventEmitter() - call js_event_emitter_new()
                 let new_func = extern_funcs.get("js_event_emitter_new")
@@ -15654,7 +15697,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "widgetSetHidden" | "stackSetDetachesHidden" | "stackSetDistribution" | "textSetFontSize" | "textSetSelectable" |
+                    "widgetSetHidden" | "stackSetDetachesHidden" | "stackSetDistribution" | "stackSetAlignment" | "textSetFontSize" | "textSetSelectable" |
                     "textSetWraps" |
                     "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" | "widgetMatchParentWidth" |
                     "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" => {
@@ -15670,6 +15713,7 @@ pub(crate) fn compile_expr(
                             "widgetSetHidden" => "perry_ui_set_widget_hidden",
                             "stackSetDetachesHidden" => "perry_ui_stack_set_detaches_hidden",
                             "stackSetDistribution" => "perry_ui_stack_set_distribution",
+                            "stackSetAlignment" => "perry_ui_stack_set_alignment",
                             "textSetFontSize" => "perry_ui_text_set_font_size",
                             "textSetSelectable" => "perry_ui_text_set_selectable",
                             "textSetWraps" => "perry_ui_text_set_wraps",
@@ -18268,11 +18312,15 @@ pub(crate) fn compile_expr(
                             }
                         }
                         "run" | "get" | "all" => {
-                            // run(params) / get(params) / all(params) - params is array
+                            // run(params_json) / get(params_json) / all(params_json)
+                            // params is a JSON-stringified array string
                             if !arg_vals.is_empty() {
-                                let params_f64 = ensure_f64(builder, arg_vals[0]);
-                                let params_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), params_f64);
-                                call_args.push(params_i64);
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                call_args.push(builder.inst_results(call)[0]);
                             } else {
                                 call_args.push(builder.ins().iconst(types::I64, 0));
                             }
@@ -19351,6 +19399,37 @@ pub(crate) fn compile_expr(
                             // Void functions (openURL, preferencesSet, keychain*, notification*) - return undefined
                             const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                             Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)))
+                        }
+                    }
+                } else if native_module == "better-sqlite3" {
+                    // better-sqlite3 result handling
+                    match method.as_str() {
+                        // prepare/transaction return handles (i64) - NaN-box with POINTER_TAG
+                        "prepare" | "open" | "transaction" => {
+                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let call = builder.ins().call(nanbox_ref, &[result]);
+                            Ok(builder.inst_results(call)[0])
+                        }
+                        // exec returns bool (i32) - convert to f64
+                        "exec" | "close" => {
+                            let result_i64 = builder.ins().uextend(types::I64, result);
+                            Ok(builder.ins().fcvt_from_sint(types::F64, result_i64))
+                        }
+                        // all returns array pointer, get returns JSValue, run returns object pointer
+                        // These are already i64 pointers - NaN-box with POINTER_TAG
+                        "all" | "run" => {
+                            let nanbox_func = extern_funcs.get("js_nanbox_pointer")
+                                .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                            let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                            let call = builder.ins().call(nanbox_ref, &[result]);
+                            Ok(builder.inst_results(call)[0])
+                        }
+                        // get returns JSValue (f64) directly
+                        "get" => Ok(result),
+                        _ => {
+                            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result))
                         }
                     }
                 } else {

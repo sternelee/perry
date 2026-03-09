@@ -1570,7 +1570,8 @@ fn fix_native_instance_expr_with_locals(
             if let Expr::PropertyGet { object, property } = callee.as_mut() {
                 // Check for LocalGet (local variable)
                 if let Expr::LocalGet(local_id) = object.as_ref() {
-                    if let Some((native_module, native_class)) = local_id_instances.get(local_id) {
+                    let found = local_id_instances.get(local_id);
+                    if let Some((native_module, native_class)) = found {
                         // Transform args first
                         for arg in args.iter_mut() {
                             fix_native_instance_expr_with_locals(arg, native_instances, local_id_instances);
@@ -1769,7 +1770,6 @@ fn detect_native_instance_creation_with_context(
         }
         Expr::NativeMethodCall { module, object: Some(_), class_name: Some(class), method, .. } => {
             // Instance methods that return new native instances
-            // e.g., pool.getConnection() returns a PoolConnection
             match (module.as_str(), class.as_str(), method.as_str()) {
                 ("mysql2" | "mysql2/promise", "Pool", "getConnection") => {
                     Some((module.clone(), "PoolConnection".to_string()))
@@ -1779,6 +1779,9 @@ fn detect_native_instance_creation_with_context(
                 }
                 ("ioredis", "Redis", "duplicate") => {
                     Some((module.clone(), "Redis".to_string()))
+                }
+                ("better-sqlite3", "Database", "prepare") => {
+                    Some((module.clone(), "Statement".to_string()))
                 }
                 _ => None,
             }
@@ -1801,6 +1804,9 @@ fn detect_native_instance_creation_with_context(
                             ("ioredis", "Redis", "duplicate") => {
                                 Some((module.clone(), "Redis".to_string()))
                             }
+                            ("better-sqlite3", "Database", "prepare") => {
+                                Some((module.clone(), "Statement".to_string()))
+                            }
                             _ => None,
                         };
                     }
@@ -1814,6 +1820,13 @@ fn detect_native_instance_creation_with_context(
                 }
             }
             None
+        }
+        Expr::New { class_name, .. } => {
+            // new Database(...) → better-sqlite3 Database instance
+            match class_name.as_str() {
+                "Database" => Some(("better-sqlite3".to_string(), "Database".to_string())),
+                _ => None,
+            }
         }
         Expr::Await(inner) => {
             // Async creation: await mysql.createConnection() or await pool.getConnection() or await fetch()

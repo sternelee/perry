@@ -966,6 +966,21 @@ fn lower_module_decl(
                                 }
                             }
 
+                            // Check if this is a `new NativeClass(...)` expression
+                            // e.g., const db = new Database('mango.db') where Database is from better-sqlite3
+                            if let ast::Expr::New(new_expr) = init.as_ref() {
+                                if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                                    let class_name_str = class_ident.sym.as_ref();
+                                    // Check if this class comes from a native module import
+                                    let native_info = ctx.lookup_native_module(class_name_str)
+                                        .map(|(m, _)| m.to_string());
+                                    if let Some(module_name) = native_info {
+                                        ctx.register_native_instance(name.clone(), module_name.clone(), class_name_str.to_string());
+                                        ctx.module_native_instances.push((name.clone(), module_name, class_name_str.to_string()));
+                                    }
+                                }
+                            }
+
                             // Check if this is a method call on a registered native instance (chaining).
                             // e.g., const db = client.db(name) where client is a mongodb native instance.
                             {
@@ -990,6 +1005,7 @@ fn lower_module_decl(
                                                             ("mongodb", "db") => Some("Database"),
                                                             ("mongodb", "collection") => Some("Collection"),
                                                             ("mysql2" | "mysql2/promise", "getConnection") => Some("PoolConnection"),
+                                                            ("better-sqlite3", "prepare") => Some("Statement"),
                                                             _ => None,
                                                         };
                                                         if let Some(class_name) = returns_handle {

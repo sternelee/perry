@@ -1827,6 +1827,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
+    // Re-run local native instance fix after cross-module fixes.
+    // Cross-module fixes may have created new NativeMethodCall expressions
+    // (e.g., db.prepare(sql) → NativeMethodCall) that produce native instances
+    // which need local tracking (e.g., const stmt = db.prepare(sql); stmt.all()).
+    for (_, hir_module) in ctx.native_modules.iter_mut() {
+        perry_hir::fix_local_native_instances(hir_module);
+    }
+
     // Run monomorphization pass on all native modules
     for (_, hir_module) in ctx.native_modules.iter_mut() {
         perry_hir::monomorphize_module(hir_module);
@@ -3326,7 +3334,24 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let _ = fs::remove_file(&exe_path);
 
         let exe_stem = exe_path.file_stem().and_then(|s| s.to_str()).unwrap_or(stem);
-        let bundle_id = format!("com.perry.{}", exe_stem);
+        // Check package.json for a custom bundleId, fall back to com.perry.{name}
+        // Search relative to the source file, walking up directories
+        let bundle_id = (|| -> Option<String> {
+            let mut dir = args.input.canonicalize().ok()?;
+            for _ in 0..5 {
+                dir = dir.parent()?.to_path_buf();
+                let pkg = dir.join("package.json");
+                if pkg.exists() {
+                    let data = fs::read_to_string(pkg).ok()?;
+                    let idx = data.find("\"bundleId\"")?;
+                    let colon = data[idx..].find(':')?;
+                    let q1 = data[idx + colon..].find('"')? + idx + colon + 1;
+                    let q2 = data[q1..].find('"')? + q1;
+                    return Some(data[q1..q2].to_string());
+                }
+            }
+            None
+        })().unwrap_or_else(|| format!("com.perry.{}", exe_stem));
         let info_plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

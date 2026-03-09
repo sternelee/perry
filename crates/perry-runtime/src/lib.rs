@@ -61,7 +61,7 @@ pub use closure::{js_closure_call0, js_closure_call1, js_closure_call2, js_closu
 
 // Re-export commonly used FFI functions for stdlib
 pub use array::{js_array_alloc, js_array_set, js_array_get, js_array_push, js_array_length, js_array_is_array, js_array_get_jsvalue};
-pub use object::{js_object_alloc, js_object_set_field, js_object_set_field_f64, js_object_get_field, js_object_set_keys, js_object_keys, js_object_values, js_object_entries, js_object_get_field_by_name, js_object_get_field_by_name_f64};
+pub use object::{js_object_alloc, js_object_alloc_with_shape, js_object_set_field, js_object_set_field_f64, js_object_get_field, js_object_set_keys, js_object_keys, js_object_values, js_object_entries, js_object_get_field_by_name, js_object_get_field_by_name_f64};
 pub use string::js_string_from_bytes;
 pub use promise::{js_promise_new, js_promise_resolve, js_promise_reject};
 pub use bigint::js_bigint_from_string;
