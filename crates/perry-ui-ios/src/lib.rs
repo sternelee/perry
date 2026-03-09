@@ -4,6 +4,7 @@ pub mod file_dialog;
 pub mod location;
 pub mod menu;
 pub mod state;
+pub mod websocket;
 pub mod widgets;
 
 // =============================================================================
@@ -1271,4 +1272,85 @@ pub extern "C" fn hone_get_documents_dir() -> f64 {
 #[no_mangle]
 pub extern "C" fn __wrapper_hone_get_documents_dir() -> f64 {
     hone_get_documents_dir()
+}
+
+// =============================================================================
+// Native iOS WebSocket (bypasses tokio which doesn't work on iOS)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn hone_ws_connect(url_ptr: i64) -> f64 {
+    // Log to file for debugging (Perry GUI apps don't show stderr)
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/hone-ws-debug.log") {
+        let _ = writeln!(f, "hone_ws_connect called, url_ptr={}", url_ptr);
+        let ptr = url_ptr as *const u8;
+        if !ptr.is_null() && url_ptr > 0x1000 {
+            let header = ptr as *const perry_runtime::string::StringHeader;
+            unsafe {
+                let len = (*header).length as usize;
+                let data = ptr.add(std::mem::size_of::<perry_runtime::string::StringHeader>());
+                if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(data, len.min(200))) {
+                    let _ = writeln!(f, "  url_str={}", s);
+                }
+            }
+        }
+    }
+    websocket::connect(url_ptr as *const u8)
+}
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_ws_connect(url_nanboxed: f64) -> f64 {
+    // Wrapper called with f64 NaN-boxed string — extract pointer
+    let ptr = perry_runtime::js_get_string_pointer_unified(url_nanboxed);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/hone-ws-debug.log") {
+        use std::io::Write;
+        let _ = writeln!(f, "__wrapper_hone_ws_connect called, nanboxed={}, extracted_ptr={}", url_nanboxed, ptr);
+    }
+    hone_ws_connect(ptr)
+}
+
+#[no_mangle]
+pub extern "C" fn hone_ws_is_open(handle: f64) -> f64 {
+    websocket::is_open(handle)
+}
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_ws_is_open(handle: f64) -> f64 {
+    websocket::is_open(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn hone_ws_send(handle: f64, msg_ptr: i64) {
+    websocket::send(handle, msg_ptr as *const u8)
+}
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_ws_send(handle: f64, msg_nanboxed: f64) {
+    let ptr = perry_runtime::js_get_string_pointer_unified(msg_nanboxed);
+    hone_ws_send(handle, ptr)
+}
+
+#[no_mangle]
+pub extern "C" fn hone_ws_receive(handle: f64) -> f64 {
+    websocket::receive(handle)
+}
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_ws_receive(handle: f64) -> f64 {
+    websocket::receive(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn hone_ws_message_count(handle: f64) -> f64 {
+    websocket::message_count(handle)
+}
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_ws_message_count(handle: f64) -> f64 {
+    websocket::message_count(handle)
+}
+
+#[no_mangle]
+pub extern "C" fn hone_ws_close(handle: f64) {
+    websocket::close(handle)
+}
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_ws_close(handle: f64) {
+    websocket::close(handle)
 }

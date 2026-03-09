@@ -209,6 +209,14 @@ pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64
     widgets::set_distribution(handle, distribution as i64);
 }
 
+/// Set alignment on an NSStackView.
+/// For vertical stacks: Leading=5, CenterX=9, Width=7.
+/// For horizontal stacks: CenterY=12, Top=3, Bottom=4.
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_alignment(handle: i64, alignment: f64) {
+    widgets::set_alignment(handle, alignment as i64);
+}
+
 /// Initialize a ForEach dynamic list binding.
 #[no_mangle]
 pub extern "C" fn perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64) {

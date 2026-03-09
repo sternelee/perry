@@ -7960,6 +7960,15 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_stack_set_distribution".to_string(), func_id);
         }
 
+        // perry_ui_stack_set_alignment(handle: i64, alignment: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // stack handle
+            sig.params.push(AbiParam::new(types::F64)); // alignment
+            let func_id = self.module.declare_function("perry_ui_stack_set_alignment", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_stack_set_alignment".to_string(), func_id);
+        }
+
         // perry_ui_for_each_init(container_handle: i64, state_handle: i64, render_closure: f64)
         {
             let mut sig = self.module.make_signature();

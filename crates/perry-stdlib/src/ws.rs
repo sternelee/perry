@@ -4,33 +4,54 @@
 //! Provides WebSocket client and server functionality.
 
 use perry_runtime::{js_string_from_bytes, JSValue, StringHeader, ClosureHeader, js_closure_call0, js_closure_call1, js_closure_call2};
+#[cfg(not(target_os = "ios"))]
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Mutex;
+#[cfg(not(target_os = "ios"))]
 use tokio::sync::mpsc;
+#[cfg(not(target_os = "ios"))]
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+#[cfg(not(target_os = "ios"))]
 use crate::common::async_bridge::{queue_promise_resolution, spawn};
 use crate::common::{register_handle, get_handle_mut, Handle};
 
+// On iOS, delegate to native NSURLSessionWebSocketTask implementation (provided by perry-ui-ios)
+#[cfg(target_os = "ios")]
+extern "C" {
+    fn perry_native_ws_connect(url_ptr: *const u8) -> f64;
+    fn perry_native_ws_is_open(handle: f64) -> f64;
+    fn perry_native_ws_send(handle: f64, msg_ptr: *const u8);
+    fn perry_native_ws_receive(handle: f64) -> f64;
+    fn perry_native_ws_message_count(handle: f64) -> f64;
+    fn perry_native_ws_close(handle: f64);
+}
+
 // WebSocket handle storage
+#[cfg(not(target_os = "ios"))]
 lazy_static::lazy_static! {
     static ref WS_CONNECTIONS: Mutex<HashMap<usize, WsConnection>> = Mutex::new(HashMap::new());
+    /// Map from client ws_id to parent server handle (for server-connected clients)
+    static ref WS_CLIENT_PARENT_SERVER: Mutex<HashMap<usize, Handle>> = Mutex::new(HashMap::new());
+}
+
+lazy_static::lazy_static! {
     static ref NEXT_WS_ID: Mutex<usize> = Mutex::new(1);
     /// Per-client event listeners (for .on('message', cb) etc.)
     static ref WS_CLIENT_LISTENERS: Mutex<HashMap<usize, WsClientListeners>> = Mutex::new(HashMap::new());
     /// Pending WebSocket events to be processed on the main thread
     static ref WS_PENDING_EVENTS: Mutex<Vec<PendingWsEvent>> = Mutex::new(Vec::new());
-    /// Map from client ws_id to parent server handle (for server-connected clients)
-    static ref WS_CLIENT_PARENT_SERVER: Mutex<HashMap<usize, Handle>> = Mutex::new(HashMap::new());
 }
 
+#[cfg(not(target_os = "ios"))]
 struct WsConnection {
     sender: mpsc::UnboundedSender<WsCommand>,
     messages: Vec<String>,
     is_open: bool,
 }
 
+#[cfg(not(target_os = "ios"))]
 enum WsCommand {
     Send(String),
     Close,
@@ -42,6 +63,7 @@ struct WsClientListeners {
 }
 
 /// WebSocketServer handle
+#[cfg(not(target_os = "ios"))]
 pub struct WsServerHandle {
     /// Event name -> list of closure pointers (stored as i64 for Send + Sync)
     pub listeners: HashMap<String, Vec<i64>>,
@@ -82,6 +104,7 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 
 /// Create a new WebSocket connection
 /// new WebSocket(url) -> Promise<WebSocket>
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
@@ -222,6 +245,7 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
 /// Connection happens in background. isOpen() returns 0 until connected.
 /// connectStart(url) -> handle (number)
 /// Accepts f64 NaN-boxed string (extracts pointer internally).
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
     // Extract string pointer from NaN-boxed value
@@ -345,8 +369,29 @@ pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
     ws_id as f64
 }
 
+/// iOS: delegate to native NSURLSessionWebSocketTask
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
+    let url_ptr = perry_runtime::js_get_string_pointer_unified(url_nanboxed) as *const u8;
+    perry_native_ws_connect(url_ptr)
+}
+
+/// iOS: delegate to native
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let handle = perry_native_ws_connect(url_ptr as *const u8);
+    let result_bits = handle.to_bits();
+    // Resolve immediately with the handle (connection happens async in native)
+    crate::common::async_bridge::queue_promise_resolution(promise as usize, true, result_bits);
+    promise
+}
+
 /// Send a message through the WebSocket
 /// ws.send(message) -> void
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_send(handle: i64, message_ptr: *const StringHeader) {
     let ws_id = handle as usize;
@@ -361,9 +406,16 @@ pub unsafe extern "C" fn js_ws_send(handle: i64, message_ptr: *const StringHeade
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_send(handle: i64, message_ptr: *const StringHeader) {
+    perry_native_ws_send(handle as f64, message_ptr as *const u8);
+}
+
 /// Close the WebSocket connection or server
 /// ws.close() / wss.close() -> void
 /// Checks if handle is a server first, then falls back to client close
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_close(handle: i64) {
     // Check if this is a server handle
@@ -380,8 +432,15 @@ pub unsafe extern "C" fn js_ws_close(handle: i64) {
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_close(handle: i64) {
+    unsafe { perry_native_ws_close(handle as f64); }
+}
+
 /// Check if WebSocket is open
 /// ws.readyState === WebSocket.OPEN
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn js_ws_is_open(handle: i64) -> f64 {
     let ws_id = handle as usize;
@@ -393,8 +452,15 @@ pub extern "C" fn js_ws_is_open(handle: i64) -> f64 {
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn js_ws_is_open(handle: i64) -> f64 {
+    unsafe { perry_native_ws_is_open(handle as f64) }
+}
+
 /// Get the number of pending messages
 /// Returns the count of received messages waiting to be read
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn js_ws_message_count(handle: i64) -> f64 {
     let ws_id = handle as usize;
@@ -406,8 +472,15 @@ pub extern "C" fn js_ws_message_count(handle: i64) -> f64 {
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn js_ws_message_count(handle: i64) -> f64 {
+    unsafe { perry_native_ws_message_count(handle as f64) }
+}
+
 /// Get the next message from the queue
 /// Returns null if no messages available
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub extern "C" fn js_ws_receive(handle: i64) -> *mut StringHeader {
     let ws_id = handle as usize;
@@ -426,8 +499,19 @@ pub extern "C" fn js_ws_receive(handle: i64) -> *mut StringHeader {
     }
 }
 
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn js_ws_receive(handle: i64) -> *mut StringHeader {
+    // perry_native_ws_receive returns a NaN-boxed string (f64).
+    // We need to return *mut StringHeader. Extract pointer from the f64.
+    let val = unsafe { perry_native_ws_receive(handle as f64) };
+    let ptr = perry_runtime::js_get_string_pointer_unified(val);
+    ptr as *mut StringHeader
+}
+
 /// Wait for a message (blocking with timeout)
 /// ws.waitForMessage(timeoutMs) -> Promise<string | null>
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_wait_for_message(handle: i64, timeout_ms: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
@@ -486,6 +570,7 @@ pub unsafe extern "C" fn js_ws_wait_for_message(handle: i64, timeout_ms: f64) ->
 
 /// Convert a WS value (f64 bits as i64) to the correct i64 handle.
 /// Server handles are NaN-boxed pointers (tag 0x7FFD); client handles are plain f64 numbers.
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_handle_to_i64(val_f64: f64) -> i64 {
     let bits = val_f64.to_bits();
@@ -504,6 +589,7 @@ pub unsafe extern "C" fn js_ws_handle_to_i64(val_f64: f64) -> i64 {
 /// Unified function: checks handle type at runtime.
 ///
 /// js_ws_on(handle, event_name_ptr, callback_ptr) -> handle
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_on(
     handle: i64,
@@ -549,6 +635,7 @@ pub unsafe extern "C" fn js_ws_on(
 
 /// Create a new WebSocketServer
 /// new WebSocketServer({ port }) -> handle (synchronous, starts listening immediately)
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
     // Extract port from options object
@@ -751,6 +838,7 @@ pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
 
 /// Close the WebSocketServer and all its client connections
 /// wss.close(callback?) -> void
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_server_close(handle: i64) {
     if let Some(server) = get_handle_mut::<WsServerHandle>(handle) {
@@ -775,6 +863,7 @@ pub unsafe extern "C" fn js_ws_server_close(handle: i64) {
 /// Process pending WebSocket events (called from js_stdlib_process_pending)
 /// Drains the event queue and invokes closures on the main thread.
 /// Returns number of events processed.
+#[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_process_pending() -> i32 {
     let events: Vec<PendingWsEvent> = {
@@ -947,4 +1036,11 @@ pub unsafe extern "C" fn js_ws_process_pending() -> i32 {
     }
 
     count
+}
+
+/// iOS: no-op since native WebSocket handles events via NSURLSession callbacks
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub unsafe extern "C" fn js_ws_process_pending() -> i32 {
+    0
 }

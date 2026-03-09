@@ -4153,6 +4153,7 @@ dependencies = [
 name = "perry-ui-ios"
 version = "0.2.173"
 dependencies = [
+ "block2",
  "libc",
  "objc2",
  "objc2-core-foundation",

@@ -50,6 +50,11 @@ opt-level = 3         # Maximum optimization
 [profile.release.package.perry-runtime]
 opt-level = 3
 
+# UI crates must NOT strip — they export #[no_mangle] extern "C" symbols
+[profile.release.package.perry-ui-macos]
+strip = false
+codegen-units = 16
+
 [profile.release.package.perry-stdlib]
 opt-level = "s"       # Optimize for size in stdlib
 

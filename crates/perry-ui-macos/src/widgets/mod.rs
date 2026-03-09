@@ -168,6 +168,24 @@ pub fn set_distribution(handle: i64, distribution: i64) {
     }
 }
 
+/// Set alignment on an NSStackView.
+/// For vertical stacks: Leading=5, CenterX=9, Width=7.
+/// For horizontal stacks: CenterY=12, Top=3, Bottom=4.
+pub fn set_alignment(handle: i64, alignment: i64) {
+    if let Some(view) = get_widget(handle) {
+        let is_stack = if let Some(cls) = AnyClass::get(c"NSStackView") {
+            view.isKindOfClass(cls)
+        } else {
+            false
+        };
+        if is_stack {
+            unsafe {
+                let _: () = msg_send![&*view, setAlignment: alignment];
+            }
+        }
+    }
+}
+
 /// Remove all arranged subviews from a container (NSStackView).
 pub fn clear_children(handle: i64) {
     if let Some(parent) = get_widget(handle) {
