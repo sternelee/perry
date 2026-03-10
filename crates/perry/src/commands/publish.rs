@@ -154,6 +154,12 @@ struct MacosConfig {
     entitlements: Option<Vec<String>>,
     distribute: Option<String>,
     signing_identity: Option<String>,
+    // Per-project signing credentials (override global ~/.perry/config.toml)
+    certificate: Option<String>,
+    team_id: Option<String>,
+    key_id: Option<String>,
+    issuer_id: Option<String>,
+    p8_key_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +171,14 @@ struct IosConfig {
     capabilities: Option<Vec<String>>,
     distribute: Option<String>,
     entry: Option<String>,
+    // Per-project signing credentials (override global ~/.perry/config.toml)
+    provisioning_profile: Option<String>,
+    certificate: Option<String>,
+    signing_identity: Option<String>,
+    team_id: Option<String>,
+    key_id: Option<String>,
+    issuer_id: Option<String>,
+    p8_key_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,14 +569,48 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
     };
 
-    // --- Resolve credentials using CLI → env → saved config → interactive prompt ---
+    // --- Resolve credentials using CLI → env → perry.toml (project) → ~/.perry/config.toml (global) → interactive prompt ---
+
+    // Per-project credentials from perry.toml [ios] or [macos] take priority over global config
+    let toml_team_id = if is_ios {
+        config.ios.as_ref().and_then(|i| i.team_id.clone())
+    } else {
+        config.macos.as_ref().and_then(|m| m.team_id.clone())
+    };
+    let toml_signing_identity = if is_ios {
+        config.ios.as_ref().and_then(|i| i.signing_identity.clone())
+    } else {
+        config.macos.as_ref().and_then(|m| m.signing_identity.clone())
+    };
+    let toml_certificate = if is_ios {
+        config.ios.as_ref().and_then(|i| i.certificate.clone())
+    } else {
+        config.macos.as_ref().and_then(|m| m.certificate.clone())
+    };
+    let toml_key_id = if is_ios {
+        config.ios.as_ref().and_then(|i| i.key_id.clone())
+    } else {
+        config.macos.as_ref().and_then(|m| m.key_id.clone())
+    };
+    let toml_issuer_id = if is_ios {
+        config.ios.as_ref().and_then(|i| i.issuer_id.clone())
+    } else {
+        config.macos.as_ref().and_then(|m| m.issuer_id.clone())
+    };
+    let toml_p8_key_path = if is_ios {
+        config.ios.as_ref().and_then(|i| i.p8_key_path.clone())
+    } else {
+        config.macos.as_ref().and_then(|m| m.p8_key_path.clone())
+    };
+    let toml_provisioning_profile = config.ios.as_ref().and_then(|i| i.provisioning_profile.clone());
 
     // Apple credentials (for macOS and iOS)
     let apple_team_id = if !is_android {
         resolve_credential(
             args.apple_team_id.as_deref(),
             "PERRY_APPLE_TEAM_ID",
-            saved.apple.as_ref().and_then(|a| a.team_id.as_deref()),
+            toml_team_id.as_deref()
+                .or_else(|| saved.apple.as_ref().and_then(|a| a.team_id.as_deref())),
             "  Apple Team ID",
             false,
             interactive,
@@ -575,7 +623,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_credential(
             args.apple_identity.as_deref(),
             "PERRY_APPLE_IDENTITY",
-            saved.apple.as_ref().and_then(|a| a.signing_identity.as_deref()),
+            toml_signing_identity.as_deref()
+                .or_else(|| saved.apple.as_ref().and_then(|a| a.signing_identity.as_deref())),
             "  Signing Identity",
             false,
             interactive,
@@ -594,7 +643,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_path_credential(
             args.apple_p8_key.as_deref(),
             "PERRY_APPLE_P8_KEY",
-            saved.apple.as_ref().and_then(|a| a.p8_key_path.as_deref()),
+            toml_p8_key_path.as_deref()
+                .or_else(|| saved.apple.as_ref().and_then(|a| a.p8_key_path.as_deref())),
             "  App Store Connect .p8 key path",
             interactive,
         )
@@ -603,13 +653,14 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     };
 
     // .p12 certificate for code signing (path saved, password never saved)
-    // Priority: explicit path (CLI/env/saved) → auto-export from Keychain → skip
+    // Priority: CLI → env → perry.toml → ~/.perry/config.toml → auto-export from Keychain → skip
     let (apple_certificate_path, auto_exported_p12) = if !is_android && !is_linux {
-        // Check explicit path first (CLI flag, env var, or saved config)
+        // Check explicit path first (CLI flag, env var, perry.toml, or saved config)
         let explicit_path = resolve_path_credential(
             args.certificate.as_deref(),
             "PERRY_APPLE_CERTIFICATE",
-            saved.apple.as_ref().and_then(|a| a.certificate_path.as_deref()),
+            toml_certificate.as_deref()
+                .or_else(|| saved.apple.as_ref().and_then(|a| a.certificate_path.as_deref())),
             "", // empty prompt — don't prompt, we'll try auto-export instead
             false, // never prompt for path
         );
@@ -650,7 +701,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_credential(
             args.apple_key_id.as_deref(),
             "PERRY_APPLE_KEY_ID",
-            saved.apple.as_ref().and_then(|a| a.key_id.as_deref()),
+            toml_key_id.as_deref()
+                .or_else(|| saved.apple.as_ref().and_then(|a| a.key_id.as_deref())),
             "  App Store Connect Key ID",
             false,
             interactive,
@@ -663,7 +715,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_credential(
             args.apple_issuer_id.as_deref(),
             "PERRY_APPLE_ISSUER_ID",
-            saved.apple.as_ref().and_then(|a| a.issuer_id.as_deref()),
+            toml_issuer_id.as_deref()
+                .or_else(|| saved.apple.as_ref().and_then(|a| a.issuer_id.as_deref())),
             "  App Store Connect Issuer ID",
             false,
             interactive,
@@ -677,7 +730,8 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         resolve_path_credential(
             args.provisioning_profile.as_deref(),
             "PERRY_PROVISIONING_PROFILE",
-            saved.ios.as_ref().and_then(|i| i.provisioning_profile_path.as_deref()),
+            toml_provisioning_profile.as_deref()
+                .or_else(|| saved.ios.as_ref().and_then(|i| i.provisioning_profile_path.as_deref())),
             "  Provisioning profile path",
             interactive,
         )
