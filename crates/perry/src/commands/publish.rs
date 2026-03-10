@@ -1214,7 +1214,11 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                     .with_context(|| format!("Failed to copy artifact from {src_path}"))?;
             } else {
                 // Remote hub - download via HTTP
-                let full_url = format!("{server_url}{url}");
+                let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+                    url.clone()
+                } else {
+                    format!("{server_url}{url}")
+                };
                 let resp = client
                     .get(&full_url)
                     .send()
@@ -1272,6 +1276,69 @@ async fn auto_register_license(server_url: &str) -> Result<String> {
     Ok(reg.license_key)
 }
 
+/// Should this file be excluded from the tarball?
+fn should_exclude_file(path: &Path) -> bool {
+    let exclude_extensions = [
+        "o", "a", "dylib", "so", "dll", "exe", "dmg", "ipa", "apk", "aab",
+    ];
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if exclude_extensions.contains(&ext) {
+            return true;
+        }
+    }
+    if name.starts_with('_')
+        && path
+            .metadata()
+            .map(|m| m.len() > 1_000_000)
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    if path.extension().is_none()
+        && path
+            .metadata()
+            .map(|m| m.len() > 1_000_000)
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    if name == ".DS_Store" {
+        return true;
+    }
+    false
+}
+
+/// Resolve `file:` dependencies from package.json and return (package_name, resolved_path) pairs.
+fn resolve_file_deps(project_dir: &Path) -> Vec<(String, PathBuf)> {
+    let pkg_path = project_dir.join("package.json");
+    let Ok(content) = fs::read_to_string(&pkg_path) else {
+        return vec![];
+    };
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return vec![];
+    };
+    let mut deps = Vec::new();
+    for key in ["dependencies", "devDependencies"] {
+        if let Some(obj) = pkg.get(key).and_then(|v| v.as_object()) {
+            for (name, value) in obj {
+                if let Some(spec) = value.as_str() {
+                    if let Some(rel_path) = spec.strip_prefix("file:") {
+                        let resolved = project_dir.join(rel_path).canonicalize().ok();
+                        if let Some(abs_path) = resolved {
+                            if abs_path.is_dir() {
+                                deps.push((name.clone(), abs_path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    deps
+}
+
 fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
     let buf = Vec::new();
     let encoder = GzEncoder::new(buf, Compression::default());
@@ -1287,19 +1354,14 @@ fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
         "xcode",
     ];
 
-    let exclude_extensions = [
-        "o", "a", "dylib", "so", "dll", "exe", "dmg", "ipa", "apk", "aab",
-    ];
-
+    // Walk the project directory
     for entry in WalkDir::new(project_dir)
         .into_iter()
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
-            // Exclude known directory/symlink names regardless of entry type
             if exclude_dirs.iter().any(|ex| name == *ex) {
                 return false;
             }
-            // Exclude .app bundles
             if name.ends_with(".app") {
                 return false;
             }
@@ -1315,33 +1377,59 @@ fn create_project_tarball(project_dir: &Path) -> Result<Vec<u8>> {
         }
 
         if path.is_file() {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-
-            // Skip build artifacts by extension
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if exclude_extensions.contains(&ext) {
-                    continue;
-                }
-            }
-
-            // Skip files that start with _ and are large (e.g. _perry_ui_stripped.a)
-            if name.starts_with('_') && path.metadata().map(|m| m.len() > 1_000_000).unwrap_or(false) {
+            if should_exclude_file(path) {
                 continue;
             }
-
-            // Skip executables without extension that are large (compiled binaries)
-            if path.extension().is_none() && path.metadata().map(|m| m.len() > 1_000_000).unwrap_or(false) {
-                continue;
-            }
-
-            // Skip .DS_Store
-            if name == ".DS_Store" {
-                continue;
-            }
-
             ar.append_path_with_name(path, relative)?;
         } else if path.is_dir() {
             ar.append_dir(relative, path)?;
+        }
+    }
+
+    // Include file: dependencies under node_modules/<pkg-name>/
+    let file_deps = resolve_file_deps(project_dir);
+    for (pkg_name, dep_dir) in &file_deps {
+        let nm_prefix = PathBuf::from("node_modules").join(pkg_name);
+        // Walk the dependency directory (exclude .git, target, dist, build artifacts)
+        let dep_exclude_dirs = [".git", "target", "dist", "build", "xcode"];
+        for entry in WalkDir::new(dep_dir)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                if dep_exclude_dirs.iter().any(|ex| name == *ex) {
+                    return false;
+                }
+                if name.ends_with(".app") {
+                    return false;
+                }
+                true
+            })
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let relative = match path.strip_prefix(dep_dir) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            if relative.as_os_str().is_empty() {
+                continue;
+            }
+
+            let tar_path = nm_prefix.join(relative);
+
+            if path.is_file() {
+                if should_exclude_file(path) {
+                    continue;
+                }
+                ar.append_path_with_name(path, &tar_path)?;
+            } else if path.is_dir() {
+                ar.append_dir(&tar_path, path)?;
+            }
         }
     }
 
