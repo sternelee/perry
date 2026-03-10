@@ -124,6 +124,10 @@ struct PerryToml {
 #[derive(Debug, Deserialize)]
 struct ProjectConfig {
     name: Option<String>,
+    version: Option<String>,
+    build_number: Option<u64>,
+    bundle_id: Option<String>,
+    description: Option<String>,
     entry: Option<String>,
 }
 
@@ -364,6 +368,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         .app
         .as_ref()
         .and_then(|a| a.version.clone())
+        .or_else(|| config.project.as_ref().and_then(|p| p.version.clone()))
         .unwrap_or_else(|| "1.0.0".into());
 
     // build_number is the monotonically increasing integer used as CFBundleVersion (iOS)
@@ -372,6 +377,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         .app
         .as_ref()
         .and_then(|a| a.build_number)
+        .or_else(|| config.project.as_ref().and_then(|p| p.build_number))
         .unwrap_or(0);
 
     if let OutputFormat::Text = format {
@@ -484,17 +490,21 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         toml_build_number
     };
 
+    let project_bundle_id = config.project.as_ref().and_then(|p| p.bundle_id.clone());
     let bundle_id = if is_android {
         config.android.as_ref().and_then(|a| a.package_name.clone())
             .or_else(|| config.ios.as_ref().and_then(|i| i.bundle_id.clone()))
             .or_else(|| config.macos.as_ref().and_then(|m| m.bundle_id.clone()))
+            .or_else(|| project_bundle_id.clone())
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     } else if is_ios {
         config.ios.as_ref().and_then(|i| i.bundle_id.clone())
+            .or_else(|| project_bundle_id.clone())
             .or_else(|| config.macos.as_ref().and_then(|m| m.bundle_id.clone()))
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     } else {
         config.macos.as_ref().and_then(|m| m.bundle_id.clone())
+            .or_else(|| project_bundle_id.clone())
             .unwrap_or_else(|| format!("com.perry.{}", app_name.to_lowercase().replace(' ', "-")))
     };
 
