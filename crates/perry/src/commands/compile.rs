@@ -2955,7 +2955,11 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let mut c = Command::new(clang);
         c.arg("-target").arg(triple)
          .arg("-isysroot").arg(&sysroot)
+         // Swift standard library .tbd stubs in the SDK
+         .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
+         // Swift compatibility .a files in the toolchain
          .arg("-L").arg(format!("{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/{}", developer_dir, sdk))
+         // Swift back-deploy .dylib files in the toolchain
          .arg("-L").arg(format!("{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/{}", developer_dir, sdk))
          // perry-stdlib and perry-ui-ios both bundle perry-runtime symbols;
          // the new Apple ld treats duplicate archive symbols as errors.
