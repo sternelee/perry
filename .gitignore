@@ -10,19 +10,29 @@ test-*
 bench_*
 !bench_*.ts
 
-# Other compiled binaries
+# Compiled output binaries (catch-all for extensionless files in root)
+# Named binaries from example/benchmark compilation
 worker
 controls
 main
+cli
+counter_web
+fastify
+hello_web
+mock-openai-repro
+myairank_worker
+searchbird
+simple-json-test
+simple-server
 05_fibonacci
 07_object_create
 10_nested_loops
 11_prime_sieve
+15_mandelbrot
 16_matrix_multiply
 index
 http-server
 http_server_test
-15_mandelbrot
 demo
 auth
 config
@@ -34,6 +44,10 @@ hono_server
 http_server
 searchbird_*
 
+# Test output
+test-parity/output/
+test-parity/reports/
+
 # Generated bundles
 __perry_js_bundle.js
 
@@ -44,6 +58,8 @@ node_modules/
 tmp/
 debug_test.ts
 test-hir.txt
+response.txt
+menu-demo.ts
 
 # Private files
 private-*
