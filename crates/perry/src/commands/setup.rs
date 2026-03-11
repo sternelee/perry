@@ -954,7 +954,7 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     let mut notarize_cert_path = String::new();
     let mut notarize_signing_identity = String::new();
 
-    // -- App Store certificate (MAC_APP_DISTRIBUTION) --
+    // -- App Store certificate (MAC_APP_DISTRIBUTION + MAC_INSTALLER_DISTRIBUTION) --
     if needs_appstore_cert {
         let (p12, identity) = create_apple_certificate(
             &client, &key_id, &issuer_id, &p8_content,
@@ -965,13 +965,28 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
         cert_path = p12;
         signing_identity = identity;
 
-        // Also create MAC_INSTALLER_DISTRIBUTION for .pkg signing
-        let _ = create_apple_certificate(
+        // Also create MAC_INSTALLER_DISTRIBUTION for .pkg signing, then merge
+        // both certs into the app store .p12 so the builder's temp keychain
+        // has both identities available.
+        match create_apple_certificate(
             &client, &key_id, &issuer_id, &p8_content,
             "MAC_INSTALLER_DISTRIBUTION", &csr_pem, &key_path,
             &perry_dir.join("macos_installer.p12"), p12_password,
             "Mac Installer Distribution",
-        );
+        ) {
+            Ok((installer_p12, _installer_identity)) => {
+                // Merge: import both .p12s into one combined file
+                merge_p12_files(
+                    &perry_dir.join("macos_appstore.p12"),
+                    &installer_p12,
+                    p12_password,
+                    &perry_dir,
+                ).ok();
+            }
+            Err(e) => {
+                println!("  {} Installer cert: {} (pkg signing may fail)", style("!").yellow(), e);
+            }
+        }
     }
 
     // -- Developer ID certificate (DEVELOPER_ID_APPLICATION) --
@@ -1076,6 +1091,65 @@ fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!();
     println!("  Then run: {}", style("perry publish --macos").bold());
 
+    Ok(())
+}
+
+/// Merge two .p12 files into the first one (appends the second's cert+key).
+/// Both must use the same password. Uses openssl to extract PEM and repackage.
+fn merge_p12_files(
+    primary_p12: &std::path::Path,
+    secondary_p12: &str,
+    password: &str,
+    tmpdir: &std::path::Path,
+) -> Result<()> {
+    let pass = format!("pass:{password}");
+    let pem_a = tmpdir.join("_merge_a.pem");
+    let pem_b = tmpdir.join("_merge_b.pem");
+    let combined = tmpdir.join("_merge_combined.pem");
+
+    // Extract both to PEM (try with -legacy first, fall back without)
+    for (p12, pem) in [(primary_p12.as_os_str(), pem_a.as_os_str()), (std::ffi::OsStr::new(secondary_p12), pem_b.as_os_str())] {
+        let ok = Command::new("openssl")
+            .args(["pkcs12", "-in"]).arg(p12)
+            .args(["-out"]).arg(pem)
+            .args(["-nodes", "-password", &pass, "-legacy"])
+            .stderr(std::process::Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false);
+        if !ok {
+            Command::new("openssl")
+                .args(["pkcs12", "-in"]).arg(p12)
+                .args(["-out"]).arg(pem)
+                .args(["-nodes", "-password", &pass])
+                .stderr(std::process::Stdio::null())
+                .status()?;
+        }
+    }
+
+    // Concatenate PEM files
+    let a = std::fs::read_to_string(&pem_a).unwrap_or_default();
+    let b = std::fs::read_to_string(&pem_b).unwrap_or_default();
+    std::fs::write(&combined, format!("{a}\n{b}"))?;
+
+    // Re-package into .p12
+    let ok = Command::new("openssl")
+        .args(["pkcs12", "-export", "-in"]).arg(&combined)
+        .args(["-out"]).arg(primary_p12)
+        .args(["-password", &pass, "-legacy"])
+        .stderr(std::process::Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        Command::new("openssl")
+            .args(["pkcs12", "-export", "-in"]).arg(&combined)
+            .args(["-out"]).arg(primary_p12)
+            .args(["-password", &pass])
+            .stderr(std::process::Stdio::null())
+            .status()?;
+    }
+
+    // Clean up
+    let _ = std::fs::remove_file(&pem_a);
+    let _ = std::fs::remove_file(&pem_b);
+    let _ = std::fs::remove_file(&combined);
     Ok(())
 }
 
