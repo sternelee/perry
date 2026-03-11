@@ -67,7 +67,7 @@ pub fn run(args: SetupArgs) -> Result<()> {
 // Android wizard
 // ---------------------------------------------------------------------------
 
-fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
+pub(crate) fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!("  {}", style("Android Setup").bold());
     println!();
 

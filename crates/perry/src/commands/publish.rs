@@ -783,6 +783,21 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         args.provisioning_profile.as_ref().map(|p| p.to_string_lossy().to_string())
     };
 
+    // Auto-trigger Android setup if not configured
+    if is_android && interactive {
+        let has_keystore = args.android_keystore.is_some()
+            || std::env::var("PERRY_ANDROID_KEYSTORE").is_ok()
+            || saved.android.as_ref().and_then(|a| a.keystore_path.as_deref()).is_some();
+        if !has_keystore {
+            println!();
+            println!("  {} Android not configured — running setup wizard", style("!").yellow());
+            println!();
+            super::setup::android_wizard(&mut saved)?;
+            save_config(&saved)?;
+            println!();
+        }
+    }
+
     // Android credentials
     let android_keystore_path = if is_android {
         resolve_path_credential(
