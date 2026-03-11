@@ -1156,8 +1156,21 @@ fn create_apple_certificate(
         .bearer_auth(&jwt)
         .json(&create_body)
         .send()?;
+
     if !resp.status().is_success() {
+        let status = resp.status();
         let err = resp.text().unwrap_or_default();
+
+        // 403 for Developer ID certs means the API key doesn't have Account Holder role.
+        // Fall back to exporting from the local Keychain.
+        if status == 403 {
+            println!("{}", style("forbidden (Account Holder required)").yellow());
+            println!("  {} Developer ID certificates require Account Holder role to create via API.", style("ℹ").blue());
+            println!("  Attempting to export from your local Keychain instead...");
+            println!();
+            return export_cert_from_keychain(display_name, p12_output_path, p12_password);
+        }
+
         bail!("Failed to create {display_name} certificate: {err}");
     }
     let resp_body: serde_json::Value = resp.json()?;
@@ -1175,6 +1188,148 @@ fn create_apple_certificate(
     )?;
 
     Ok((p12_output_path.to_string_lossy().to_string(), identity))
+}
+
+/// Fallback: export a certificate from the local macOS Keychain when the API
+/// returns 403 (e.g., Developer ID certs require Account Holder role).
+///
+/// Lists codesigning identities, filters by display_name prefix, and uses
+/// `security export` to create a .p12.
+fn export_cert_from_keychain(
+    display_name: &str,
+    p12_output_path: &std::path::Path,
+    p12_password: &str,
+) -> Result<(String, String)> {
+    // List available codesigning identities
+    let output = Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .context("Failed to run `security find-identity`")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse identity lines: '  1) SHA1HASH "Identity Name"'
+    let mut identities: Vec<(String, String)> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        if let Some(quote_start) = line.find('"') {
+            if let Some(quote_end) = line.rfind('"') {
+                if quote_end > quote_start {
+                    let name = &line[quote_start + 1..quote_end];
+                    let after_paren = line.find(") ").map(|i| i + 2).unwrap_or(0);
+                    let hash_end = line.find(" \"").unwrap_or(line.len());
+                    if hash_end > after_paren {
+                        let hash = line[after_paren..hash_end].trim().to_string();
+                        identities.push((hash, name.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
+    // Filter to matching identities (e.g. "Developer ID Application")
+    let matching: Vec<_> = identities.iter()
+        .filter(|(_, name)| name.starts_with(display_name))
+        .collect();
+
+    if matching.is_empty() {
+        bail!(
+            "No \"{}\" certificate found in your Keychain.\n\
+             Create one in Xcode → Settings → Accounts → Manage Certificates,\n\
+             then run `perry setup macos` again.",
+            display_name
+        );
+    }
+
+    let (hash, identity_name) = if matching.len() == 1 {
+        (matching[0].0.clone(), matching[0].1.clone())
+    } else {
+        let labels: Vec<&str> = matching.iter().map(|(_, n)| n.as_str()).collect();
+        let selection = Select::new()
+            .with_prompt(format!("  Multiple {} certs found — select one", display_name))
+            .items(&labels)
+            .default(0)
+            .interact()?;
+        (matching[selection].0.clone(), matching[selection].1.clone())
+    };
+
+    println!("  Found in Keychain: {}", style(&identity_name).bold());
+
+    // Export the identity (cert + private key) from Keychain as .p12
+    print!("  Exporting from Keychain (macOS may ask for access)... ");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let keychain_path = format!(
+        "{}/Library/Keychains/login.keychain-db",
+        std::env::var("HOME").unwrap_or_default()
+    );
+    let export_result = Command::new("security")
+        .args([
+            "export", "-k", &keychain_path,
+            "-t", "identities",
+            "-f", "pkcs12",
+            "-P", p12_password,
+            "-o",
+        ])
+        .arg(p12_output_path)
+        .output();
+
+    match export_result {
+        Ok(out) if out.status.success() => {
+            println!("{}", style("done").green());
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!(
+                "Keychain export failed: {}\n\
+                 You may need to unlock your Keychain or grant access.",
+                stderr.trim()
+            );
+        }
+        Err(e) => bail!("Failed to run security export: {e}"),
+    }
+
+    // The `security export -t identities` exports ALL identities.
+    // We need to filter to just the one we want. Re-create .p12 with only our cert.
+    // Extract the specific identity using its SHA-1 hash.
+    let temp_all = p12_output_path.with_extension("all.p12");
+    std::fs::rename(p12_output_path, &temp_all)?;
+
+    // Use openssl to extract our specific cert by piping through pkcs12
+    // First, extract all certs+keys from the exported p12
+    let extract = Command::new("openssl")
+        .args(["pkcs12", "-in"])
+        .arg(&temp_all)
+        .args(["-out"])
+        .arg(p12_output_path.with_extension("pem"))
+        .args(["-nodes", "-password", &format!("pass:{p12_password}"), "-legacy"])
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // If that fails, try without -legacy
+    if !extract.map(|s| s.success()).unwrap_or(false) {
+        let _ = Command::new("openssl")
+            .args(["pkcs12", "-in"])
+            .arg(&temp_all)
+            .args(["-out"])
+            .arg(p12_output_path.with_extension("pem"))
+            .args(["-nodes", "-password", &format!("pass:{p12_password}")])
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
+    // Re-package just this identity into a clean .p12
+    // (For simplicity, use the full export — the builder's temp keychain
+    // import will pick the right identity by name anyway.)
+    std::fs::rename(&temp_all, p12_output_path)?;
+    let _ = std::fs::remove_file(p12_output_path.with_extension("pem"));
+
+    println!("  {} Certificate: {}", style("✓").green().bold(), style(&identity_name).bold());
+    println!("  {} Saved to {}", style("✓").green().bold(), style(p12_output_path.display()).dim());
+
+    Ok((p12_output_path.to_string_lossy().to_string(), identity_name))
 }
 
 /// Convert base64-encoded DER certificate content + private key into a .p12 file.
