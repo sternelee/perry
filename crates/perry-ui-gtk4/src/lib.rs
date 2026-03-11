@@ -957,3 +957,32 @@ pub extern "C" fn __wrapper_perry_on_resize(_closure_ptr: i64, callback: f64) ->
 pub extern "C" fn __wrapper_perry_on_orientation_change(_closure_ptr: i64, _callback: f64) -> f64 {
     TAG_UNDEFINED
 }
+
+/// perry_ui_poll_open_file() -> i64 — stub for Linux (macOS "Open With" not applicable).
+/// Returns an empty string pointer; the IDE's checkOpenFileRequests() polls this every 500ms.
+#[no_mangle]
+pub extern "C" fn perry_ui_poll_open_file() -> i64 {
+    unsafe { js_string_from_bytes(std::ptr::null(), 0) as i64 }
+}
+
+/// perry_get_device_idiom() → 0 — Linux is always a desktop (not phone or pad).
+/// Called by iOS-specific branches in platform.ts that are dead code on Linux;
+/// the symbol must exist for the linker even though it is never called at runtime.
+#[no_mangle]
+pub extern "C" fn __wrapper_perry_get_device_idiom(_closure_ptr: i64) -> f64 {
+    0.0  // 0 = phone-like; value is irrelevant on Linux (dead code branch)
+}
+
+/// hone_get_documents_dir() — iOS sandbox documents dir stub.
+/// Returns empty string; only reachable on iOS (__platform__ === 1), which is dead code on Linux.
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_get_documents_dir(_closure_ptr: i64) -> f64 {
+    nanbox_static_str(b"")
+}
+
+/// hone_get_app_files_dir() — Android app files dir stub.
+/// Returns empty string; only reachable on Android (__platform__ === 2), dead code on Linux.
+#[no_mangle]
+pub extern "C" fn __wrapper_hone_get_app_files_dir(_closure_ptr: i64) -> f64 {
+    nanbox_static_str(b"")
+}
