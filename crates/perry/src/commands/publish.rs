@@ -105,6 +105,22 @@ pub struct PublishArgs {
     #[arg(short, long, default_value = "dist")]
     pub output: PathBuf,
 
+    /// Skip security audit before building
+    #[arg(long)]
+    pub skip_audit: bool,
+
+    /// Skip runtime verification after download
+    #[arg(long)]
+    pub skip_verify: bool,
+
+    /// Minimum audit grade to proceed (A, B, C, D)
+    #[arg(long, default_value = "C")]
+    pub audit_fail_on: String,
+
+    /// Verify service URL
+    #[arg(long, default_value = "https://verify.perryts.com")]
+    pub verify_url: String,
+
 }
 
 // --- Config types matching perry.toml ---
@@ -119,6 +135,8 @@ struct PerryToml {
     linux: Option<LinuxConfig>,
     build: Option<BuildConfig>,
     publish: Option<PublishConfig>,
+    audit: Option<AuditConfig>,
+    verify: Option<VerifyConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +240,18 @@ struct BuildConfig {
 #[derive(Debug, Deserialize)]
 struct PublishConfig {
     server: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditConfig {
+    fail_on: Option<String>,
+    ignore: Option<Vec<String>>,
+    severity: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyConfig {
+    url: Option<String>,
 }
 
 // --- Server API types ---
@@ -390,7 +420,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
 
     // Read perry.toml
     let perry_toml_path = project_dir.join("perry.toml");
-    let config: PerryToml = if perry_toml_path.exists() {
+    let mut config: PerryToml = if perry_toml_path.exists() {
         let content = fs::read_to_string(&perry_toml_path)
             .context("Failed to read perry.toml")?;
         toml::from_str(&content)
@@ -401,6 +431,76 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             project_dir.display()
         );
     };
+
+    // --- Integration: Security Audit ---
+    if !args.skip_audit {
+        if let OutputFormat::Text = format {
+            eprintln!("\n  {} Running security audit...", style("→").cyan());
+        }
+
+        // Resolve audit settings from CLI flags → perry.toml [audit] → defaults
+        let audit_fail_on = if args.audit_fail_on != "C" {
+            args.audit_fail_on.clone()
+        } else {
+            config
+                .audit
+                .as_ref()
+                .and_then(|a| a.fail_on.clone())
+                .unwrap_or_else(|| "C".to_string())
+        };
+        let audit_severity = config
+            .audit
+            .as_ref()
+            .and_then(|a| a.severity.clone())
+            .unwrap_or_else(|| "all".to_string());
+        let audit_ignore = config
+            .audit
+            .as_ref()
+            .and_then(|a| a.ignore.as_ref().map(|v| v.join(",")))
+            .unwrap_or_default();
+        let verify_url = if args.verify_url != "https://verify.perryts.com" {
+            args.verify_url.clone()
+        } else {
+            config
+                .verify
+                .as_ref()
+                .and_then(|v| v.url.clone())
+                .unwrap_or_else(|| "https://verify.perryts.com".to_string())
+        };
+
+        // Infer app_type from target
+        let app_type = if args.ios {
+            "gui"
+        } else if args.android {
+            "gui"
+        } else if args.macos {
+            "gui"
+        } else {
+            "server"
+        };
+
+        match super::audit::run_audit_check(
+            &project_dir,
+            &verify_url,
+            app_type,
+            &audit_severity,
+            &audit_ignore,
+            &audit_fail_on,
+            false,
+            format,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                bail!(
+                    "{}\n  Use {} to bypass.",
+                    e,
+                    style("--skip-audit").yellow()
+                );
+            }
+        }
+    }
 
     // Resolve app info (always from perry.toml)
     let app_name = config
@@ -576,7 +676,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     let ios_device_family = config.ios.as_ref().and_then(|i| i.device_family.clone());
     let ios_orientations = config.ios.as_ref().and_then(|i| i.orientations.clone());
     let ios_capabilities = config.ios.as_ref().and_then(|i| i.capabilities.clone());
-    let ios_distribute = config.ios.as_ref().and_then(|i| i.distribute.clone());
+    let mut ios_distribute = config.ios.as_ref().and_then(|i| i.distribute.clone());
     let ios_encryption_exempt = config.ios.as_ref().and_then(|i| i.encryption_exempt);
     let macos_encryption_exempt = config.macos.as_ref().and_then(|m| m.encryption_exempt);
 
@@ -612,6 +712,38 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             key
         }
     };
+
+    // Auto-trigger iOS/macOS setup if not configured
+    if (is_ios || is_macos) && interactive {
+        let has_apple_config = args.certificate.is_some()
+            || std::env::var("PERRY_APPLE_CERTIFICATE").is_ok()
+            || saved.apple.as_ref().and_then(|a| a.p8_key_path.as_deref()).is_some()
+            || if is_ios {
+                config.ios.as_ref().and_then(|i| i.certificate.as_deref()).is_some()
+            } else {
+                config.macos.as_ref().and_then(|m| m.certificate.as_deref()).is_some()
+            };
+        if !has_apple_config {
+            let platform = if is_ios { "iOS" } else { "macOS" };
+            println!();
+            println!("  {} {platform} not configured — running setup wizard", style("!").yellow());
+            println!();
+            if is_ios {
+                super::setup::ios_wizard(&mut saved)?;
+            } else {
+                super::setup::macos_wizard(&mut saved)?;
+            }
+            save_config(&saved)?;
+            // Re-read perry.toml since setup may have updated it
+            if let Ok(content) = fs::read_to_string(&perry_toml_path) {
+                if let Ok(reloaded) = toml::from_str::<PerryToml>(&content) {
+                    ios_distribute = reloaded.ios.as_ref().and_then(|i| i.distribute.clone());
+                    config = reloaded;
+                }
+            }
+            println!();
+        }
+    }
 
     // --- Resolve credentials using CLI → env → perry.toml (project) → ~/.perry/config.toml (global) → interactive prompt ---
 
@@ -1747,6 +1879,93 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                     style(dest.display()).bold()
                 );
                 println!();
+            }
+
+            // --- Integration: Runtime Verification ---
+            if !args.skip_verify {
+                let verify_target = if args.macos {
+                    "macos-arm64"
+                } else if args.ios {
+                    "ios-simulator"
+                } else if args.android {
+                    "android-emulator"
+                } else if args.linux {
+                    "linux-x64"
+                } else {
+                    "" // unknown — skip
+                };
+
+                if !verify_target.is_empty() {
+                    if let OutputFormat::Text = format {
+                        eprintln!(
+                            "  {} Verifying binary ({})...",
+                            style("→").cyan(),
+                            verify_target
+                        );
+                    }
+
+                    let verify_url = if args.verify_url != "https://verify.perryts.com" {
+                        args.verify_url.clone()
+                    } else {
+                        config
+                            .verify
+                            .as_ref()
+                            .and_then(|v| v.url.clone())
+                            .unwrap_or_else(|| "https://verify.perryts.com".to_string())
+                    };
+
+                    let app_type = if args.ios || args.android || args.macos {
+                        "gui"
+                    } else {
+                        "server"
+                    };
+
+                    match super::verify::run_verify_check(
+                        &dest,
+                        &verify_url,
+                        verify_target,
+                        app_type,
+                        "none",
+                        3,
+                        300,
+                        format,
+                    )
+                    .await
+                    {
+                        Ok(status) => {
+                            if status.status == "passed" {
+                                if let OutputFormat::Text = format {
+                                    eprintln!(
+                                        "  {} Verification passed",
+                                        style("✓").green()
+                                    );
+                                }
+                            } else {
+                                // Verify failure is a warning, not a blocker
+                                if let OutputFormat::Text = format {
+                                    eprintln!(
+                                        "  {} Verification: {}",
+                                        style("⚠").yellow(),
+                                        status.status
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Verify failure is a warning, not a blocker
+                            if let OutputFormat::Text = format {
+                                eprintln!(
+                                    "  {} Verification skipped: {}",
+                                    style("⚠").yellow(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let OutputFormat::Text = format {
                 println!(
                     "  {} {}",
                     style("Ready!").green().bold(),
@@ -1958,6 +2177,8 @@ pub(crate) struct PerryConfig {
     pub(crate) ios: Option<IosSavedConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) android: Option<AndroidSavedConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) telemetry: Option<crate::telemetry::TelemetryConfig>,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
@@ -2381,6 +2602,7 @@ mod tests {
                 key_alias: Some("key0".into()),
                 google_play_key_path: Some("/Users/me/play-sa.json".into()),
             }),
+            ..Default::default()
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();

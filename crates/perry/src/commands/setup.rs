@@ -257,9 +257,9 @@ pub(crate) fn android_wizard(saved: &mut PerryConfig) -> Result<()> {
 // iOS wizard
 // ---------------------------------------------------------------------------
 
-fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
+pub(crate) fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!("  {}", style("iOS Setup").bold());
-    println!("  Automates: certificate, bundle ID, and provisioning profile via App Store Connect API");
+    println!("  Automates: app creation, certificate, bundle ID, and provisioning profile via App Store Connect API");
     println!();
 
     // --- Step 1: App Store Connect API Key ---
@@ -374,7 +374,7 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     };
     println!();
 
-    // --- Step 3: Register Bundle ID (App ID) if needed ---
+    // --- Step 2: Register Bundle ID (App ID) if needed ---
     println!("  {} Registering App ID", style("Step 2 —").cyan().bold());
     print!("  Checking if {} exists... ", style(&bundle_id).bold());
     std::io::Write::flush(&mut std::io::stdout()).ok();
@@ -425,8 +425,96 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     };
     println!();
 
+    // --- Step 3: Create App in App Store Connect if needed ---
+    println!("  {} App Store Connect App", style("Step 3 —").cyan().bold());
+    print!("  Checking if app exists for {}... ", style(&bundle_id).bold());
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+    let resp = client.get("https://api.appstoreconnect.apple.com/v1/apps")
+        .bearer_auth(&jwt)
+        .query(&[("filter[bundleId]", bundle_id.as_str()), ("limit", "1")])
+        .send()?;
+    let body: serde_json::Value = resp.json()?;
+    let existing_apps = body["data"].as_array();
+    if let Some(apps) = existing_apps {
+        if apps.is_empty() {
+            println!("{}", style("not found, creating...").yellow());
+
+            // Read app name from perry.toml or prompt
+            let app_name = if perry_toml_path.exists() {
+                let content = std::fs::read_to_string(&perry_toml_path)?;
+                let parsed: toml::Value = toml::from_str(&content)?;
+                parsed.get("project")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            };
+
+            let app_name = if let Some(name) = app_name {
+                println!("  App name from perry.toml: {}", style(&name).bold());
+                let use_it = Confirm::new()
+                    .with_prompt("  Use this name?")
+                    .default(true)
+                    .interact()?;
+                if use_it { name } else {
+                    Input::<String>::new()
+                        .with_prompt("  App name (as shown on App Store)")
+                        .interact_text()?
+                }
+            } else {
+                Input::<String>::new()
+                    .with_prompt("  App name (as shown on App Store)")
+                    .interact_text()?
+            };
+
+            let sku = bundle_id.replace('.', "-");
+            let create_body = serde_json::json!({
+                "data": {
+                    "type": "apps",
+                    "attributes": {
+                        "name": app_name,
+                        "primaryLocale": "en-US",
+                        "sku": sku,
+                        "bundleId": bundle_id
+                    },
+                    "relationships": {
+                        "bundleId": {
+                            "data": {
+                                "type": "bundleIds",
+                                "id": bundle_id_resource_id
+                            }
+                        }
+                    }
+                }
+            });
+
+            let jwt = generate_asc_jwt(&key_id, &issuer_id, &p8_content)?;
+            let resp = client.post("https://api.appstoreconnect.apple.com/v1/apps")
+                .bearer_auth(&jwt)
+                .json(&create_body)
+                .send()?;
+            if !resp.status().is_success() {
+                let err = resp.text().unwrap_or_default();
+                // Don't fail hard — app creation is optional, user can create manually
+                println!("  {} Could not create app: {}", style("!").yellow(), err);
+                println!("  You may need to create the app manually in App Store Connect.");
+            } else {
+                println!("  {} App \"{}\" created in App Store Connect", style("✓").green().bold(), style(&app_name).bold());
+            }
+        } else {
+            let name = apps[0]["attributes"]["name"].as_str().unwrap_or("unknown");
+            println!("{} ({})", style("exists").green(), style(name).bold());
+        }
+    } else {
+        println!("{}", style("could not check").yellow());
+    }
+    println!();
+
     // --- Step 4: Create or find Distribution Certificate ---
-    println!("  {} Distribution Certificate", style("Step 3 —").cyan().bold());
+    println!("  {} Distribution Certificate", style("Step 4 —").cyan().bold());
     print!("  Checking for existing distribution certificates... ");
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
@@ -619,7 +707,7 @@ fn ios_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!();
 
     // --- Step 5: Create Provisioning Profile ---
-    println!("  {} Provisioning Profile", style("Step 4 —").cyan().bold());
+    println!("  {} Provisioning Profile", style("Step 5 —").cyan().bold());
     print!("  Creating provisioning profile for {}... ", style(&bundle_id).bold());
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
@@ -820,7 +908,7 @@ fn prompt_api_credentials() -> Result<(String, String, String, String)> {
 // macOS wizard
 // ---------------------------------------------------------------------------
 
-fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
+pub(crate) fn macos_wizard(saved: &mut PerryConfig) -> Result<()> {
     println!("  {}", style("macOS Setup").bold());
     println!();
 
@@ -1563,6 +1651,9 @@ fn update_perry_toml_ios(
     ios.insert("provisioning_profile".into(), toml::Value::String(provisioning_profile.into()));
     if let Some(identity) = signing_identity {
         ios.insert("signing_identity".into(), toml::Value::String(identity.into()));
+    }
+    if !ios.contains_key("distribute") {
+        ios.insert("distribute".into(), toml::Value::String("testflight".into()));
     }
 
     let new_content = toml::to_string_pretty(&doc)
