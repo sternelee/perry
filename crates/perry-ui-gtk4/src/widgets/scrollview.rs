@@ -5,6 +5,7 @@ use gtk4::ScrolledWindow;
 pub fn create() -> i64 {
     crate::app::ensure_gtk_init();
     let scrolled = ScrolledWindow::new();
+    scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
     scrolled.set_vexpand(true);
     scrolled.set_hexpand(true);
     scrolled.set_propagate_natural_height(true);
@@ -15,6 +16,9 @@ pub fn create() -> i64 {
 pub fn set_child(scroll_handle: i64, child_handle: i64) {
     if let (Some(scroll_widget), Some(child)) = (super::get_widget(scroll_handle), super::get_widget(child_handle)) {
         if let Some(scrolled) = scroll_widget.downcast_ref::<ScrolledWindow>() {
+            // Ensure child fills the viewport width (matches macOS ScrollView behavior)
+            child.set_hexpand(true);
+            child.set_halign(gtk4::Align::Fill);
             scrolled.set_child(Some(&child));
         }
     }

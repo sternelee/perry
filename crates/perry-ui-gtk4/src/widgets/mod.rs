@@ -82,6 +82,11 @@ pub fn clear_children(handle: i64) {
 /// Add a child widget to a parent widget at a specific index.
 pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
     if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        // Unparent if already has a parent
+        if child.parent().is_some() {
+            child.unparent();
+        }
+
         if let Some(container) = parent.downcast_ref::<gtk4::Box>() {
             let mut i = 0;
             let mut sibling = container.first_child();
@@ -109,6 +114,11 @@ pub fn add_child_at(parent_handle: i64, child_handle: i64, index: i64) {
 /// Add a child view to a parent view.
 pub fn add_child(parent_handle: i64, child_handle: i64) {
     if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        // Unparent if already has a parent
+        if child.parent().is_some() {
+            child.unparent();
+        }
+
         if let Some(container) = parent.downcast_ref::<gtk4::Box>() {
             container.append(&child);
         } else if let Some(scrolled) = parent.downcast_ref::<gtk4::ScrolledWindow>() {
@@ -175,22 +185,68 @@ pub fn set_control_size(handle: i64, size: i64) {
 /// Set corner radius on a widget via CSS.
 pub fn set_corner_radius(handle: i64, radius: f64) {
     if let Some(widget) = get_widget(handle) {
-        let css = format!("* {{ border-radius: {}px; }}", radius as i32);
-        apply_css(&widget, &css);
+        let is_button = widget.downcast_ref::<gtk4::Button>().is_some();
+        if is_button {
+            let class_name = format!("perry-cr-{}", handle);
+            widget.add_css_class(&class_name);
+            let css = format!(
+                "button.flat.{} {{ border-radius: {}px; }}\n\
+                 button.{} {{ border-radius: {}px; }}",
+                class_name, radius as i32,
+                class_name, radius as i32
+            );
+            let provider = gtk4::CssProvider::new();
+            provider.load_from_data(&css);
+            gtk4::style_context_add_provider_for_display(
+                &widget.display(),
+                &provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        } else {
+            let css = format!("* {{ border-radius: {}px; }}", radius as i32);
+            apply_css(&widget, &css);
+        }
     }
 }
 
 /// Set background color on a widget via CSS.
 pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     if let Some(widget) = get_widget(handle) {
-        let css = format!(
-            "* {{ background-color: rgba({},{},{},{}); }}",
+        let rgba = format!(
+            "rgba({},{},{},{})",
             (r * 255.0) as u8,
             (g * 255.0) as u8,
             (b * 255.0) as u8,
             a
         );
-        apply_css(&widget, &css);
+        // For buttons, make flat first (strips Adwaita chrome), then set background
+        // via a unique CSS class on the display provider at USER priority.
+        let is_button = widget.downcast_ref::<gtk4::Button>().is_some();
+        if is_button {
+            // Make flat to strip Adwaita chrome, then apply background via
+            // display-level CSS at USER priority to override the theme.
+            widget.add_css_class("flat");
+            let class_name = format!("perry-bg-{}", handle);
+            widget.add_css_class(&class_name);
+            let css = format!(
+                "button.flat.{} {{ background-color: {}; background-image: none; }}\n\
+                 button.flat.{}:hover {{ background-color: {}; background-image: none; }}",
+                class_name, rgba, class_name, rgba
+            );
+            let provider = gtk4::CssProvider::new();
+            provider.load_from_data(&css);
+            gtk4::style_context_add_provider_for_display(
+                &widget.display(),
+                &provider,
+                gtk4::STYLE_PROVIDER_PRIORITY_USER,
+            );
+        } else {
+            let css = format!(
+                "* {{ background: {}; background-color: {}; }}",
+                rgba, rgba
+            );
+            apply_css(&widget, &css);
+        }
     }
 }
 
@@ -283,6 +339,85 @@ pub fn set_width(handle: i64, width: f64) {
 pub fn set_hugging_priority(handle: i64, priority: f64) {
     if let Some(widget) = get_widget(handle) {
         widget.set_hexpand(priority < 249.0);
+    }
+}
+
+/// Set edge insets (padding) on a widget via CSS padding.
+/// This matches macOS behavior where edgeInsets is INTERNAL padding,
+/// unlike GTK4 margins which are external.
+pub fn set_edge_insets(handle: i64, top: f64, left: f64, bottom: f64, right: f64) {
+    if let Some(widget) = get_widget(handle) {
+        let css = format!(
+            "* {{ padding: {}px {}px {}px {}px; }}",
+            top as i32, right as i32, bottom as i32, left as i32
+        );
+        apply_css(&widget, &css);
+    }
+}
+
+/// Make a widget expand to fill its parent's width.
+pub fn match_parent_width(handle: i64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_hexpand(true);
+        widget.set_halign(gtk4::Align::Fill);
+    }
+}
+
+/// Set a fixed height on a widget using set_size_request.
+pub fn set_height(handle: i64, height: f64) {
+    if let Some(widget) = get_widget(handle) {
+        let current_width = widget.size_request().0;
+        widget.set_size_request(current_width, height as i32);
+    }
+}
+
+/// Set distribution on a GtkBox (stack).
+/// 0 = Fill (default), 1 = FillEqually (homogeneous).
+pub fn set_distribution(handle: i64, distribution: i64) {
+    if let Some(widget) = get_widget(handle) {
+        if let Some(container) = widget.downcast_ref::<gtk4::Box>() {
+            container.set_homogeneous(distribution == 1);
+        }
+    }
+}
+
+/// Set alignment on a GtkBox (stack).
+/// Maps macOS NSLayoutAttribute values to GTK4 Align:
+/// 5 (Leading) → Start, 9 (CenterX) → Center, 7 (Width/Fill) → Fill
+/// 3 (Top) → Start, 12 (CenterY) → Center, 4 (Bottom) → End
+pub fn set_alignment(handle: i64, alignment: i64) {
+    if let Some(widget) = get_widget(handle) {
+        if let Some(container) = widget.downcast_ref::<gtk4::Box>() {
+            let is_vertical = container.orientation() == gtk4::Orientation::Vertical;
+            if is_vertical {
+                // Vertical stack: alignment controls children's horizontal alignment
+                let align = match alignment {
+                    5 => gtk4::Align::Start,   // Leading
+                    9 => gtk4::Align::Center,  // CenterX
+                    7 => gtk4::Align::Fill,    // Width
+                    _ => gtk4::Align::Fill,
+                };
+                // Set halign on all existing children
+                let mut child = container.first_child();
+                while let Some(c) = child {
+                    c.set_halign(align);
+                    child = c.next_sibling();
+                }
+            } else {
+                // Horizontal stack: alignment controls children's vertical alignment
+                let align = match alignment {
+                    3 => gtk4::Align::Start,   // Top
+                    12 => gtk4::Align::Center, // CenterY
+                    4 => gtk4::Align::End,     // Bottom
+                    _ => gtk4::Align::Fill,
+                };
+                let mut child = container.first_child();
+                while let Some(c) = child {
+                    c.set_valign(align);
+                    child = c.next_sibling();
+                }
+            }
+        }
     }
 }
 

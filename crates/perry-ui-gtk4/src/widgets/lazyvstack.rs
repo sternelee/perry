@@ -39,6 +39,9 @@ pub fn create(count: f64, render_closure: f64) -> i64 {
         let child_f64 = unsafe { js_closure_call1(closure_ptr, i as f64) };
         let child_handle = unsafe { js_nanbox_get_pointer(child_f64) };
         if let Some(child) = super::get_widget(child_handle) {
+            if child.parent().is_some() {
+                child.unparent();
+            }
             inner.append(&child);
         }
     }
@@ -68,6 +71,9 @@ pub fn update(handle: i64, count: i64) {
                 let child_f64 = unsafe { js_closure_call1(closure_ptr, i as f64) };
                 let child_handle = unsafe { js_nanbox_get_pointer(child_f64) };
                 if let Some(child) = super::get_widget(child_handle) {
+                    if child.parent().is_some() {
+                        child.unparent();
+                    }
                     state.inner_box.append(&child);
                 }
             }

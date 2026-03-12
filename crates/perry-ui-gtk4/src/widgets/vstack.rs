@@ -5,11 +5,6 @@ use gtk4::Orientation;
 pub fn create(spacing: f64) -> i64 {
     crate::app::ensure_gtk_init();
     let vbox = gtk4::Box::new(Orientation::Vertical, spacing as i32);
-    // Default padding matching macOS VStack (20px all sides)
-    vbox.set_margin_top(20);
-    vbox.set_margin_bottom(20);
-    vbox.set_margin_start(20);
-    vbox.set_margin_end(20);
     super::register_widget(vbox.upcast())
 }
 

@@ -78,6 +78,20 @@ pub fn focus(handle: i64) {
     }
 }
 
+/// Get the current text of an editable text field, returning a NaN-boxed string.
+pub fn get_string_value(handle: i64) -> i64 {
+    if let Some(widget) = super::get_widget(handle) {
+        if let Some(entry) = widget.downcast_ref::<Entry>() {
+            let text = entry.text().to_string();
+            let bytes = text.as_bytes();
+            let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) };
+            return str_ptr as i64;
+        }
+    }
+    // Return empty string
+    unsafe { js_string_from_bytes(std::ptr::null(), 0) as i64 }
+}
+
 /// Set the text of an editable text field from a StringHeader pointer.
 pub fn set_string_value(handle: i64, text_ptr: *const u8) {
     let text = str_from_header(text_ptr);

@@ -157,6 +157,11 @@ pub fn app_run(_app_handle: i64) {
 
                 if let Some(root_handle) = entry.root_handle {
                     if let Some(widget) = widgets::get_widget(root_handle) {
+                        // Ensure root widget fills the window
+                        widget.set_hexpand(true);
+                        widget.set_vexpand(true);
+                        widget.set_halign(gtk4::Align::Fill);
+                        widget.set_valign(gtk4::Align::Fill);
                         window.set_child(Some(&widget));
                     }
                 }

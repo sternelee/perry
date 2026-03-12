@@ -686,6 +686,52 @@ pub extern "C" fn perry_ui_widget_set_hugging(handle: i64, priority: f64) {
     widgets::set_hugging_priority(handle, priority);
 }
 
+/// Set edge insets (padding) on a widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_edge_insets(
+    handle: i64, top: f64, left: f64, bottom: f64, right: f64,
+) {
+    widgets::set_edge_insets(handle, top, left, bottom, right);
+}
+
+/// Get the current text content of a TextField.
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
+    widgets::textfield::get_string_value(handle) as i64
+}
+
+/// Make a widget expand to fill its parent's width.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
+    widgets::match_parent_width(handle);
+}
+
+/// Set a fixed height constraint on a widget.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
+    widgets::set_height(handle, height);
+}
+
+/// Set distribution on a stack (GtkBox).
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_distribution(handle: i64, distribution: f64) {
+    widgets::set_distribution(handle, distribution as i64);
+}
+
+/// Set alignment on a stack (GtkBox).
+/// macOS NSLayoutAttribute values: Leading=5, CenterX=9, Width=7, Top=3, CenterY=12, Bottom=4.
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_alignment(handle: i64, alignment: f64) {
+    widgets::set_alignment(handle, alignment as i64);
+}
+
+/// Set the application icon.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_icon(_path_ptr: i64) {
+    // GTK4 app icon is set via .desktop file or gtk4::Window::set_default_icon_name.
+    // No-op for now; icon is typically handled by the desktop environment.
+}
+
 /// Create a VStack with custom insets.
 #[no_mangle]
 pub extern "C" fn perry_ui_vstack_create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right: f64) -> i64 {
