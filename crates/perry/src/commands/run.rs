@@ -243,7 +243,7 @@ async fn remote_build_and_launch(
 
     // Build manifest
     let ios_distribute = match target {
-        "ios" => "none",          // device build, sign but don't upload to App Store
+        "ios" => "development",   // device build needs dev signing, not distribution
         "ios-simulator" => "simulator",
         _ => "none",
     };
