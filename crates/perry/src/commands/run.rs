@@ -241,15 +241,33 @@ async fn remote_build_and_launch(
         );
     }
 
-    // Build manifest (minimal for dev builds)
+    // Build manifest
+    let ios_distribute = match target {
+        "ios" => "none",          // device build, sign but don't upload to App Store
+        "ios-simulator" => "simulator",
+        _ => "none",
+    };
     let manifest = serde_json::json!({
         "app_name": app_name,
         "bundle_id": bundle_id,
         "version": "0.0.1",
         "entry": entry,
         "targets": [build_target],
-        "ios_distribute": if target == "ios" { "none" } else { "simulator" },
+        "ios_distribute": ios_distribute,
     });
+
+    // Build credentials — device builds need signing
+    let credentials = if target == "ios" {
+        build_device_credentials(&config, &bundle_id)?
+    } else {
+        serde_json::json!({
+            "apple_team_id": null,
+            "apple_signing_identity": null,
+            "apple_key_id": null,
+            "apple_issuer_id": null,
+            "apple_p8_key": null
+        })
+    };
 
     // Upload
     if let OutputFormat::Text = format {
@@ -263,13 +281,7 @@ async fn remote_build_and_launch(
     let form = multipart::Form::new()
         .text("license_key", license_key)
         .text("manifest", serde_json::to_string(&manifest)?)
-        .text("credentials", serde_json::to_string(&serde_json::json!({
-            "apple_team_id": null,
-            "apple_signing_identity": null,
-            "apple_key_id": null,
-            "apple_issuer_id": null,
-            "apple_p8_key": null
-        }))?);
+        .text("credentials", serde_json::to_string(&credentials)?);
 
     let form = form.text("tarball_b64", tarball_b64);
 
@@ -652,6 +664,187 @@ fn read_app_metadata(project_root: &Path, input: &Path) -> (String, String) {
         .and_then(|s| s.to_str())
         .unwrap_or("app");
     (stem.to_string(), format!("com.perry.{}", stem))
+}
+
+/// Build signing credentials for physical iOS device builds.
+/// Loads from saved config (~/.perry/config.toml), auto-exports .p12 from Keychain,
+/// and finds provisioning profile in ~/.perry/.
+fn build_device_credentials(
+    config: &super::publish::PerryConfig,
+    bundle_id: &str,
+) -> Result<serde_json::Value> {
+    use base64::Engine;
+
+    let apple = config.apple.as_ref();
+    let team_id = apple.and_then(|a| a.team_id.clone());
+    let key_id = apple.and_then(|a| a.key_id.clone());
+    let issuer_id = apple.and_then(|a| a.issuer_id.clone());
+
+    // Read .p8 key if path is saved
+    let p8_key = apple
+        .and_then(|a| a.p8_key_path.as_ref())
+        .and_then(|p| std::fs::read_to_string(p).ok());
+
+    // Auto-detect signing identity from Keychain
+    let signing_identity = detect_signing_identity();
+
+    // Auto-export .p12 from Keychain
+    let (cert_b64, cert_password) = if let Some(ref identity) = signing_identity {
+        auto_export_p12(identity)
+    } else {
+        (None, None)
+    };
+
+    // Find provisioning profile in ~/.perry/
+    let profile_b64 = find_provisioning_profile(bundle_id);
+
+    if signing_identity.is_none() {
+        bail!(
+            "No code signing identity found for device builds.\n\
+             Run `perry setup ios` first, or use `perry run --ios --simulator <UDID>` for unsigned builds."
+        );
+    }
+
+    Ok(serde_json::json!({
+        "apple_team_id": team_id,
+        "apple_signing_identity": signing_identity,
+        "apple_key_id": key_id,
+        "apple_issuer_id": issuer_id,
+        "apple_p8_key": p8_key,
+        "provisioning_profile_base64": profile_b64,
+        "apple_certificate_p12_base64": cert_b64,
+        "apple_certificate_password": cert_password,
+    }))
+}
+
+/// Detect first available Apple Distribution / Developer signing identity
+fn detect_signing_identity() -> Option<String> {
+    let output = Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Prefer "Apple Distribution" for device, then "iPhone Distribution", then first available
+    let mut identities: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(q1) = line.find('"') {
+            if let Some(q2) = line.rfind('"') {
+                if q2 > q1 {
+                    identities.push(line[q1 + 1..q2].to_string());
+                }
+            }
+        }
+    }
+
+    identities
+        .iter()
+        .find(|n| n.starts_with("Apple Distribution"))
+        .or_else(|| identities.iter().find(|n| n.starts_with("iPhone Distribution")))
+        .or_else(|| identities.first())
+        .cloned()
+}
+
+/// Auto-export a .p12 from Keychain for the given identity
+fn auto_export_p12(identity: &str) -> (Option<String>, Option<String>) {
+    use base64::Engine;
+
+    let password = "perry-run-auto";
+    let tmp_path = std::env::temp_dir().join("perry_run_auto.p12");
+
+    // Find the identity hash
+    let output = match Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return (None, None),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut hash = None;
+    for line in stdout.lines() {
+        if line.contains(identity) {
+            let trimmed = line.trim();
+            let after_paren = trimmed.find(") ").map(|i| i + 2).unwrap_or(0);
+            let hash_end = trimmed.find(" \"").unwrap_or(trimmed.len());
+            if hash_end > after_paren {
+                hash = Some(trimmed[after_paren..hash_end].trim().to_string());
+                break;
+            }
+        }
+    }
+
+    let hash = match hash {
+        Some(h) => h,
+        None => return (None, None),
+    };
+
+    // Export .p12
+    let status = Command::new("security")
+        .args([
+            "export",
+            "-k",
+            "login.keychain-db",
+            "-t",
+            "identities",
+            "-f",
+            "pkcs12",
+            "-P",
+            password,
+            "-o",
+        ])
+        .arg(&tmp_path)
+        .status();
+
+    if status.map(|s| s.success()).unwrap_or(false) {
+        if let Ok(data) = std::fs::read(&tmp_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            return (Some(b64), Some(password.to_string()));
+        }
+    }
+    let _ = std::fs::remove_file(&tmp_path);
+    (None, None)
+}
+
+/// Find a provisioning profile for the given bundle ID in ~/.perry/
+fn find_provisioning_profile(bundle_id: &str) -> Option<String> {
+    use base64::Engine;
+
+    let perry_dir = dirs::home_dir()?.join(".perry");
+    if !perry_dir.exists() {
+        return None;
+    }
+
+    // Look for {bundle_id_underscored}.mobileprovision or generic perry.mobileprovision
+    let underscored = bundle_id.replace('.', "_");
+    let candidates = [
+        perry_dir.join(format!("{underscored}.mobileprovision")),
+        perry_dir.join("perry.mobileprovision"),
+    ];
+
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(data) = std::fs::read(path) {
+                return Some(base64::engine::general_purpose::STANDARD.encode(&data));
+            }
+        }
+    }
+
+    // Also check any .mobileprovision file in ~/.perry/
+    if let Ok(entries) = std::fs::read_dir(&perry_dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|e| e.to_str()) == Some("mobileprovision") {
+                if let Ok(data) = std::fs::read(entry.path()) {
+                    return Some(base64::engine::general_purpose::STANDARD.encode(&data));
+                }
+            }
+        }
+    }
+
+    None
 }
 
 // --- Local compilation helpers ---
