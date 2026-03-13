@@ -2047,10 +2047,111 @@ impl JsEmitter {
                         }
                         self.output.push(')');
                     }
+                    "existsSync" => {
+                        self.output.push_str("__perry.fs_existsSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "writeFileSync" => {
+                        self.output.push_str("__perry.fs_writeFileSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "mkdirSync" => {
+                        self.output.push_str("__perry.fs_mkdirSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "unlinkSync" => {
+                        self.output.push_str("__perry.fs_unlinkSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "appendFileSync" => {
+                        self.output.push_str("__perry.fs_appendFileSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
                     _ => {
-                        let _ = write!(self.output, "((() => {{ throw new Error('fs.{} not available in browser'); }})())", method);
+                        // Graceful fallback — log warning instead of throwing
+                        let _ = write!(self.output, "(console.warn('fs.{} not available in browser'), \"\")", method);
                     }
                 }
+            }
+            // --- child_process (stub in browser) ---
+            "child_process" => {
+                match method {
+                    "execSync" => {
+                        self.output.push_str("__perry.child_process_execSync(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    _ => {
+                        let _ = write!(self.output, "(console.warn('child_process.{} not available in browser'), \"\")", method);
+                    }
+                }
+            }
+            // --- node-fetch (Perry native SSE streaming → Fetch API on web) ---
+            "node-fetch" => {
+                match method {
+                    "streamStart" => {
+                        self.output.push_str("__perry.stream_start(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "streamPoll" => {
+                        self.output.push_str("__perry.stream_poll(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "streamStatus" => {
+                        self.output.push_str("__perry.stream_status(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    "streamClose" => {
+                        self.output.push_str("__perry.stream_close(");
+                        for (i, arg) in args.iter().enumerate() {
+                            if i > 0 { self.output.push_str(", "); }
+                            self.emit_expr(arg);
+                        }
+                        self.output.push(')');
+                    }
+                    _ => {
+                        let _ = write!(self.output, "(console.warn('node-fetch.{} not available in browser'), \"\")", method);
+                    }
+                }
+            }
+            // --- child_process: spawnBackground (stub) ---
+            _ if method == "spawnBackground" => {
+                self.output.push_str("(console.warn('spawnBackground not available in browser'), 0)");
             }
             // --- Fastify/HTTP (throw in browser) ---
             "fastify" | "ws" | "mysql2" | "mysql2/promise" | "pg" | "net" | "worker_threads" => {
@@ -2251,10 +2352,34 @@ impl JsEmitter {
             "buttonSetContentTintColor" => "perry_ui_button_set_content_tint_color",
             "widgetSetBackgroundColor" => "perry_ui_set_background",
             "widgetAddChild" => "perry_ui_widget_add_child",
+            "widgetRemoveChild" => "perry_ui_widget_remove_child",
+            "widgetReorderChild" => "perry_ui_widget_reorder_child",
             "widgetClearChildren" => "perry_ui_widget_remove_all_children",
             "widgetSetWidth" => "perry_ui_widget_set_width",
+            "widgetSetHeight" => "perry_ui_widget_set_height",
             "widgetSetHugging" => "perry_ui_widget_set_hugging",
             "widgetSetHidden" => "perry_ui_set_widget_hidden",
+            "widgetMatchParentHeight" => "perry_ui_widget_match_parent_height",
+            "widgetMatchParentWidth" => "perry_ui_widget_match_parent_width",
+            "widgetAddOverlay" => "perry_ui_widget_add_overlay",
+            "widgetSetOverlayFrame" => "perry_ui_widget_set_overlay_frame",
+            "widgetSetEdgeInsets" => "perry_ui_widget_set_edge_insets",
+            "widgetSetContextMenu" => "perry_ui_widget_set_context_menu",
+            "stackSetDetachesHidden" => "perry_ui_stack_set_detaches_hidden",
+            "stackSetDistribution" => "perry_ui_stack_set_distribution",
+            "buttonSetImagePosition" => "perry_ui_button_set_image_position",
+            "textSetColor" => "perry_ui_text_set_color",
+            "textSetWraps" => "perry_ui_text_set_wraps",
+            "textfieldSetString" => "perry_ui_textfield_set_string",
+            "textfieldGetString" => "perry_ui_textfield_get_string",
+            "textfieldFocus" => "perry_ui_textfield_focus",
+            "textfieldBlurAll" => "perry_ui_textfield_blur_all",
+            "textfieldSetOnSubmit" => "perry_ui_textfield_set_on_submit",
+            "textfieldSetOnFocus" => "perry_ui_textfield_set_on_focus",
+            "pollOpenFile" => "perry_ui_poll_open_file",
+            "frameSplitCreate" => "perry_ui_frame_split_create",
+            "frameSplitAddChild" => "perry_ui_frame_split_add_child",
+            "saveFileDialog" => "perry_ui_save_file_dialog",
             "VStackWithInsets" => "perry_ui_vstack_create_with_insets",
             "HStackWithInsets" => "perry_ui_hstack_create_with_insets",
             "embedNSView" => "perry_ui_embed_ns_view",
@@ -2265,6 +2390,7 @@ impl JsEmitter {
             // Menu
             "menuCreate" | "menu_create" => "perry_ui_menu_create",
             "menuAddItem" | "menu_add_item" => "perry_ui_menu_add_item",
+            "menuAddStandardAction" | "menu_add_standard_action" => "perry_ui_menu_add_standard_action",
             "menuAddSeparator" | "menu_add_separator" => "perry_ui_menu_add_separator",
             "menuAddSubmenu" | "menu_add_submenu" => "perry_ui_menu_add_submenu",
             "menuBarCreate" | "menubar_create" => "perry_ui_menubar_create",

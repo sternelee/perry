@@ -868,27 +868,80 @@ function perry_ui_button_set_text_color(h, r, g, b, a) {
     if (el) el.style.color = `rgba(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)},${a})`;
 }
 
+var _sfSymbolSVGs = {
+    // Activity bar / sidebar
+    "folder":           '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M2 4a2 2 0 012-2h4l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4z"/></svg>',
+    "folder.fill":      '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M2 4a2 2 0 012-2h4l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4z"/></svg>',
+    "magnifyingglass":  '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0 1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z" clip-rule="evenodd"/></svg>',
+    "sparkles":         '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 2l1.5 4.5L16 8l-4.5 1.5L10 14l-1.5-4.5L4 8l4.5-1.5L10 2zM15 12l.75 2.25L18 15l-2.25.75L15 18l-.75-2.25L12 15l2.25-.75L15 12z"/></svg>',
+    "gearshape":        '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>',
+    "arrow.triangle.2.circlepath": '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/></svg>',
+    "arrow.triangle.branch": '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5 3a2 2 0 00-2 2v1a2 2 0 002 2h1v3a2 2 0 002 2h2v1a2 2 0 002 2h1a2 2 0 002-2v-1a2 2 0 00-2-2h-1V8a2 2 0 00-2-2H8V5a2 2 0 00-2-2H5z" clip-rule="evenodd"/></svg>',
+    // Editor / explorer
+    "xmark":            '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>',
+    "chevron.right":    '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/></svg>',
+    "chevron.down":     '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>',
+    "ellipsis":         '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M6 10a2 2 0 11-4 0 2 2 0 014 0zm6 0a2 2 0 11-4 0 2 2 0 014 0zm6 0a2 2 0 11-4 0 2 2 0 014 0z"/></svg>',
+    "doc.badge.plus":   '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm5 6a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V8z" clip-rule="evenodd"/></svg>',
+    "folder.badge.plus":'<svg viewBox="0 0 20 20" fill="currentColor"><path d="M2 4a2 2 0 012-2h4l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4zm9 4a1 1 0 10-2 0v1H8a1 1 0 100 2h1v1a1 1 0 102 0v-1h1a1 1 0 100-2h-1V8z"/></svg>',
+    "arrow.down.right.and.arrow.up.left": '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M15 3a1 1 0 00-1 1v4.586l-4.293-4.293a1 1 0 00-1.414 1.414L12.586 10H8a1 1 0 100 2h5.586l-4.293 4.293a1 1 0 001.414 1.414L15 13.414V18a1 1 0 102 0V4a1 1 0 00-1-1zM5 17a1 1 0 001-1v-4.586l4.293 4.293a1 1 0 001.414-1.414L7.414 10H12a1 1 0 100-2H6.414l4.293-4.293a1 1 0 00-1.414-1.414L5 6.586V2a1 1 0 10-2 0v14a1 1 0 001 1z" clip-rule="evenodd"/></svg>',
+    // Debug
+    "play.fill":        '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"/></svg>',
+    "pause.fill":       '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>',
+    "stop.fill":        '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clip-rule="evenodd"/></svg>',
+    "arrow.right":      '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>',
+    "arrow.down.right": '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M14 13.5a.5.5 0 01-.5.5h-7a.5.5 0 010-1h5.793L5.146 5.854a.5.5 0 01.708-.708L13 12.293V6.5a.5.5 0 011 0v7z" clip-rule="evenodd"/></svg>',
+    "arrow.up.left":    '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M6 6.5a.5.5 0 01.5-.5h7a.5.5 0 010 1H7.707l7.147 7.146a.5.5 0 01-.708.708L7 7.707V13.5a.5.5 0 01-1 0v-7z" clip-rule="evenodd"/></svg>',
+    // Terminal
+    "arrow.up.left.and.arrow.down.right": '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 4a1 1 0 011-1h4a1 1 0 010 2H5.414l4.293 4.293a1 1 0 01-1.414 1.414L4 6.414V9a1 1 0 11-2 0V4a1 1 0 011-1zm10 12a1 1 0 01-1 1h-1a1 1 0 010-2h2.586l-4.293-4.293a1 1 0 011.414-1.414L15 13.586V11a1 1 0 112 0v5a1 1 0 01-1 1h-3z" clip-rule="evenodd"/></svg>',
+    // File type icons
+    "doc.text":         '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd"/></svg>',
+    "doc.on.doc":       '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zm-2 4a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z"/></svg>',
+    "circle.fill":      '<svg viewBox="0 0 20 20" fill="currentColor"><circle cx="10" cy="10" r="6"/></svg>',
+    "plus":             '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"/></svg>',
+    "trash":            '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>',
+    "square.and.arrow.up": '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z"/></svg>',
+    "ladybug":          '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233.616c.292.615.464 1.295.464 2.014v.75h2.322a1 1 0 110 2H14.68a5.027 5.027 0 01-.705 1.563l1.732 1a1 1 0 01-1 1.732l-1.732-1A4.988 4.988 0 0110 17a4.988 4.988 0 01-2.975-.98l-1.732 1a1 1 0 01-1-1.732l1.732-1A5.027 5.027 0 015.32 12.725H3a1 1 0 110-2h2.322v-.75c0-.72.172-1.399.464-2.014l-1.233-.616a1 1 0 11.894-1.79l1.599.8L11 4.323V3a1 1 0 011-1z" clip-rule="evenodd"/></svg>',
+    "puzzlepiece.extension": '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M10 3.5a1.5 1.5 0 013 0V4a1 1 0 001 1h1.5a2 2 0 012 2v1.5a1 1 0 01-1 1H16a1.5 1.5 0 000 3h.5a1 1 0 011 1V15a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h1.5a1 1 0 001-1v-.5z"/></svg>',
+    "terminal":         '<svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M2 5a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2H4a2 2 0 01-2-2V5zm3.293 1.293a1 1 0 011.414 0l3 3a1 1 0 010 1.414l-3 3a1 1 0 01-1.414-1.414L7.586 10 5.293 7.707a1 1 0 010-1.414zM11 12a1 1 0 100 2h3a1 1 0 100-2h-3z" clip-rule="evenodd"/></svg>',
+    // Tab file icons (swift, etc.)
+    "swift":            '<svg viewBox="0 0 20 20" fill="currentColor"><path d="M13.7 3.3C12.5 2.7 11.2 2.4 10 2.4c-4.2 0-7.6 3.4-7.6 7.6 0 2 .8 3.8 2 5.2C5 14.4 7 12.6 8.5 11c-1.4-.8-2.4-2-3-3.2 1.2 1 2.5 1.7 3.7 2 1.6-1.6 2.8-3.4 3.5-5-1 1.2-2.3 2.5-3.7 3.5 1 .3 2 .3 2.8.1.8-.3 1.5-.8 2-1.5.3-.5.5-1.1.4-1.7-.1-.7-.3-1.3-.5-1.9z"/></svg>',
+};
+
 function perry_ui_button_set_image(h, name) {
-    const el = getHandle(h);
+    var el = getHandle(h);
     if (!el) return;
-    // Map SF Symbol names to Unicode icons
-    const iconMap = {
-        "folder.fill": "\uD83D\uDCC1", "folder": "\uD83D\uDCC2",
-        "doc.text": "\uD83D\uDCC4", "doc.on.doc": "\uD83D\uDDC2\uFE0F",
-        "magnifyingglass": "\uD83D\uDD0D", "gearshape": "\u2699\uFE0F",
-        "arrow.triangle.branch": "\uD83D\uDD00", "ladybug": "\uD83D\uDC1E",
-        "puzzlepiece.extension": "\uD83E\uDDE9", "sparkles": "\u2728",
-        "terminal": "\u25B6", "xmark": "\u2715", "plus": "+",
-        "chevron.right": "\u203A", "chevron.down": "\u2304",
-        "square.and.arrow.up": "\u2B06\uFE0F", "trash": "\uD83D\uDDD1\uFE0F",
-    };
-    const icon = iconMap[name] || name;
-    // Prepend icon to existing text or set as content
-    const existingText = el.textContent || "";
-    if (existingText.trim()) {
-        el.textContent = icon + " " + existingText;
+    var svg = _sfSymbolSVGs[name];
+    if (svg) {
+        // Create inline SVG icon
+        var iconSpan = document.createElement("span");
+        iconSpan.className = "perry-icon";
+        iconSpan.innerHTML = svg;
+        iconSpan.style.display = "inline-flex";
+        iconSpan.style.width = "16px";
+        iconSpan.style.height = "16px";
+        iconSpan.style.verticalAlign = "middle";
+        iconSpan.style.flexShrink = "0";
+        var svgEl = iconSpan.querySelector("svg");
+        if (svgEl) {
+            svgEl.style.width = "100%";
+            svgEl.style.height = "100%";
+        }
+        // Store existing text
+        var existingText = el.textContent || "";
+        el.textContent = "";
+        el.style.display = "inline-flex";
+        el.style.alignItems = "center";
+        el.style.gap = "4px";
+        el.appendChild(iconSpan);
+        if (existingText.trim()) {
+            el.appendChild(document.createTextNode(existingText));
+        }
+        // Store icon element for tint color changes
+        el._perryIcon = iconSpan;
     } else {
-        el.textContent = icon;
+        // Fallback: show name as text (shouldn't happen if map is complete)
+        el.textContent = name;
     }
 }
 
@@ -899,7 +952,7 @@ function perry_ui_button_set_content_tint_color(h, r, g, b, a) {
 
 function perry_ui_widget_set_width(h, w) {
     const el = getHandle(h);
-    if (el) { el.style.width = w + "px"; el.style.minWidth = w + "px"; }
+    if (el) { el.style.width = w + "px"; el.style.minWidth = w + "px"; el.style.maxWidth = w + "px"; el.style.flexShrink = "0"; }
 }
 
 function perry_ui_widget_set_hugging(h, priority) {
@@ -1367,6 +1420,11 @@ function perry_ui_save_file_dialog(callback, defaultName) {
     if (name && typeof callback === "function") callback(name);
 }
 
+function perry_ui_poll_open_file() {
+    // On web, file opening is handled asynchronously via openFolderDialog/openFileDialog
+    return "";
+}
+
 function perry_ui_alert(title, message, buttons, callback) {
     const result = window.confirm(title + "\n\n" + message);
     if (typeof callback === "function") callback(result ? 0 : 1);
@@ -1525,7 +1583,7 @@ function _injectEditorCSS() {
     s.textContent = `
 .hone-editor { position: relative; overflow: hidden; contain: strict; outline: none;
   font-variant-ligatures: contextual; -webkit-font-smoothing: antialiased;
-  cursor: text; }
+  cursor: text; background-color: #1e1e1e; color: #d4d4d4; }
 .hone-editor-lines { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
 .hone-editor-line { position: absolute; left: 0; right: 0; white-space: pre;
   pointer-events: none; }
@@ -1623,6 +1681,8 @@ function _setupEditorEvents(root, editor) {
 
     root.addEventListener("wheel", function(e) {
         editor.pendingEvents.push({ type: 3, char: 0, action: 0, x: e.deltaX, y: e.deltaY });
+        editor._scrollDelta = (editor._scrollDelta || 0) + e.deltaY;
+        editor._needsLines = 1;
         e.preventDefault();
     }, { passive: false });
 
@@ -1718,6 +1778,8 @@ function hone_editor_measure_text(h, text) {
 function hone_editor_render_line(h, lineNumber, text, tokensJson, yOffset) {
     var ed = _honeEditors.get(h);
     if (!ed) return;
+    // Skip if using TS-authoritative viewport mode (cache_line + set_viewport handles rendering)
+    if (ed._lineCache) return;
 
     var lineEl = ed.activeLines[lineNumber];
     if (!lineEl) {
@@ -1966,6 +2028,638 @@ function hone_editor_clear_events(h) {
     if (ed) ed.pendingEvents.length = 0;
 }
 
+// --- TS-Authoritative Editor Protocol (cache_line, set_viewport, selections) ---
+
+function hone_editor_cache_line(h, lineNumber, text, packedTokens) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    if (!ed._lineCache) ed._lineCache = {};
+    ed._lineCache[lineNumber] = { text: text, tokens: packedTokens };
+}
+
+function hone_editor_set_viewport(h, startLine, endLine, scrollTop, totalLines, lineHeight) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed._vpStart = startLine;
+    ed._vpEnd = endLine;
+    ed._vpScrollTop = scrollTop;
+    ed._vpTotalLines = totalLines;
+    if (lineHeight > 0) ed.lineHeight = lineHeight;
+
+    // Render visible lines from cache
+    ed.linesContainer.innerHTML = "";
+    ed.linesContainer.style.position = "relative";
+    ed.linesContainer.style.height = (totalLines * ed.lineHeight) + "px";
+
+    var cache = ed._lineCache || {};
+    for (var line = startLine; line < endLine; line++) {
+        var entry = cache[line];
+        var div = document.createElement("div");
+        div.className = "hone-editor-line";
+        div.style.position = "absolute";
+        div.style.top = ((line - startLine) * ed.lineHeight) + "px";
+        div.style.left = ed.gutterWidth + "px";
+        div.style.height = ed.lineHeight + "px";
+        div.style.lineHeight = ed.lineHeight + "px";
+        div.style.whiteSpace = "pre";
+        div.style.fontFamily = ed.fontFamily;
+        div.style.fontSize = ed.fontSize + "px";
+
+        if (entry) {
+            // Render with token coloring if we have packed tokens
+            if (entry.tokens && entry.tokens.length > 0) {
+                _renderTokenizedLine(div, entry.text, entry.tokens);
+            } else {
+                div.textContent = entry.text;
+            }
+        }
+
+        // Line background color
+        if (ed._lineBGs && ed._lineBGs[line]) {
+            div.style.backgroundColor = ed._lineBGs[line];
+        }
+
+        ed.linesContainer.appendChild(div);
+    }
+
+    // Gutter
+    if (ed.gutterWidth > 0) {
+        for (var line = startLine; line < endLine; line++) {
+            var gutter = document.createElement("div");
+            gutter.style.position = "absolute";
+            gutter.style.top = ((line - startLine) * ed.lineHeight) + "px";
+            gutter.style.left = "0";
+            gutter.style.width = ed.gutterWidth + "px";
+            gutter.style.height = ed.lineHeight + "px";
+            gutter.style.lineHeight = ed.lineHeight + "px";
+            gutter.style.textAlign = "right";
+            gutter.style.paddingRight = "8px";
+            gutter.style.fontFamily = ed.fontFamily;
+            gutter.style.fontSize = ed.fontSize + "px";
+            gutter.style.color = ed._gutterFG || "#858585";
+            gutter.style.userSelect = "none";
+            gutter.textContent = String(line + 1);
+            ed.linesContainer.appendChild(gutter);
+        }
+    }
+}
+
+function _renderTokenizedLine(div, text, packedTokens) {
+    // Format: "startCol,endCol,hexColor,styleInt|..." with optional "BG:hexColor|" prefix
+    var packed = packedTokens;
+
+    // Handle BG prefix
+    if (packed.length > 3 && packed.charAt(0) === "B" && packed.charAt(1) === "G" && packed.charAt(2) === ":") {
+        var bgEnd = packed.indexOf("|");
+        if (bgEnd > 3) {
+            div.style.backgroundColor = "#" + packed.substring(3, bgEnd);
+            packed = packed.substring(bgEnd + 1);
+        }
+    }
+
+    if (packed.length < 3) {
+        div.textContent = text;
+        return;
+    }
+
+    // Parse pipe-separated tokens: startCol,endCol,hexColor,styleInt|
+    var segments = packed.split("|");
+    var lastEnd = 0;
+    for (var t = 0; t < segments.length; t++) {
+        var seg = segments[t];
+        if (seg.length < 3) continue;
+        var parts = seg.split(",");
+        if (parts.length < 3) continue;
+        var s = parseInt(parts[0]) || 0;
+        var e = parseInt(parts[1]) || s;
+        var hex = parts[2] || "d4d4d4";
+        var style = parts.length > 3 ? parseInt(parts[3]) : 0;
+
+        // Fill gap before this token
+        if (s > lastEnd) {
+            div.appendChild(document.createTextNode(text.substring(lastEnd, s)));
+        }
+        var span = document.createElement("span");
+        span.style.color = "#" + hex;
+        if (style === 1) span.style.fontStyle = "italic";
+        if (style === 2) span.style.fontWeight = "bold";
+        if (style === 3) { span.style.fontSize = "1.4em"; span.style.fontWeight = "bold"; }
+        if (style === 4) { span.style.fontSize = "1.2em"; span.style.fontWeight = "bold"; }
+        span.textContent = text.substring(s, e);
+        div.appendChild(span);
+        lastEnd = e;
+    }
+    if (lastEnd < text.length) {
+        div.appendChild(document.createTextNode(text.substring(lastEnd)));
+    }
+}
+
+function hone_editor_begin_selections(h, count) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    // Clear existing selection rects
+    ed.selContainer.innerHTML = "";
+}
+
+function hone_editor_add_selection_rect(h, x, y, w, ht) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    var rect = document.createElement("div");
+    rect.style.position = "absolute";
+    rect.style.left = x + "px";
+    rect.style.top = y + "px";
+    rect.style.width = w + "px";
+    rect.style.height = ht + "px";
+    rect.style.backgroundColor = ed._selColor || "rgba(38,79,120,0.5)";
+    rect.style.pointerEvents = "none";
+    ed.selContainer.appendChild(rect);
+}
+
+function hone_editor_set_read_only(h, mode) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed._readOnly = mode;
+}
+
+function hone_editor_clear_line_cache(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed._lineCache = {};
+}
+
+function hone_editor_set_line_background(h, line, r, g, b, a) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    if (!ed._lineBGs) ed._lineBGs = {};
+    ed._lineBGs[line] = "rgba(" + Math.round(r*255) + "," + Math.round(g*255) + "," + Math.round(b*255) + "," + a + ")";
+}
+
+function hone_editor_clear_line_backgrounds(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed._lineBGs = {};
+}
+
+function hone_editor_get_view_width(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return 800;
+    return ed.root.clientWidth || 800;
+}
+
+function hone_editor_get_view_height(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return 600;
+    return ed.root.clientHeight || 600;
+}
+
+function hone_editor_get_scroll_delta(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return 0;
+    return ed._scrollDelta || 0;
+}
+
+function hone_editor_clear_scroll_delta(h) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed._scrollDelta = 0;
+}
+
+function hone_editor_needs_lines(h) {
+    // Return 1 if the viewport has changed and TS needs to supply new cached lines
+    var ed = _honeEditors.get(h);
+    if (!ed) return 0;
+    var needs = ed._needsLines || 0;
+    ed._needsLines = 0;
+    return needs;
+}
+
+function hone_editor_copy_to_clipboard(ctx, text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(function() {});
+    }
+}
+
+function hone_editor_set_bg_color(h, r, g, b) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed.root.style.backgroundColor = "rgb(" + Math.round(r*255) + "," + Math.round(g*255) + "," + Math.round(b*255) + ")";
+}
+
+function hone_editor_set_fg_color(h, r, g, b) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed.root.style.color = "rgb(" + Math.round(r*255) + "," + Math.round(g*255) + "," + Math.round(b*255) + ")";
+}
+
+function hone_editor_set_gutter_fg_color(h, r, g, b) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed._gutterFG = "rgb(" + Math.round(r*255) + "," + Math.round(g*255) + "," + Math.round(b*255) + ")";
+}
+
+function hone_editor_set_selection_color(h, r, g, b, a) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    ed._selColor = "rgba(" + Math.round(r*255) + "," + Math.round(g*255) + "," + Math.round(b*255) + "," + a + ")";
+}
+
+function hone_editor_set_cursor_color(h, r, g, b) {
+    var ed = _honeEditors.get(h);
+    if (!ed) return;
+    var color = "rgb(" + Math.round(r*255) + "," + Math.round(g*255) + "," + Math.round(b*255) + ")";
+    ed.cursorEl.style.background = color;
+    for (var i = 0; i < ed.cursorEls.length; i++) {
+        ed.cursorEls[i].style.background = color;
+    }
+}
+
+// ==========================================================================
+// Missing Widget Functions (used by hone-ide)
+// ==========================================================================
+
+function perry_ui_widget_remove_child(parent_h, child_h) {
+    var parent = getHandle(parent_h);
+    var child = getHandle(child_h);
+    if (parent && child && child.parentNode === parent) parent.removeChild(child);
+}
+
+function perry_ui_widget_reorder_child(parent_h, fromIdx, toIdx) {
+    var parent = getHandle(parent_h);
+    if (!parent) return;
+    var children = Array.from(parent.children);
+    var from = Math.floor(fromIdx);
+    var to = Math.floor(toIdx);
+    if (from < 0 || from >= children.length) return;
+    var child = children[from];
+    parent.removeChild(child);
+    if (to >= parent.children.length) {
+        parent.appendChild(child);
+    } else {
+        parent.insertBefore(child, parent.children[to]);
+    }
+}
+
+function perry_ui_widget_set_height(h, height) {
+    var el = getHandle(h);
+    if (el) { el.style.height = height + "px"; el.style.minHeight = height + "px"; }
+}
+
+function perry_ui_widget_match_parent_height(h) {
+    var el = getHandle(h);
+    if (el) { el.style.height = "100%"; el.style.flex = "1 1 0%"; }
+}
+
+function perry_ui_widget_match_parent_width(h) {
+    var el = getHandle(h);
+    if (el) { el.style.width = "100%"; el.style.alignSelf = "stretch"; }
+}
+
+function perry_ui_widget_add_overlay(parent_h, overlay_h) {
+    var parent = getHandle(parent_h);
+    var overlay = getHandle(overlay_h);
+    if (parent && overlay) {
+        if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
+        overlay.style.position = "absolute";
+        overlay.style.zIndex = "10";
+        parent.appendChild(overlay);
+    }
+}
+
+function perry_ui_widget_set_overlay_frame(overlay_h, x, y, width, height) {
+    var el = getHandle(overlay_h);
+    if (!el) return;
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    el.style.width = width + "px";
+    el.style.height = height + "px";
+}
+
+function perry_ui_widget_set_edge_insets(h, top, right, bottom, left) {
+    var el = getHandle(h);
+    if (el) el.style.padding = top + "px " + right + "px " + bottom + "px " + left + "px";
+}
+
+function perry_ui_stack_set_detaches_hidden(h, detaches) {
+    // On web, hidden elements with display:none are already detached from layout.
+    // No action needed — CSS display:none is equivalent to NSStackView detachesHiddenViews.
+}
+
+function perry_ui_stack_set_distribution(h, distribution) {
+    var el = getHandle(h);
+    if (!el) return;
+    // 0 = Fill, 1 = FillEqually, 2 = FillProportionally, 3 = EqualSpacing, 4 = EqualCentering
+    if (distribution === 1) {
+        // FillEqually: all children same size
+        for (var i = 0; i < el.children.length; i++) {
+            el.children[i].style.flex = "1 1 0%";
+        }
+    }
+}
+
+function perry_ui_stack_set_alignment(h, alignment) {
+    var el = getHandle(h);
+    if (!el) return;
+    // Map NSStackView alignment to CSS
+    if (alignment === 0) el.style.alignItems = "stretch";
+    else if (alignment === 1) el.style.alignItems = "flex-start";
+    else if (alignment === 2) el.style.alignItems = "center";
+    else if (alignment === 3) el.style.alignItems = "flex-end";
+}
+
+function perry_ui_button_set_image_position(h, position) {
+    var el = getHandle(h);
+    if (!el) return;
+    // 0 = no image, 1 = image only, 2 = image left, 3 = image right, etc.
+    // On web, button already has text + icon — just adjust flex direction
+    if (position === 1) {
+        // Image only: hide text portion
+        el.style.fontSize = "0";
+        // The icon (if set via buttonSetImage) is in textContent — restore icon size
+        el.style.display = "inline-flex";
+        el.style.alignItems = "center";
+        el.style.justifyContent = "center";
+        el.style.fontSize = "inherit";
+    }
+}
+
+function perry_ui_text_set_wraps(h, wraps) {
+    var el = getHandle(h);
+    if (!el) return;
+    if (wraps) {
+        el.style.whiteSpace = "normal";
+        el.style.wordWrap = "break-word";
+        el.style.overflowWrap = "break-word";
+    } else {
+        el.style.whiteSpace = "nowrap";
+        el.style.overflow = "hidden";
+        el.style.textOverflow = "ellipsis";
+    }
+}
+
+function perry_ui_text_set_color(h, r, g, b, a) {
+    var el = getHandle(h);
+    if (el) el.style.color = "rgba(" + Math.round(r*255) + "," + Math.round(g*255) + "," + Math.round(b*255) + "," + a + ")";
+}
+
+function perry_ui_textfield_get_string(h) {
+    var el = getHandle(h);
+    return el ? (el.value || "") : "";
+}
+
+function perry_ui_textfield_blur_all() {
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+}
+
+function perry_ui_textfield_set_on_submit(h, callback) {
+    var el = getHandle(h);
+    if (!el || typeof callback !== "function") return;
+    el.addEventListener("keydown", function(e) {
+        if (e.key === "Enter") { e.preventDefault(); callback(el.value || ""); }
+    });
+}
+
+function perry_ui_textfield_set_on_focus(h, callback) {
+    var el = getHandle(h);
+    if (el && typeof callback === "function") el.addEventListener("focus", callback);
+}
+
+function perry_ui_textarea_create(placeholder, callback) {
+    var el = document.createElement("textarea");
+    el.placeholder = placeholder || "";
+    el.style.resize = "vertical";
+    el.style.fontFamily = "inherit";
+    if (typeof callback === "function") {
+        el.addEventListener("input", function() { callback(el.value); });
+    }
+    return wrapWidget(allocHandle(el));
+}
+
+function perry_ui_textarea_set_string(h, text) {
+    var el = getHandle(h);
+    if (el) el.value = text;
+}
+
+function perry_ui_textarea_get_string(h) {
+    var el = getHandle(h);
+    return el ? (el.value || "") : "";
+}
+
+// --- Frame Split (used by iPad/tablet layout, works as simple side-by-side on web) ---
+function perry_ui_frame_split_create(leftWidth) {
+    var el = document.createElement("div");
+    el.style.display = "flex";
+    el.style.flexDirection = "row";
+    el.style.flex = "1 1 0%";
+    el.style.overflow = "hidden";
+    el._leftWidth = leftWidth || 280;
+    return wrapWidget(allocHandle(el));
+}
+
+function perry_ui_frame_split_add_child(split_h, child_h) {
+    var split = getHandle(split_h);
+    var child = getHandle(child_h);
+    if (!split || !child) return;
+    var childCount = split.children.length;
+    if (childCount === 0) {
+        // First child = left panel
+        child.style.width = split._leftWidth + "px";
+        child.style.minWidth = split._leftWidth + "px";
+        child.style.flex = "0 0 " + split._leftWidth + "px";
+        child.style.overflow = "auto";
+    } else {
+        // Second child = right panel (fills rest)
+        child.style.flex = "1 1 0%";
+        child.style.overflow = "auto";
+    }
+    split.appendChild(child);
+}
+
+// --- Menu: Standard Action (maps to no-op on web, native selectors don't apply) ---
+function perry_ui_menu_add_standard_action(menu_h, title, selector, shortcut) {
+    // On web, standard selectors like "cut:", "copy:", "paste:" are handled by the browser.
+    // Just add a normal menu item that does nothing (browser handles it natively).
+    var items = _menus.get(menu_h);
+    if (items) items.push({ type: "item", title: title, callback: function() {
+        // Try to execute the browser command for common actions
+        if (selector === "cut:") document.execCommand("cut");
+        else if (selector === "copy:") document.execCommand("copy");
+        else if (selector === "paste:") document.execCommand("paste");
+        else if (selector === "selectAll:") document.execCommand("selectAll");
+        else if (selector === "undo:") document.execCommand("undo");
+        else if (selector === "redo:") document.execCommand("redo");
+    }, shortcut: shortcut || undefined });
+}
+
+// ==========================================================================
+// Terminal Emulator (web stub — DOM-based terminal without real PTY)
+// ==========================================================================
+
+var _honeTerminals = new Map();
+var _honeTerminalNextHandle = 1;
+
+function hone_terminal_open(rows, cols, shell, cwd) {
+    var h = _honeTerminalNextHandle++;
+    var root = document.createElement("div");
+    root.className = "hone-terminal";
+    root.tabIndex = 0;
+    root.style.cssText = "font-family:JetBrains Mono,Menlo,Monaco,Courier New,monospace;font-size:13px;line-height:1.4;padding:8px;overflow:auto;background:#1e1e1e;color:#cccccc;white-space:pre-wrap;word-break:break-all;flex:1 1 0%;outline:none;";
+
+    var output = document.createElement("div");
+    root.appendChild(output);
+
+    var inputLine = document.createElement("div");
+    inputLine.style.display = "flex";
+    var prompt = document.createElement("span");
+    prompt.textContent = "$ ";
+    prompt.style.color = "#6a9955";
+    var input = document.createElement("span");
+    input.contentEditable = "true";
+    input.style.cssText = "outline:none;flex:1;color:#cccccc;caret-color:#d4d4d4;white-space:pre;";
+    inputLine.appendChild(prompt);
+    inputLine.appendChild(input);
+    root.appendChild(inputLine);
+
+    var term = {
+        root: root,
+        output: output,
+        input: input,
+        inputLine: inputLine,
+        pendingOutput: "",
+        bgColor: "#1e1e1e",
+        fgColor: "#cccccc",
+    };
+
+    // Handle Enter key
+    input.addEventListener("keydown", function(e) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            var cmd = input.textContent || "";
+            var line = document.createElement("div");
+            line.textContent = "$ " + cmd;
+            line.style.color = term.fgColor;
+            output.appendChild(line);
+            var result = document.createElement("div");
+            result.textContent = "Command not available in web browser: " + cmd;
+            result.style.color = "#cc6666";
+            output.appendChild(result);
+            input.textContent = "";
+            root.scrollTop = root.scrollHeight;
+        }
+    });
+
+    root.addEventListener("click", function() { input.focus(); });
+
+    _honeTerminals.set(h, term);
+    handles.set(h + 200000, root);
+    return h;
+}
+
+function hone_terminal_nsview(h) { return h + 200000; }
+
+function hone_terminal_poll(h) {
+    var term = _honeTerminals.get(h);
+    if (!term || !term.pendingOutput) return 0;
+    return 1;
+}
+
+function hone_terminal_write(h, data) {
+    var term = _honeTerminals.get(h);
+    if (!term) return 0;
+    var line = document.createElement("div");
+    line.textContent = (typeof data === "string") ? data : "";
+    term.output.appendChild(line);
+    term.root.scrollTop = term.root.scrollHeight;
+    return 0;
+}
+
+function hone_terminal_resize(h, rows, cols) {
+    // No-op on web — CSS handles sizing
+    return 0;
+}
+
+function hone_terminal_close(h) {
+    var term = _honeTerminals.get(h);
+    if (term && term.root.parentNode) term.root.parentNode.removeChild(term.root);
+    _honeTerminals.delete(h);
+    handles.delete(h + 200000);
+    return 0;
+}
+
+function hone_terminal_set_bg_fg(h, bgR, bgG, bgB, fgR, fgG, fgB) {
+    var term = _honeTerminals.get(h);
+    if (!term) return;
+    var bg = "rgb(" + Math.round(bgR*255) + "," + Math.round(bgG*255) + "," + Math.round(bgB*255) + ")";
+    var fg = "rgb(" + Math.round(fgR*255) + "," + Math.round(fgG*255) + "," + Math.round(fgB*255) + ")";
+    term.bgColor = bg;
+    term.fgColor = fg;
+    term.root.style.background = bg;
+    term.root.style.color = fg;
+}
+
+function hone_terminal_live_set_theme(h, themeJson) {
+    // Parse theme and apply colors
+    var term = _honeTerminals.get(h);
+    if (!term) return;
+    try {
+        var theme = JSON.parse(themeJson);
+        if (theme.background) term.root.style.background = theme.background;
+        if (theme.foreground) term.root.style.color = theme.foreground;
+    } catch(e) {}
+}
+
+// ==========================================================================
+// File System Extensions (write support + child_process stubs)
+// ==========================================================================
+
+function fs_writeFileSync(path, content) {
+    if (!window.__perryFileCache) window.__perryFileCache = {};
+    window.__perryFileCache[path] = { isDir: false, handle: null, content: String(content), children: null };
+    // If we have a File System Access API handle, try to write back
+    if (window.__perryDirHandle && window.__perryFileCache[path] && window.__perryFileCache[path].handle) {
+        _writeFileAsync(path, content);
+    }
+}
+
+async function _writeFileAsync(path, content) {
+    try {
+        var entry = window.__perryFileCache[path];
+        if (entry && entry.handle && entry.handle.createWritable) {
+            var writable = await entry.handle.createWritable();
+            await writable.write(content);
+            await writable.close();
+        }
+    } catch(e) { console.warn("Failed to write file:", path, e); }
+}
+
+function fs_mkdirSync(path) {
+    if (!window.__perryFileCache) window.__perryFileCache = {};
+    if (!window.__perryFileCache[path]) {
+        window.__perryFileCache[path] = { isDir: true, handle: null, content: null, children: [] };
+    }
+}
+
+function fs_unlinkSync(path) {
+    if (window.__perryFileCache) delete window.__perryFileCache[path];
+}
+
+function fs_appendFileSync(path, content) {
+    var existing = fs_readFileSync(path) || "";
+    fs_writeFileSync(path, existing + String(content));
+}
+
+function child_process_execSync(cmd) {
+    console.warn("execSync not available in browser:", cmd);
+    return "";
+}
+
+function hone_get_documents_dir() {
+    return "/documents";
+}
+
+function hone_get_app_files_dir() {
+    return "/app-files";
+}
+
 // --- Platform FFI stubs (web implementations) ---
 function perry_get_screen_width()  { return window.innerWidth; }
 function perry_get_screen_height() { return window.innerHeight; }
@@ -1973,6 +2667,12 @@ function perry_get_scale_factor()  { return window.devicePixelRatio || 1; }
 function perry_has_hardware_keyboard() { return true; }
 function perry_get_platform() { return "web"; }
 function perry_get_orientation() { return window.innerWidth > window.innerHeight ? "landscape" : "portrait"; }
+function perry_get_device_idiom() { return 0; } // 0 = not a tablet/phone on web
+function perry_on_layout_change(callback) {
+    if (typeof callback === "function") {
+        window.addEventListener("resize", function() { callback(); });
+    }
+}
 function perry_on_resize(cb) {
     window.addEventListener("resize", function() { cb(window.innerWidth, window.innerHeight); });
 }
@@ -1982,6 +2682,101 @@ function perry_on_orientation_change(cb) {
             cb(e.matches ? "portrait" : "landscape");
         });
     }
+}
+
+// --- Streaming (node-fetch replacement via Fetch API) ---
+// Status: 0=connecting, 1=streaming, 2=done, 3=error
+var _streamNextHandle = 1;
+var _streams = {};
+
+function stream_start(url, method, body, headersJson) {
+    var h = _streamNextHandle++;
+    var entry = { status: 0, lines: [], reader: null, done: false, error: null, buffer: "" };
+    _streams[h] = entry;
+
+    var headers = {};
+    try {
+        if (headersJson && headersJson.length > 2) headers = JSON.parse(headersJson);
+    } catch (e) {}
+
+    var opts = { method: method || "GET", headers: headers };
+    if (method === "POST" && body && body.length > 0) {
+        opts.body = body;
+    }
+
+    fetch(url, opts).then(function(response) {
+        if (!response.ok) {
+            entry.status = 3;
+            entry.error = "HTTP " + response.status;
+            entry.lines.push("HTTP error: " + response.status);
+            return;
+        }
+        entry.status = 1;
+        var reader = response.body.getReader();
+        entry.reader = reader;
+        var decoder = new TextDecoder();
+
+        function pump() {
+            reader.read().then(function(result) {
+                if (result.done) {
+                    // Flush remaining buffer
+                    if (entry.buffer.length > 0) {
+                        entry.lines.push(entry.buffer);
+                        entry.buffer = "";
+                    }
+                    entry.status = 2;
+                    entry.done = true;
+                    return;
+                }
+                var text = decoder.decode(result.value, { stream: true });
+                entry.buffer += text;
+                // Split by newlines, keep partial last line in buffer
+                var parts = entry.buffer.split("\n");
+                for (var i = 0; i < parts.length - 1; i++) {
+                    entry.lines.push(parts[i] + "\n");
+                }
+                entry.buffer = parts[parts.length - 1];
+                pump();
+            }).catch(function(err) {
+                if (entry.buffer.length > 0) {
+                    entry.lines.push(entry.buffer);
+                    entry.buffer = "";
+                }
+                entry.status = 3;
+                entry.error = String(err);
+            });
+        }
+        pump();
+    }).catch(function(err) {
+        entry.status = 3;
+        entry.error = String(err);
+    });
+
+    return h;
+}
+
+function stream_poll(handle) {
+    var entry = _streams[handle];
+    if (!entry) return "";
+    if (entry.lines.length > 0) {
+        return entry.lines.shift();
+    }
+    return "";
+}
+
+function stream_status(handle) {
+    var entry = _streams[handle];
+    if (!entry) return 3;
+    return entry.status;
+}
+
+function stream_close(handle) {
+    var entry = _streams[handle];
+    if (!entry) return;
+    if (entry.reader) {
+        try { entry.reader.cancel(); } catch (e) {}
+    }
+    delete _streams[handle];
 }
 
 // --- File System Web Cache ---
@@ -2001,7 +2796,7 @@ function fs_readFileSync(path) {
 }
 
 function fs_readdirSync(path) {
-    const entry = window.__perryFileCache[path];
+    var entry = window.__perryFileCache && window.__perryFileCache[path];
     if (entry && entry.children) return entry.children;
     return [];
 }
@@ -2188,6 +2983,7 @@ window.__perry = {
     perry_ui_open_file_dialog,
     perry_ui_open_folder_dialog,
     perry_ui_save_file_dialog,
+    perry_ui_poll_open_file,
     perry_ui_alert,
     // Keyboard
     perry_ui_add_keyboard_shortcut,
@@ -2214,7 +3010,31 @@ window.__perry = {
     perry_ui_app_set_timer,
     // Widget layout
     perry_ui_widget_set_width,
+    perry_ui_widget_set_height,
     perry_ui_widget_set_hugging,
+    perry_ui_widget_remove_child,
+    perry_ui_widget_reorder_child,
+    perry_ui_widget_match_parent_height,
+    perry_ui_widget_match_parent_width,
+    perry_ui_widget_add_overlay,
+    perry_ui_widget_set_overlay_frame,
+    perry_ui_widget_set_edge_insets,
+    perry_ui_stack_set_detaches_hidden,
+    perry_ui_stack_set_distribution,
+    perry_ui_stack_set_alignment,
+    perry_ui_button_set_image_position,
+    perry_ui_text_set_wraps,
+    perry_ui_text_set_color,
+    perry_ui_textfield_get_string,
+    perry_ui_textfield_blur_all,
+    perry_ui_textfield_set_on_submit,
+    perry_ui_textfield_set_on_focus,
+    perry_ui_textarea_create,
+    perry_ui_textarea_set_string,
+    perry_ui_textarea_get_string,
+    perry_ui_frame_split_create,
+    perry_ui_frame_split_add_child,
+    perry_ui_menu_add_standard_action,
     perry_ui_embed_ns_view,
     // Timers
     perry_set_timeout,
@@ -2237,6 +3057,20 @@ window.__perry = {
     fs_readdirSync,
     fs_isDirectory,
     fs_existsSync,
+    fs_writeFileSync,
+    fs_mkdirSync,
+    fs_unlinkSync,
+    fs_appendFileSync,
+    // child_process
+    child_process_execSync,
+    // Hone app dirs
+    hone_get_documents_dir,
+    hone_get_app_files_dir,
+    // Streaming (node-fetch replacement)
+    stream_start,
+    stream_poll,
+    stream_status,
+    stream_close,
 };
 
 // Expose platform FFI functions as globals (compiled code calls them as bare function names)
@@ -2246,8 +3080,12 @@ window.perry_get_scale_factor = perry_get_scale_factor;
 window.perry_has_hardware_keyboard = perry_has_hardware_keyboard;
 window.perry_get_platform = perry_get_platform;
 window.perry_get_orientation = perry_get_orientation;
+window.perry_get_device_idiom = perry_get_device_idiom;
+window.perry_on_layout_change = perry_on_layout_change;
 window.perry_on_resize = perry_on_resize;
 window.perry_on_orientation_change = perry_on_orientation_change;
+window.hone_get_documents_dir = hone_get_documents_dir;
+window.hone_get_app_files_dir = hone_get_app_files_dir;
 
 // Expose editor FFI functions as globals
 window.hone_editor_create = hone_editor_create;
@@ -2276,5 +3114,224 @@ window.hone_editor_get_event_action = hone_editor_get_event_action;
 window.hone_editor_get_event_x = hone_editor_get_event_x;
 window.hone_editor_get_event_y = hone_editor_get_event_y;
 window.hone_editor_clear_events = hone_editor_clear_events;
+window.hone_editor_cache_line = hone_editor_cache_line;
+window.hone_editor_set_viewport = hone_editor_set_viewport;
+window.hone_editor_begin_selections = hone_editor_begin_selections;
+window.hone_editor_add_selection_rect = hone_editor_add_selection_rect;
+window.hone_editor_set_read_only = hone_editor_set_read_only;
+window.hone_editor_clear_line_cache = hone_editor_clear_line_cache;
+window.hone_editor_set_line_background = hone_editor_set_line_background;
+window.hone_editor_clear_line_backgrounds = hone_editor_clear_line_backgrounds;
+window.hone_editor_get_view_width = hone_editor_get_view_width;
+window.hone_editor_get_view_height = hone_editor_get_view_height;
+window.hone_editor_get_scroll_delta = hone_editor_get_scroll_delta;
+window.hone_editor_clear_scroll_delta = hone_editor_clear_scroll_delta;
+window.hone_editor_needs_lines = hone_editor_needs_lines;
+window.hone_editor_copy_to_clipboard = hone_editor_copy_to_clipboard;
+window.hone_editor_set_bg_color = hone_editor_set_bg_color;
+window.hone_editor_set_fg_color = hone_editor_set_fg_color;
+window.hone_editor_set_gutter_fg_color = hone_editor_set_gutter_fg_color;
+window.hone_editor_set_selection_color = hone_editor_set_selection_color;
+window.hone_editor_set_cursor_color = hone_editor_set_cursor_color;
+
+// Expose terminal FFI functions as globals
+window.hone_terminal_open = hone_terminal_open;
+window.hone_terminal_nsview = hone_terminal_nsview;
+window.hone_terminal_poll = hone_terminal_poll;
+window.hone_terminal_write = hone_terminal_write;
+window.hone_terminal_resize = hone_terminal_resize;
+window.hone_terminal_close = hone_terminal_close;
+window.hone_terminal_set_bg_fg = hone_terminal_set_bg_fg;
+window.hone_terminal_live_set_theme = hone_terminal_live_set_theme;
+
+// --- Pre-populate demo project for web ---
+(function() {
+    if (!window.__perryFileCache) window.__perryFileCache = {};
+    var C = window.__perryFileCache;
+    function dir(p) { C[p] = { isDir: true, handle: null, content: null, children: null }; }
+    function file(p, txt) { C[p] = { isDir: false, handle: null, content: txt, children: null }; }
+
+    dir("/documents");
+    dir("/documents/src");
+    dir("/documents/src/components");
+    dir("/documents/src/utils");
+    dir("/documents/tests");
+
+    file("/documents/README.md",
+"# Welcome to Hone\n\
+\n\
+Hone is a lightweight, cross-platform code editor built with\n\
+TypeScript and compiled to native UI via the **Perry** compiler.\n\
+\n\
+## Features\n\
+\n\
+- Native performance on macOS, iOS, Windows, Linux, and Web\n\
+- Built-in AI assistant with Claude integration\n\
+- Git integration with staging, commits, and diffs\n\
+- Full-text search with regex support\n\
+- Syntax highlighting for 10+ languages\n\
+- Extensible theme system\n\
+\n\
+## Getting Started\n\
+\n\
+Open a folder using **File > Open Folder** or click the folder\n\
+icon in the activity bar to browse your local files.\n\
+\n\
+```typescript\n\
+import { App, VStack, Text, Button } from 'perry/ui';\n\
+\n\
+App('Hello Hone', () => {\n\
+  return VStack(8, [\n\
+    Text('Welcome!'),\n\
+    Button('Click me', () => { console.log('Hello'); }),\n\
+  ]);\n\
+});\n\
+```\n\
+\n\
+## Architecture\n\
+\n\
+| Layer | Technology |\n\
+|-------|------------|\n\
+| UI    | Perry (TS → Native) |\n\
+| Core  | TypeScript (bun test) |\n\
+| Editor| Custom text engine |\n\
+| AI    | Claude API |\n\
+");
+
+    file("/documents/package.json",
+'{\n\
+  "name": "hone-demo",\n\
+  "version": "0.1.0",\n\
+  "description": "Demo project for Hone IDE",\n\
+  "main": "src/app.ts",\n\
+  "scripts": {\n\
+    "build": "perry compile src/app.ts --output demo",\n\
+    "typecheck": "tsc --noEmit",\n\
+    "test": "bun test"\n\
+  },\n\
+  "dependencies": {},\n\
+  "devDependencies": {\n\
+    "typescript": "^5.4.0"\n\
+  }\n\
+}\n');
+
+    file("/documents/tsconfig.json",
+'{\n\
+  "compilerOptions": {\n\
+    "target": "ES2022",\n\
+    "module": "ESNext",\n\
+    "moduleResolution": "bundler",\n\
+    "strict": true,\n\
+    "outDir": "dist",\n\
+    "rootDir": "src"\n\
+  },\n\
+  "include": ["src/**/*.ts"]\n\
+}\n');
+
+    file("/documents/src/app.ts",
+"import { App, VStack, HStack, Text, Button, Spacer } from 'perry/ui';\n\
+import { greet } from './utils/greeting';\n\
+import { Counter } from './components/counter';\n\
+\n\
+App('Hone Demo', () => {\n\
+  const header = Text(greet('World'));\n\
+  const counter = Counter();\n\
+\n\
+  return VStack(12, [\n\
+    header,\n\
+    counter,\n\
+    Spacer(),\n\
+    Text('Built with Perry'),\n\
+  ]);\n\
+});\n");
+
+    file("/documents/src/components/counter.ts",
+"import { VStack, HStack, Text, Button, textSetString } from 'perry/ui';\n\
+\n\
+let count = 0;\n\
+let label: unknown = null;\n\
+\n\
+function updateLabel(): void {\n\
+  if (label) {\n\
+    textSetString(label, 'Count: ' + String(count));\n\
+  }\n\
+}\n\
+\n\
+export function Counter(): unknown {\n\
+  label = Text('Count: 0');\n\
+\n\
+  const decBtn = Button(' - ', () => {\n\
+    count = count - 1;\n\
+    updateLabel();\n\
+  });\n\
+\n\
+  const incBtn = Button(' + ', () => {\n\
+    count = count + 1;\n\
+    updateLabel();\n\
+  });\n\
+\n\
+  return VStack(8, [\n\
+    label,\n\
+    HStack(8, [decBtn, incBtn]),\n\
+  ]);\n\
+}\n");
+
+    file("/documents/src/utils/greeting.ts",
+"/**\n\
+ * Returns a greeting message.\n\
+ * @param name - The name to greet\n\
+ */\n\
+export function greet(name: string): string {\n\
+  const hour = new Date().getHours();\n\
+  let timeOfDay = 'day';\n\
+  if (hour < 12) {\n\
+    timeOfDay = 'morning';\n\
+  } else if (hour < 17) {\n\
+    timeOfDay = 'afternoon';\n\
+  } else {\n\
+    timeOfDay = 'evening';\n\
+  }\n\
+  return 'Good ' + timeOfDay + ', ' + name + '!';\n\
+}\n\
+\n\
+export function formatDate(date: Date): string {\n\
+  const y = date.getFullYear();\n\
+  const m = String(date.getMonth() + 1).padStart(2, '0');\n\
+  const d = String(date.getDate()).padStart(2, '0');\n\
+  return y + '-' + m + '-' + d;\n\
+}\n");
+
+    file("/documents/tests/greeting.test.ts",
+"import { describe, it, expect } from 'bun:test';\n\
+import { greet, formatDate } from '../src/utils/greeting';\n\
+\n\
+describe('greet', () => {\n\
+  it('should return a greeting with the name', () => {\n\
+    const result = greet('Hone');\n\
+    expect(result).toContain('Hone');\n\
+    expect(result).toMatch(/Good (morning|afternoon|evening|day), Hone!/);\n\
+  });\n\
+});\n\
+\n\
+describe('formatDate', () => {\n\
+  it('should format a date as YYYY-MM-DD', () => {\n\
+    const date = new Date(2026, 2, 13); // March 13, 2026\n\
+    expect(formatDate(date)).toBe('2026-03-13');\n\
+  });\n\
+\n\
+  it('should pad single-digit months and days', () => {\n\
+    const date = new Date(2026, 0, 5); // January 5, 2026\n\
+    expect(formatDate(date)).toBe('2026-01-05');\n\
+  });\n\
+});\n");
+
+    // Set children arrays for directories
+    C["/documents"].children = ["README.md", "package.json", "tsconfig.json", "src", "tests"];
+    C["/documents/src"].children = ["app.ts", "components", "utils"];
+    C["/documents/src/components"].children = ["counter.ts"];
+    C["/documents/src/utils"].children = ["greeting.ts"];
+    C["/documents/tests"].children = ["greeting.test.ts"];
+
+})();
 
 })();
