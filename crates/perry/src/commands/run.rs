@@ -551,6 +551,12 @@ async fn remote_build_and_launch(
         let app_dir = extract_app_from_ipa(&dest, &dist_dir)?;
         let udid = device_udid.ok_or_else(|| anyhow!("No device UDID for iOS launch"))?;
 
+        // For device builds, re-sign with a local development identity
+        // (the hub may have signed with a distribution profile)
+        if target == "ios" {
+            resign_for_development(&app_dir, format)?;
+        }
+
         if target == "ios-simulator" {
             launch_ios_simulator(&app_dir, &bundle_id, udid, format)
         } else {
@@ -623,6 +629,94 @@ fn extract_app_from_ipa(ipa_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
     }
 
     Ok(app_dir)
+}
+
+/// Re-sign an .app bundle with a local development identity for device installs.
+/// The build server may sign with a distribution profile; we re-sign locally so
+/// `devicectl device install` succeeds on a physical device.
+fn resign_for_development(app_dir: &Path, format: OutputFormat) -> Result<()> {
+    // Find a development signing identity
+    let output = Command::new("security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .output()
+        .context("Failed to query Keychain for signing identities")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let dev_identity = stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let q1 = line.find('"')?;
+            let q2 = line.rfind('"')?;
+            if q2 > q1 {
+                Some(line[q1 + 1..q2].to_string())
+            } else {
+                None
+            }
+        })
+        .find(|name| {
+            name.starts_with("Apple Development")
+                || name.starts_with("iPhone Developer")
+        });
+
+    let identity = match dev_identity {
+        Some(id) => id,
+        None => {
+            bail!(
+                "No Apple Development signing identity found in Keychain.\n\
+                 Device installs require a development certificate.\n\
+                 Use Xcode to set up your development signing, or use a simulator instead."
+            );
+        }
+    };
+
+    if let OutputFormat::Text = format {
+        println!("Re-signing with: {}", style(&identity).dim());
+    }
+
+    // Remove existing code signature
+    let _ = std::fs::remove_dir_all(app_dir.join("_CodeSignature"));
+
+    // Remove embedded (distribution) provisioning profile — codesign will embed
+    // the correct one if available, or device can still install without it for
+    // free/personal team development
+    let _ = std::fs::remove_file(app_dir.join("embedded.mobileprovision"));
+
+    // Update entitlements to allow debugging (get-task-allow = true)
+    let entitlements = std::env::temp_dir().join("perry_run_entitlements.plist");
+    std::fs::write(
+        &entitlements,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>get-task-allow</key>
+    <true/>
+</dict>
+</plist>
+"#,
+    )?;
+
+    // Re-sign with development identity
+    let status = Command::new("codesign")
+        .args([
+            "--force",
+            "--sign",
+            &identity,
+            "--entitlements",
+        ])
+        .arg(&entitlements)
+        .arg(app_dir)
+        .status()
+        .context("Failed to run codesign")?;
+
+    let _ = std::fs::remove_file(&entitlements);
+
+    if !status.success() {
+        bail!("codesign failed — check that your development certificate is valid");
+    }
+
+    Ok(())
 }
 
 /// Find project root by walking up from a directory
