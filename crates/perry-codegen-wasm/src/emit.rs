@@ -187,10 +187,104 @@ struct RuntimeImports {
     is_finite: u32,
     // Phase 5: Misc
     console_log_multi: u32,
+    // Phase 1 addition: Class inheritance
+    class_set_parent: u32,
+    // Phase 3: Try/Catch
+    try_start: u32,
+    try_end: u32,
+    throw_value: u32,
+    has_exception: u32,
+    get_exception: u32,
+    // Phase 4: URL
+    url_parse: u32,
+    url_get_href: u32,
+    url_get_pathname: u32,
+    url_get_hostname: u32,
+    url_get_port: u32,
+    url_get_search: u32,
+    url_get_hash: u32,
+    url_get_origin: u32,
+    url_get_protocol: u32,
+    url_get_search_params: u32,
+    searchparams_get: u32,
+    searchparams_has: u32,
+    searchparams_set: u32,
+    searchparams_append: u32,
+    searchparams_delete: u32,
+    searchparams_to_string: u32,
+    // Phase 4: Crypto
+    crypto_random_uuid: u32,
+    crypto_random_bytes: u32,
+    // Phase 4: Path
+    path_join: u32,
+    path_dirname: u32,
+    path_basename: u32,
+    path_extname: u32,
+    path_resolve: u32,
+    // Phase 4: Process/OS
+    os_platform: u32,
+    process_argv: u32,
+    process_cwd: u32,
+    // Phase 6: Buffer
+    buffer_alloc: u32,
+    buffer_from_string: u32,
+    buffer_to_string: u32,
+    buffer_get: u32,
+    buffer_set: u32,
+    buffer_length: u32,
+    buffer_slice: u32,
+    buffer_concat: u32,
+    uint8array_new: u32,
+    uint8array_from: u32,
+    uint8array_length: u32,
+    uint8array_get: u32,
+    uint8array_set: u32,
+    // Timers
+    set_timeout: u32,
+    set_interval: u32,
+    clear_timeout: u32,
+    clear_interval: u32,
+    // Response properties
+    response_status: u32,
+    response_ok: u32,
+    response_headers_get: u32,
+    response_url: u32,
+    // Buffer extras
+    buffer_copy: u32,
+    buffer_write: u32,
+    buffer_equals: u32,
+    buffer_is_buffer: u32,
+    buffer_byte_length: u32,
+    // Crypto extras
+    crypto_sha256: u32,
+    crypto_md5: u32,
+    // Path extras
+    path_is_absolute: u32,
+    // Phase 5: Async/Promise/Fetch
+    fetch_url: u32,
+    fetch_with_options: u32,
+    response_json: u32,
+    response_text: u32,
+    promise_new: u32,
+    promise_resolve: u32,
+    promise_then: u32,
+    await_promise: u32,
+}
+
+/// Output from WASM compilation: binary + extra JS for async functions.
+pub struct WasmCompileOutput {
+    pub wasm_bytes: Vec<u8>,
+    pub async_js: String,
 }
 
 /// Compile HIR modules to a WebAssembly binary.
 pub fn compile_to_wasm(modules: &[(String, perry_hir::ir::Module)]) -> Vec<u8> {
+    let mut emitter = WasmModuleEmitter::new();
+    emitter.compile(modules).wasm_bytes
+}
+
+/// Compile HIR modules to WASM binary + generated JS for async functions.
+pub fn compile_to_wasm_with_async(modules: &[(String, perry_hir::ir::Module)]) -> WasmCompileOutput {
     let mut emitter = WasmModuleEmitter::new();
     emitter.compile(modules)
 }
@@ -214,6 +308,20 @@ struct WasmModuleEmitter {
     /// Global variable mapping: GlobalId → wasm global index
     global_map: BTreeMap<GlobalId, u32>,
     num_globals: u32,
+    /// Class constructor map: class_name → wasm function index
+    class_ctor_map: BTreeMap<String, u32>,
+    /// Class method map: class_name → {method_name → wasm function index}
+    class_method_map: BTreeMap<String, BTreeMap<String, u32>>,
+    /// Class static method map: class_name → {method_name → wasm function index}
+    class_static_map: BTreeMap<String, BTreeMap<String, u32>>,
+    /// Function name → wasm function index (for cross-module ExternFuncRef resolution)
+    func_name_map: BTreeMap<String, u32>,
+    /// Class parent map: child_class_name → parent_class_name
+    class_parent_map: BTreeMap<String, String>,
+    /// Async function names (compiled to JS, not WASM)
+    async_func_imports: Vec<(String, u32, usize)>, // (name, import_idx, param_count)
+    /// Generated JS code for async functions
+    async_js_code: Vec<String>,
 }
 
 impl WasmModuleEmitter {
@@ -230,6 +338,13 @@ impl WasmModuleEmitter {
             rt: None,
             global_map: BTreeMap::new(),
             num_globals: 0,
+            class_ctor_map: BTreeMap::new(),
+            class_method_map: BTreeMap::new(),
+            class_static_map: BTreeMap::new(),
+            func_name_map: BTreeMap::new(),
+            class_parent_map: BTreeMap::new(),
+            async_func_imports: Vec::new(),
+            async_js_code: Vec::new(),
         }
     }
 
@@ -260,7 +375,7 @@ impl WasmModuleEmitter {
         idx
     }
 
-    fn compile(&mut self, modules: &[(String, perry_hir::ir::Module)]) -> Vec<u8> {
+    fn compile(&mut self, modules: &[(String, perry_hir::ir::Module)]) -> WasmCompileOutput {
         // First pass: collect all string literals
         for (_, module) in modules {
             self.collect_strings(module);
@@ -442,9 +557,94 @@ impl WasmModuleEmitter {
             is_finite: next_import(),
             // Phase 5: Misc
             console_log_multi: next_import(),
+            // Phase 1 addition: Class inheritance
+            class_set_parent: next_import(),
+            // Phase 3: Try/Catch
+            try_start: next_import(),
+            try_end: next_import(),
+            throw_value: next_import(),
+            has_exception: next_import(),
+            get_exception: next_import(),
+            // Phase 4: URL
+            url_parse: next_import(),
+            url_get_href: next_import(),
+            url_get_pathname: next_import(),
+            url_get_hostname: next_import(),
+            url_get_port: next_import(),
+            url_get_search: next_import(),
+            url_get_hash: next_import(),
+            url_get_origin: next_import(),
+            url_get_protocol: next_import(),
+            url_get_search_params: next_import(),
+            searchparams_get: next_import(),
+            searchparams_has: next_import(),
+            searchparams_set: next_import(),
+            searchparams_append: next_import(),
+            searchparams_delete: next_import(),
+            searchparams_to_string: next_import(),
+            // Phase 4: Crypto
+            crypto_random_uuid: next_import(),
+            crypto_random_bytes: next_import(),
+            // Phase 4: Path
+            path_join: next_import(),
+            path_dirname: next_import(),
+            path_basename: next_import(),
+            path_extname: next_import(),
+            path_resolve: next_import(),
+            // Phase 4: Process/OS
+            os_platform: next_import(),
+            process_argv: next_import(),
+            process_cwd: next_import(),
+            // Phase 6: Buffer
+            buffer_alloc: next_import(),
+            buffer_from_string: next_import(),
+            buffer_to_string: next_import(),
+            buffer_get: next_import(),
+            buffer_set: next_import(),
+            buffer_length: next_import(),
+            buffer_slice: next_import(),
+            buffer_concat: next_import(),
+            uint8array_new: next_import(),
+            uint8array_from: next_import(),
+            uint8array_length: next_import(),
+            uint8array_get: next_import(),
+            uint8array_set: next_import(),
+            // Timers
+            set_timeout: next_import(),
+            set_interval: next_import(),
+            clear_timeout: next_import(),
+            clear_interval: next_import(),
+            // Response properties
+            response_status: next_import(),
+            response_ok: next_import(),
+            response_headers_get: next_import(),
+            response_url: next_import(),
+            // Buffer extras
+            buffer_copy: next_import(),
+            buffer_write: next_import(),
+            buffer_equals: next_import(),
+            buffer_is_buffer: next_import(),
+            buffer_byte_length: next_import(),
+            // Crypto extras
+            crypto_sha256: next_import(),
+            crypto_md5: next_import(),
+            // Path extras
+            path_is_absolute: next_import(),
+            // Phase 5: Async/Promise/Fetch
+            fetch_url: next_import(),
+            fetch_with_options: next_import(),
+            response_json: next_import(),
+            response_text: next_import(),
+            promise_new: next_import(),
+            promise_resolve: next_import(),
+            promise_then: next_import(),
+            await_promise: next_import(),
         };
         self.num_imports = import_idx;
         self.rt = Some(rt);
+
+        // Additional types for new phases
+        let t_void_i32 = self.get_type_idx(vec![], vec![ValType::I32]);
 
         // Build import tables dynamically from struct fields
         // Each entry: (name, type_idx)
@@ -603,15 +803,92 @@ impl WasmModuleEmitter {
             ("is_finite", t_f64_i32),
             // Phase 5
             ("console_log_multi", t_f64_void),             // (args_array) -> void
+            // Phase 1 addition: Class inheritance
+            ("class_set_parent", t_f64_f64_void),          // (child_str, parent_str) -> void
+            // Phase 3: Try/Catch
+            ("try_start", t_void),                         // () -> void
+            ("try_end", t_void),                           // () -> void
+            ("throw_value", t_f64_void),                   // (val) -> void
+            ("has_exception", t_void_i32),                 // () -> i32
+            ("get_exception", t_void_f64),                 // () -> f64
+            // Phase 4: URL
+            ("url_parse", t_f64_f64),                      // (url_str) -> handle
+            ("url_get_href", t_f64_f64),
+            ("url_get_pathname", t_f64_f64),
+            ("url_get_hostname", t_f64_f64),
+            ("url_get_port", t_f64_f64),
+            ("url_get_search", t_f64_f64),
+            ("url_get_hash", t_f64_f64),
+            ("url_get_origin", t_f64_f64),
+            ("url_get_protocol", t_f64_f64),
+            ("url_get_search_params", t_f64_f64),
+            ("searchparams_get", t_f64_f64_f64),           // (handle, key) -> str
+            ("searchparams_has", t_f64_f64_i32),           // (handle, key) -> i32
+            ("searchparams_set", t_f64_f64_f64_void),      // (handle, key, val) -> void
+            ("searchparams_append", t_f64_f64_f64_void),
+            ("searchparams_delete", t_f64_f64_void),
+            ("searchparams_to_string", t_f64_f64),
+            // Phase 4: Crypto
+            ("crypto_random_uuid", t_void_f64),
+            ("crypto_random_bytes", t_f64_f64),
+            // Phase 4: Path
+            ("path_join", t_f64_f64_f64),                  // (a, b) -> str
+            ("path_dirname", t_f64_f64),
+            ("path_basename", t_f64_f64),
+            ("path_extname", t_f64_f64),
+            ("path_resolve", t_f64_f64),
+            // Phase 4: Process/OS
+            ("os_platform", t_void_f64),
+            ("process_argv", t_void_f64),
+            ("process_cwd", t_void_f64),
+            // Phase 6: Buffer
+            ("buffer_alloc", t_f64_f64),
+            ("buffer_from_string", t_f64_f64_f64),
+            ("buffer_to_string", t_f64_f64_f64),
+            ("buffer_get", t_f64_f64_f64),
+            ("buffer_set", t_f64_f64_f64_void),
+            ("buffer_length", t_f64_f64),
+            ("buffer_slice", t_f64_f64_f64_f64),
+            ("buffer_concat", t_f64_f64),
+            ("uint8array_new", t_f64_f64),
+            ("uint8array_from", t_f64_f64),
+            ("uint8array_length", t_f64_f64),
+            ("uint8array_get", t_f64_f64_f64),
+            ("uint8array_set", t_f64_f64_f64_void),
+            // Timers
+            ("set_timeout", t_f64_f64_f64),                // (closure, delay) -> timer_id
+            ("set_interval", t_f64_f64_f64),               // (closure, delay) -> timer_id
+            ("clear_timeout", t_f64_void),                 // (id) -> void
+            ("clear_interval", t_f64_void),                // (id) -> void
+            // Response properties
+            ("response_status", t_f64_f64),                // (handle) -> number
+            ("response_ok", t_f64_i32),                    // (handle) -> i32
+            ("response_headers_get", t_f64_f64_f64),       // (handle, name) -> str
+            ("response_url", t_f64_f64),                   // (handle) -> str
+            // Buffer extras
+            ("buffer_copy", {
+                let t = self.get_type_idx(vec![ValType::F64; 5], vec![ValType::F64]);
+                t
+            }),
+            ("buffer_write", t_f64_f64_f64_f64),           // (handle, str, offset, encoding) -> number
+            ("buffer_equals", t_f64_f64_i32),              // (handle, other) -> i32
+            ("buffer_is_buffer", t_f64_i32),               // (val) -> i32
+            ("buffer_byte_length", t_f64_f64),             // (val) -> number
+            // Crypto extras
+            ("crypto_sha256", t_f64_f64),                  // (data) -> promise_handle
+            ("crypto_md5", t_f64_f64),                     // (data) -> undefined
+            // Path extras
+            ("path_is_absolute", t_f64_i32),               // (str) -> i32
+            // Phase 5: Async/Promise/Fetch
+            ("fetch_url", t_f64_f64),                      // (url_str) -> promise_handle
+            ("fetch_with_options", t_f64_f64_f64_f64),     // (url, method, body, headers_obj) -> promise_handle
+            ("response_json", t_f64_f64),                  // (response_handle) -> promise_handle
+            ("response_text", t_f64_f64),                  // (response_handle) -> promise_handle
+            ("promise_new", t_void_f64),                   // () -> promise_handle
+            ("promise_resolve", t_f64_f64_void),           // (promise_handle, value) -> void
+            ("promise_then", t_f64_f64_f64),               // (promise_handle, closure_handle) -> promise_handle
+            ("await_promise", t_f64_f64),                  // (value) -> resolved_value_or_value
         ];
-
-        // Second pass: register all user function types and assign indices
-        let mut user_func_idx = self.num_imports;
-
-        // __init_strings function
-        let init_strings_idx = user_func_idx;
-        let init_strings_type = t_void;
-        user_func_idx += 1;
 
         // Collect all closures from all modules (they need function indices too)
         let mut closure_funcs: Vec<(FuncId, Vec<Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>)> = Vec::new();
@@ -627,12 +904,65 @@ impl WasmModuleEmitter {
                 for method in &class.methods {
                     collect_closures_from_stmts(&method.body, &mut closure_funcs);
                 }
+                for method in &class.static_methods {
+                    collect_closures_from_stmts(&method.body, &mut closure_funcs);
+                }
+                for (_, getter) in &class.getters {
+                    collect_closures_from_stmts(&getter.body, &mut closure_funcs);
+                }
+                for (_, setter) in &class.setters {
+                    collect_closures_from_stmts(&setter.body, &mut closure_funcs);
+                }
+                for field in &class.fields {
+                    if let Some(init) = &field.init {
+                        collect_closures_from_expr(init, &mut closure_funcs);
+                    }
+                }
+                for field in &class.static_fields {
+                    if let Some(init) = &field.init {
+                        collect_closures_from_expr(init, &mut closure_funcs);
+                    }
+                }
             }
         }
 
-        // Register user functions from all modules
+        // Register async functions as additional bridge imports
+        // Must happen before user function registration to get correct import indices
+        let mut async_import_idx = self.num_imports;
         for (_, module) in modules {
             for func in &module.functions {
+                if func.is_async {
+                    let param_count = func.params.len();
+                    let params = vec![ValType::F64; param_count];
+                    let results = vec![ValType::F64]; // returns promise handle
+                    let type_idx = self.get_type_idx(params, results);
+                    let _ = type_idx;
+                    self.func_map.insert(func.id, async_import_idx);
+                    self.func_name_map.insert(func.name.clone(), async_import_idx);
+                    self.async_func_imports.push((func.name.clone(), async_import_idx, param_count));
+                    // Generate JS for this async function
+                    let js_code = self.emit_js_async_function(func);
+                    self.async_js_code.push(js_code);
+                    async_import_idx += 1;
+                }
+            }
+        }
+        self.num_imports = async_import_idx;
+
+        // Now set user_func_idx AFTER all imports (including async) are registered
+        let mut user_func_idx = self.num_imports;
+
+        // __init_strings function
+        let init_strings_idx = user_func_idx;
+        let init_strings_type = t_void;
+        user_func_idx += 1;
+
+        // Register user functions from all modules (skip async ones)
+        for (_, module) in modules {
+            for func in &module.functions {
+                if func.is_async {
+                    continue; // already registered as bridge import
+                }
                 let param_count = func.params.len();
                 let params = vec![ValType::F64; param_count];
                 let results = if func.body.iter().any(|s| has_return(s)) || func.name == "main" {
@@ -643,7 +973,83 @@ impl WasmModuleEmitter {
                 let type_idx = self.get_type_idx(params, results);
                 let _ = type_idx;
                 self.func_map.insert(func.id, user_func_idx);
+                // Build func_name_map for ExternFuncRef resolution
+                self.func_name_map.insert(func.name.clone(), user_func_idx);
                 user_func_idx += 1;
+            }
+        }
+
+        // Register class constructors, methods, and static methods
+        for (_, module) in modules {
+            for class in &module.classes {
+                // Record parent class relationship
+                if let Some(parent) = &class.extends_name {
+                    self.class_parent_map.insert(class.name.clone(), parent.clone());
+                }
+                // Constructor: params = this + declared params, returns f64 (this)
+                if let Some(ctor) = &class.constructor {
+                    let param_count = 1 + ctor.params.len();
+                    let params = vec![ValType::F64; param_count];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    let _ = type_idx;
+                    self.class_ctor_map.insert(class.name.clone(), user_func_idx);
+                    user_func_idx += 1;
+                }
+                // Instance methods: params = this + declared params
+                for method in &class.methods {
+                    let param_count = 1 + method.params.len();
+                    let params = vec![ValType::F64; param_count];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    let _ = type_idx;
+                    self.class_method_map
+                        .entry(class.name.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(method.name.clone(), user_func_idx);
+                    user_func_idx += 1;
+                }
+                // Static methods: no this param
+                for method in &class.static_methods {
+                    let param_count = method.params.len();
+                    let params = vec![ValType::F64; param_count];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    let _ = type_idx;
+                    self.class_static_map
+                        .entry(class.name.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(method.name.clone(), user_func_idx);
+                    // Also register in func_name_map for cross-module resolution
+                    self.func_name_map.insert(format!("{}_{}", class.name, method.name), user_func_idx);
+                    user_func_idx += 1;
+                }
+                // Getters: like methods with 0 params + this
+                for (name, getter) in &class.getters {
+                    let params = vec![ValType::F64]; // just this
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    let _ = type_idx;
+                    self.class_method_map
+                        .entry(class.name.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(format!("__get_{}", name), user_func_idx);
+                    let _ = getter;
+                    user_func_idx += 1;
+                }
+                // Setters: this + value
+                for (name, setter) in &class.setters {
+                    let params = vec![ValType::F64; 2]; // this + value
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    let _ = type_idx;
+                    self.class_method_map
+                        .entry(class.name.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(format!("__set_{}", name), user_func_idx);
+                    let _ = setter;
+                    user_func_idx += 1;
+                }
             }
         }
 
@@ -696,15 +1102,28 @@ impl WasmModuleEmitter {
         for (name, type_idx) in &import_entries {
             import_section.import("rt", name, EntityType::Function(*type_idx));
         }
+        // Add async function imports
+        let async_import_entries: Vec<(String, u32)> = self.async_func_imports.iter().map(|(name, _idx, param_count)| {
+            let import_name = format!("__async_{}", name);
+            let params = vec![ValType::F64; *param_count];
+            let results = vec![ValType::F64];
+            let key = (params, results);
+            let type_idx = self.type_map.get(&key).copied().unwrap_or(0);
+            (import_name, type_idx)
+        }).collect();
+        for (name, type_idx) in &async_import_entries {
+            import_section.import("rt", name, EntityType::Function(*type_idx));
+        }
         wasm_module.section(&import_section);
 
         // --- Function section (declares type indices for each defined function) ---
         let mut func_section = FunctionSection::new();
         // __init_strings
         func_section.function(init_strings_type);
-        // User functions
+        // User functions (skip async — they are imports)
         for (_, module) in modules {
             for func in &module.functions {
+                if func.is_async { continue; }
                 let param_count = func.params.len();
                 let params = vec![ValType::F64; param_count];
                 let results = if func.body.iter().any(|s| has_return(s)) || func.name == "main" {
@@ -714,6 +1133,44 @@ impl WasmModuleEmitter {
                 };
                 let type_idx = self.get_type_idx(params, results);
                 func_section.function(type_idx);
+            }
+        }
+        // Class constructors, methods, static methods, getters, setters
+        for (_, module) in modules {
+            for class in &module.classes {
+                if let Some(ctor) = &class.constructor {
+                    let param_count = 1 + ctor.params.len();
+                    let params = vec![ValType::F64; param_count];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    func_section.function(type_idx);
+                }
+                for method in &class.methods {
+                    let param_count = 1 + method.params.len();
+                    let params = vec![ValType::F64; param_count];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    func_section.function(type_idx);
+                }
+                for method in &class.static_methods {
+                    let param_count = method.params.len();
+                    let params = vec![ValType::F64; param_count];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    func_section.function(type_idx);
+                }
+                for (_name, _getter) in &class.getters {
+                    let params = vec![ValType::F64];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    func_section.function(type_idx);
+                }
+                for (_name, _setter) in &class.setters {
+                    let params = vec![ValType::F64; 2];
+                    let results = vec![ValType::F64];
+                    let type_idx = self.get_type_idx(params, results);
+                    func_section.function(type_idx);
+                }
             }
         }
         // Closure functions
@@ -738,6 +1195,26 @@ impl WasmModuleEmitter {
                 for func in &module.functions {
                     if let Some(&idx) = self.func_map.get(&func.id) {
                         indices.push(idx);
+                    }
+                }
+            }
+            // Add class constructor/method/static indices
+            for (_, idx) in &self.class_ctor_map {
+                if !indices.contains(idx) {
+                    indices.push(*idx);
+                }
+            }
+            for (_, methods) in &self.class_method_map {
+                for (_, idx) in methods {
+                    if !indices.contains(idx) {
+                        indices.push(*idx);
+                    }
+                }
+            }
+            for (_, statics) in &self.class_static_map {
+                for (_, idx) in statics {
+                    if !indices.contains(idx) {
+                        indices.push(*idx);
                     }
                 }
             }
@@ -835,11 +1312,38 @@ impl WasmModuleEmitter {
             code_section.function(&func);
         }
 
-        // User functions
+        // User functions (skip async — they are JS bridge imports)
         for (_, module) in modules {
             for hir_func in &module.functions {
+                if hir_func.is_async { continue; }
                 let func = self.compile_function(hir_func);
                 code_section.function(&func);
+            }
+        }
+
+        // Class constructors, methods, static methods, getters, setters
+        for (_, module) in modules {
+            for class in &module.classes {
+                if let Some(ctor) = &class.constructor {
+                    let func = self.compile_class_constructor(class, ctor);
+                    code_section.function(&func);
+                }
+                for method in &class.methods {
+                    let func = self.compile_class_method(method);
+                    code_section.function(&func);
+                }
+                for method in &class.static_methods {
+                    let func = self.compile_function(method);
+                    code_section.function(&func);
+                }
+                for (_name, getter) in &class.getters {
+                    let func = self.compile_class_method(getter);
+                    code_section.function(&func);
+                }
+                for (_name, setter) in &class.setters {
+                    let func = self.compile_class_method(setter);
+                    code_section.function(&func);
+                }
             }
         }
 
@@ -888,6 +1392,50 @@ impl WasmModuleEmitter {
                 }
             }
 
+            // Register class methods with the bridge and set up inheritance
+            for (_, module) in modules {
+                for class in &module.classes {
+                    let class_name_id = self.string_map.get(class.name.as_str()).copied().unwrap_or(0);
+                    let class_bits = (STRING_TAG << 48) | (class_name_id as u64);
+
+                    // Register instance methods in classMethodTable (including getters/setters)
+                    if let Some(methods) = self.class_method_map.get(&class.name) {
+                        for (method_name, &func_idx) in methods {
+                            let real_name = method_name.as_str();
+                            let method_name_id = self.string_map.get(real_name).copied().unwrap_or(0);
+                            let method_bits = (STRING_TAG << 48) | (method_name_id as u64);
+                            let table_idx = self.func_to_table_idx.get(&func_idx).copied().unwrap_or(func_idx);
+                            func.instruction(&f64_const(f64::from_bits(class_bits)));
+                            func.instruction(&f64_const(f64::from_bits(method_bits)));
+                            func.instruction(&f64_const(table_idx as f64));
+                            func.instruction(&Instruction::Call(rt.class_set_method));
+                        }
+                    }
+
+                    // Set up inheritance
+                    if let Some(parent_name) = &class.extends_name {
+                        let parent_name_id = self.string_map.get(parent_name.as_str()).copied().unwrap_or(0);
+                        let parent_bits = (STRING_TAG << 48) | (parent_name_id as u64);
+                        func.instruction(&f64_const(f64::from_bits(class_bits)));
+                        func.instruction(&f64_const(f64::from_bits(parent_bits)));
+                        func.instruction(&Instruction::Call(rt.class_set_parent));
+                    }
+
+                    // Register static fields
+                    for field in &class.static_fields {
+                        if let Some(init) = &field.init {
+                            let field_name_id = self.string_map.get(field.name.as_str()).copied().unwrap_or(0);
+                            let field_bits = (STRING_TAG << 48) | (field_name_id as u64);
+                            func.instruction(&f64_const(f64::from_bits(class_bits)));
+                            func.instruction(&f64_const(f64::from_bits(field_bits)));
+                            let mut ctx = FuncEmitCtx::new(self, &init_locals);
+                            ctx.emit_expr(&mut func, init);
+                            func.instruction(&Instruction::Call(rt.class_set_static));
+                        }
+                    }
+                }
+            }
+
             // Execute init statements from all modules
             for (_, module) in modules {
                 let mut ctx = FuncEmitCtx::new(self, &init_locals);
@@ -909,7 +1457,9 @@ impl WasmModuleEmitter {
             wasm_module.section(&data_section);
         }
 
-        wasm_module.finish()
+        let wasm_bytes = wasm_module.finish();
+        let async_js = self.async_js_code.join("\n");
+        WasmCompileOutput { wasm_bytes, async_js }
     }
 
     fn compile_function(&self, hir_func: &perry_hir::ir::Function) -> Function {
@@ -989,7 +1539,534 @@ impl WasmModuleEmitter {
         func
     }
 
+    fn compile_class_constructor(&self, class: &perry_hir::ir::Class, ctor: &perry_hir::ir::Function) -> Function {
+        // Local 0 = this (the instance handle)
+        // Params start at local index 1
+        let mut local_map = BTreeMap::new();
+        // Don't insert this into local_map — Expr::This emits LocalGet(0) directly
+        for (i, param) in ctor.params.iter().enumerate() {
+            local_map.insert(param.id, (i + 1) as u32);
+        }
+
+        let param_count = 1 + ctor.params.len();
+        let mut extra_locals = 0u32;
+        collect_locals(&ctor.body, &mut local_map, &mut extra_locals, param_count as u32);
+
+        let locals = if extra_locals > 0 {
+            vec![(extra_locals, ValType::F64)]
+        } else {
+            vec![]
+        };
+        let mut func = Function::new(locals);
+        let rt = self.rt.as_ref().unwrap();
+
+        // Emit field initializers: class_set_field(this, field_name, value)
+        for field in &class.fields {
+            if let Some(init) = &field.init {
+                func.instruction(&Instruction::LocalGet(0)); // this
+                let field_id = self.string_map.get(field.name.as_str()).copied().unwrap_or(0);
+                let field_bits = (STRING_TAG << 48) | (field_id as u64);
+                func.instruction(&f64_const(f64::from_bits(field_bits)));
+                let mut ctx = FuncEmitCtx::new(self, &local_map);
+                ctx.emit_expr(&mut func, init);
+                func.instruction(&Instruction::Call(rt.class_set_field));
+            }
+        }
+
+        // Emit constructor body
+        let mut ctx = FuncEmitCtx::new(self, &local_map);
+        ctx.current_class = Some(class.name.clone());
+        for stmt in &ctor.body {
+            ctx.emit_stmt(&mut func, stmt, false);
+        }
+
+        // Return this
+        func.instruction(&Instruction::LocalGet(0));
+        func.instruction(&Instruction::End);
+        func
+    }
+
+    fn compile_class_method(&self, method: &perry_hir::ir::Function) -> Function {
+        // Local 0 = this, params start at 1
+        let mut local_map = BTreeMap::new();
+        for (i, param) in method.params.iter().enumerate() {
+            local_map.insert(param.id, (i + 1) as u32);
+        }
+
+        let param_count = 1 + method.params.len();
+        let mut extra_locals = 0u32;
+        collect_locals(&method.body, &mut local_map, &mut extra_locals, param_count as u32);
+
+        let locals = if extra_locals > 0 {
+            vec![(extra_locals, ValType::F64)]
+        } else {
+            vec![]
+        };
+        let mut func = Function::new(locals);
+        let has_ret = method.body.iter().any(|s| has_return(s));
+        let mut ctx = FuncEmitCtx::new(self, &local_map);
+
+        for stmt in &method.body {
+            ctx.emit_stmt(&mut func, stmt, true); // methods always return f64
+        }
+
+        // Always push default return (method type is always -> f64)
+        func.instruction(&f64_const_bits(TAG_UNDEFINED));
+        func.instruction(&Instruction::End);
+        func
+    }
+
+    /// Generate JavaScript code for an async function body.
+    /// The generated function uses NaN-boxed f64 values and bridge helper functions.
+    fn emit_js_async_function(&self, func: &perry_hir::ir::Function) -> String {
+        let params: Vec<String> = func.params.iter().enumerate()
+            .map(|(i, _)| format!("__p{}", i))
+            .collect();
+        let params_str = params.join(", ");
+
+        let mut body = String::new();
+        // Map param names to local IDs for the JS emitter
+        let mut local_names: BTreeMap<u32, String> = BTreeMap::new();
+        for (i, param) in func.params.iter().enumerate() {
+            local_names.insert(param.id, format!("__p{}", i));
+        }
+
+        for stmt in &func.body {
+            self.emit_js_stmt(&mut body, stmt, &mut local_names, 2);
+        }
+
+        format!(
+            "  __async_{name}: ({params}) => {{\n\
+             \x20   const __p = (async () => {{\n\
+             {body}\
+             \x20     return {undef};\n\
+             \x20   }})();\n\
+             \x20   return nanboxPointer(allocHandle(__p));\n\
+             \x20 }},",
+            name = func.name,
+            params = params_str,
+            body = body,
+            undef = "u64ToF64(TAG_UNDEFINED)",
+        )
+    }
+
+    fn emit_js_stmt(&self, out: &mut String, stmt: &Stmt, locals: &mut BTreeMap<u32, String>, indent: usize) {
+        let pad = "  ".repeat(indent);
+        match stmt {
+            Stmt::Let { id, init, .. } => {
+                let name = format!("__l{}", id);
+                locals.insert(*id, name.clone());
+                if let Some(init_expr) = init {
+                    let val = self.emit_js_expr(init_expr, locals);
+                    out.push_str(&format!("{pad}    let {name} = {val};\n"));
+                } else {
+                    out.push_str(&format!("{pad}    let {name} = u64ToF64(TAG_UNDEFINED);\n"));
+                }
+            }
+            Stmt::Expr(e) => {
+                let val = self.emit_js_expr(e, locals);
+                out.push_str(&format!("{pad}    {val};\n"));
+            }
+            Stmt::Return(Some(e)) => {
+                let val = self.emit_js_expr(e, locals);
+                out.push_str(&format!("{pad}    return {val};\n"));
+            }
+            Stmt::Return(None) => {
+                out.push_str(&format!("{pad}    return u64ToF64(TAG_UNDEFINED);\n"));
+            }
+            Stmt::If { condition, then_branch, else_branch } => {
+                let cond = self.emit_js_expr(condition, locals);
+                out.push_str(&format!("{pad}    if (toJsValue({cond})) {{\n"));
+                for s in then_branch {
+                    self.emit_js_stmt(out, s, locals, indent + 1);
+                }
+                if let Some(eb) = else_branch {
+                    out.push_str(&format!("{pad}    }} else {{\n"));
+                    for s in eb {
+                        self.emit_js_stmt(out, s, locals, indent + 1);
+                    }
+                }
+                out.push_str(&format!("{pad}    }}\n"));
+            }
+            Stmt::While { condition, body } => {
+                let cond = self.emit_js_expr(condition, locals);
+                out.push_str(&format!("{pad}    while (toJsValue({cond})) {{\n"));
+                for s in body {
+                    self.emit_js_stmt(out, s, locals, indent + 1);
+                }
+                out.push_str(&format!("{pad}    }}\n"));
+            }
+            Stmt::For { init, condition, update, body } => {
+                out.push_str(&format!("{pad}    {{\n"));
+                if let Some(init_stmt) = init {
+                    self.emit_js_stmt(out, init_stmt, locals, indent + 1);
+                }
+                let cond = condition.as_ref().map(|c| self.emit_js_expr(c, locals)).unwrap_or_else(|| "1".to_string());
+                out.push_str(&format!("{pad}      while (toJsValue({cond})) {{\n"));
+                for s in body {
+                    self.emit_js_stmt(out, s, locals, indent + 2);
+                }
+                if let Some(upd) = update {
+                    let u = self.emit_js_expr(upd, locals);
+                    out.push_str(&format!("{pad}        {u};\n"));
+                }
+                out.push_str(&format!("{pad}      }}\n"));
+                out.push_str(&format!("{pad}    }}\n"));
+            }
+            Stmt::Try { body, catch, finally } => {
+                out.push_str(&format!("{pad}    try {{\n"));
+                for s in body {
+                    self.emit_js_stmt(out, s, locals, indent + 1);
+                }
+                if let Some(c) = catch {
+                    if let Some((param_id, _)) = &c.param {
+                        let name = format!("__l{}", param_id);
+                        locals.insert(*param_id, name.clone());
+                        out.push_str(&format!("{pad}    }} catch (__e) {{\n"));
+                        out.push_str(&format!("{pad}      let {name} = fromJsValue(__e);\n"));
+                    } else {
+                        out.push_str(&format!("{pad}    }} catch (__e) {{\n"));
+                    }
+                    for s in &c.body {
+                        self.emit_js_stmt(out, s, locals, indent + 1);
+                    }
+                }
+                if let Some(f) = finally {
+                    out.push_str(&format!("{pad}    }} finally {{\n"));
+                    for s in f {
+                        self.emit_js_stmt(out, s, locals, indent + 1);
+                    }
+                }
+                out.push_str(&format!("{pad}    }}\n"));
+            }
+            Stmt::Throw(e) => {
+                let val = self.emit_js_expr(e, locals);
+                out.push_str(&format!("{pad}    throw toJsValue({val});\n"));
+            }
+            Stmt::Break => { out.push_str(&format!("{pad}    break;\n")); }
+            Stmt::Continue => { out.push_str(&format!("{pad}    continue;\n")); }
+            Stmt::Switch { discriminant, cases } => {
+                let disc = self.emit_js_expr(discriminant, locals);
+                out.push_str(&format!("{pad}    switch (toJsValue({disc})) {{\n"));
+                for case in cases {
+                    if let Some(test) = &case.test {
+                        let t = self.emit_js_expr(test, locals);
+                        out.push_str(&format!("{pad}      case toJsValue({t}):\n"));
+                    } else {
+                        out.push_str(&format!("{pad}      default:\n"));
+                    }
+                    for s in &case.body {
+                        self.emit_js_stmt(out, s, locals, indent + 2);
+                    }
+                }
+                out.push_str(&format!("{pad}    }}\n"));
+            }
+        }
+    }
+
+    fn emit_js_expr(&self, expr: &Expr, locals: &BTreeMap<u32, String>) -> String {
+        match expr {
+            Expr::Number(n) => format!("{}", n),
+            Expr::Integer(i) => format!("{}", *i as f64),
+            Expr::Bool(true) => "u64ToF64(TAG_TRUE)".to_string(),
+            Expr::Bool(false) => "u64ToF64(TAG_FALSE)".to_string(),
+            Expr::Undefined => "u64ToF64(TAG_UNDEFINED)".to_string(),
+            Expr::Null => "u64ToF64(TAG_NULL)".to_string(),
+            Expr::String(s) => {
+                let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r");
+                format!("fromJsValue(\"{}\")", escaped)
+            }
+            Expr::LocalGet(id) => {
+                locals.get(id).cloned().unwrap_or_else(|| format!("__l{}", id))
+            }
+            Expr::LocalSet(id, val) => {
+                let name = locals.get(id).cloned().unwrap_or_else(|| format!("__l{}", id));
+                let v = self.emit_js_expr(val, locals);
+                format!("({} = {})", name, v)
+            }
+            Expr::GlobalGet(id) => format!("__g{}", id),
+            Expr::GlobalSet(id, val) => {
+                let v = self.emit_js_expr(val, locals);
+                format!("(__g{} = {})", id, v)
+            }
+            Expr::Binary { op, left, right } => {
+                let l = self.emit_js_expr(left, locals);
+                let r = self.emit_js_expr(right, locals);
+                match op {
+                    BinaryOp::Add => format!("fromJsValue(toJsValue({}) + toJsValue({}))", l, r),
+                    BinaryOp::Sub => format!("({} - {})", l, r),
+                    BinaryOp::Mul => format!("({} * {})", l, r),
+                    BinaryOp::Div => format!("({} / {})", l, r),
+                    BinaryOp::Mod => format!("({} % {})", l, r),
+                    _ => format!("fromJsValue(toJsValue({}) + toJsValue({}))", l, r),
+                }
+            }
+            Expr::Compare { op, left, right } => {
+                let l = self.emit_js_expr(left, locals);
+                let r = self.emit_js_expr(right, locals);
+                let js_op = match op {
+                    CompareOp::Eq => "===",
+                    CompareOp::Ne => "!==",
+                    CompareOp::Lt => "<",
+                    CompareOp::Le => "<=",
+                    CompareOp::Gt => ">",
+                    CompareOp::Ge => ">=",
+                };
+                format!("(toJsValue({}) {} toJsValue({}) ? u64ToF64(TAG_TRUE) : u64ToF64(TAG_FALSE))", l, js_op, r)
+            }
+            Expr::Logical { op, left, right } => {
+                let l = self.emit_js_expr(left, locals);
+                let r = self.emit_js_expr(right, locals);
+                match op {
+                    LogicalOp::And => format!("(toJsValue({l}) ? {r} : {l})"),
+                    LogicalOp::Or => format!("(toJsValue({l}) ? {l} : {r})"),
+                    LogicalOp::Coalesce => format!("(isNull({l}) || isUndefined({l}) ? {r} : {l})"),
+                }
+            }
+            Expr::Unary { op, operand } => {
+                let o = self.emit_js_expr(operand, locals);
+                match op {
+                    UnaryOp::Neg => format!("(-{})", o),
+                    UnaryOp::Not => format!("(toJsValue({}) ? u64ToF64(TAG_FALSE) : u64ToF64(TAG_TRUE))", o),
+                    _ => o,
+                }
+            }
+            Expr::Await(inner) => {
+                let v = self.emit_js_expr(inner, locals);
+                // In JS async context, we can truly await
+                format!("fromJsValue(await toJsValue({}))", v)
+            }
+            Expr::Call { callee, args, .. } => {
+                let args_js: Vec<String> = args.iter().map(|a| self.emit_js_expr(a, locals)).collect();
+                match callee.as_ref() {
+                    Expr::FuncRef(id) => {
+                        if let Some(&func_idx) = self.func_map.get(id) {
+                            // Call exported WASM function
+                            format!("wasmInstance.exports.__wasm_func_{}({})", func_idx, args_js.join(", "))
+                        } else {
+                            "u64ToF64(TAG_UNDEFINED)".to_string()
+                        }
+                    }
+                    Expr::PropertyGet { object, property } => {
+                        let obj = self.emit_js_expr(object, locals);
+                        let args_str = args_js.join(", ");
+                        format!("fromJsValue(toJsValue({}).{}({}))", obj, property,
+                            args.iter().map(|a| format!("toJsValue({})", self.emit_js_expr(a, locals))).collect::<Vec<_>>().join(", "))
+                    }
+                    _ => {
+                        let callee_js = self.emit_js_expr(callee, locals);
+                        format!("{}({})", callee_js, args_js.join(", "))
+                    }
+                }
+            }
+            Expr::FetchWithOptions { url, method, body, headers } => {
+                let url_js = self.emit_js_expr(url, locals);
+                let method_js = self.emit_js_expr(method, locals);
+                let body_js = self.emit_js_expr(body, locals);
+                // In async JS context, we can do a real fetch
+                let mut opts = format!("{{ method: getString({}) || 'GET'", method_js);
+                if !matches!(body.as_ref(), Expr::Undefined) {
+                    opts.push_str(&format!(", body: getString({})", body_js));
+                }
+                if !headers.is_empty() {
+                    opts.push_str(", headers: {");
+                    for (i, (key, val)) in headers.iter().enumerate() {
+                        if i > 0 { opts.push_str(", "); }
+                        let v = self.emit_js_expr(val, locals);
+                        opts.push_str(&format!("'{}': getString({})", key, v));
+                    }
+                    opts.push('}');
+                }
+                opts.push('}');
+                format!("fromJsValue(await fetch(getString({}), {}))", url_js, opts)
+            }
+            Expr::PropertyGet { object, property } => {
+                let obj = self.emit_js_expr(object, locals);
+                format!("fromJsValue(toJsValue({}).{})", obj, property)
+            }
+            Expr::PropertySet { object, property, value } => {
+                let obj = self.emit_js_expr(object, locals);
+                let val = self.emit_js_expr(value, locals);
+                format!("(toJsValue({}).{} = toJsValue({}), {})", obj, property, val, val)
+            }
+            Expr::Object(fields) => {
+                let mut parts = Vec::new();
+                for (key, val) in fields {
+                    let v = self.emit_js_expr(val, locals);
+                    parts.push(format!("'{}': toJsValue({})", key, v));
+                }
+                format!("fromJsValue({{{}}})", parts.join(", "))
+            }
+            Expr::Array(elements) => {
+                let elems: Vec<String> = elements.iter()
+                    .map(|e| format!("toJsValue({})", self.emit_js_expr(e, locals)))
+                    .collect();
+                format!("fromJsValue([{}])", elems.join(", "))
+            }
+            Expr::Conditional { condition, then_expr, else_expr } => {
+                let c = self.emit_js_expr(condition, locals);
+                let t = self.emit_js_expr(then_expr, locals);
+                let e = self.emit_js_expr(else_expr, locals);
+                format!("(toJsValue({}) ? {} : {})", c, t, e)
+            }
+            Expr::NativeMethodCall { module, method, object, args, .. } => {
+                let normalized = module.strip_prefix("node:").unwrap_or(module);
+                match normalized {
+                    "console" => {
+                        let args_js: Vec<String> = args.iter()
+                            .map(|a| format!("toJsValue({})", self.emit_js_expr(a, locals)))
+                            .collect();
+                        match method.as_str() {
+                            "log" => format!("(console.log({}), u64ToF64(TAG_UNDEFINED))", args_js.join(", ")),
+                            "warn" => format!("(console.warn({}), u64ToF64(TAG_UNDEFINED))", args_js.join(", ")),
+                            "error" => format!("(console.error({}), u64ToF64(TAG_UNDEFINED))", args_js.join(", ")),
+                            _ => "u64ToF64(TAG_UNDEFINED)".to_string(),
+                        }
+                    }
+                    "JSON" => {
+                        match method.as_str() {
+                            "parse" if !args.is_empty() => {
+                                let a = self.emit_js_expr(&args[0], locals);
+                                format!("fromJsValue(JSON.parse(getString({})))", a)
+                            }
+                            "stringify" if !args.is_empty() => {
+                                let a = self.emit_js_expr(&args[0], locals);
+                                format!("fromJsValue(JSON.stringify(toJsValue({})))", a)
+                            }
+                            _ => "u64ToF64(TAG_UNDEFINED)".to_string(),
+                        }
+                    }
+                    _ => {
+                        if let Some(obj) = object {
+                            let obj_js = self.emit_js_expr(obj, locals);
+                            let args_js: Vec<String> = args.iter()
+                                .map(|a| format!("toJsValue({})", self.emit_js_expr(a, locals)))
+                                .collect();
+                            format!("fromJsValue(toJsValue({}).{}({}))", obj_js, method, args_js.join(", "))
+                        } else {
+                            "u64ToF64(TAG_UNDEFINED)".to_string()
+                        }
+                    }
+                }
+            }
+            Expr::ErrorNew(msg) => {
+                if let Some(m) = msg {
+                    let m_js = self.emit_js_expr(m, locals);
+                    format!("fromJsValue(new Error(getString({})))", m_js)
+                } else {
+                    "fromJsValue(new Error())".to_string()
+                }
+            }
+            Expr::ErrorMessage(err) => {
+                let e = self.emit_js_expr(err, locals);
+                format!("fromJsValue(toJsValue({}).message)", e)
+            }
+            Expr::JsonParse(val) => {
+                let v = self.emit_js_expr(val, locals);
+                format!("fromJsValue(JSON.parse(getString({})))", v)
+            }
+            Expr::JsonStringify(val) => {
+                let v = self.emit_js_expr(val, locals);
+                format!("fromJsValue(JSON.stringify(toJsValue({})))", v)
+            }
+            Expr::This => "__this".to_string(),
+            Expr::IndexGet { object, index } => {
+                let obj = self.emit_js_expr(object, locals);
+                let idx = self.emit_js_expr(index, locals);
+                format!("fromJsValue(toJsValue({})[toJsValue({})])", obj, idx)
+            }
+            Expr::IndexSet { object, index, value } => {
+                let obj = self.emit_js_expr(object, locals);
+                let idx = self.emit_js_expr(index, locals);
+                let val = self.emit_js_expr(value, locals);
+                format!("(toJsValue({})[toJsValue({})] = toJsValue({}), {})", obj, idx, val, val)
+            }
+            Expr::ArrayPush { array_id, value } => {
+                let arr = locals.get(array_id).cloned().unwrap_or_else(|| format!("__l{}", array_id));
+                let val = self.emit_js_expr(value, locals);
+                format!("fromJsValue(toJsValue({}).push(toJsValue({})))", arr, val)
+            }
+            Expr::StringCoerce(val) => {
+                let v = self.emit_js_expr(val, locals);
+                format!("fromJsValue(String(toJsValue({})))", v)
+            }
+            Expr::MathFloor(x) => {
+                let v = self.emit_js_expr(x, locals);
+                format!("Math.floor({})", v)
+            }
+            Expr::MathCeil(x) => {
+                let v = self.emit_js_expr(x, locals);
+                format!("Math.ceil({})", v)
+            }
+            Expr::MathRound(x) => {
+                let v = self.emit_js_expr(x, locals);
+                format!("Math.round({})", v)
+            }
+            Expr::MathAbs(x) => {
+                let v = self.emit_js_expr(x, locals);
+                format!("Math.abs({})", v)
+            }
+            Expr::MathRandom => "Math.random()".to_string(),
+            Expr::DateNow => "Date.now()".to_string(),
+            Expr::Sequence(exprs) => {
+                if exprs.is_empty() {
+                    "u64ToF64(TAG_UNDEFINED)".to_string()
+                } else {
+                    let parts: Vec<String> = exprs.iter().map(|e| self.emit_js_expr(e, locals)).collect();
+                    format!("({})", parts.join(", "))
+                }
+            }
+            Expr::ExternFuncRef { name, .. } => {
+                // In JS context, look up exported WASM functions
+                if let Some(&func_idx) = self.func_name_map.get(name) {
+                    format!("fromJsValue(wasmInstance.exports.__wasm_func_{})", func_idx)
+                } else {
+                    "u64ToF64(TAG_UNDEFINED)".to_string()
+                }
+            }
+            Expr::FuncRef(id) => {
+                if let Some(&func_idx) = self.func_map.get(id) {
+                    format!("fromJsValue(wasmInstance.exports.__wasm_func_{})", func_idx)
+                } else {
+                    "u64ToF64(TAG_UNDEFINED)".to_string()
+                }
+            }
+            Expr::New { class_name, args, .. } => {
+                let args_js: Vec<String> = args.iter()
+                    .map(|a| format!("toJsValue({})", self.emit_js_expr(a, locals)))
+                    .collect();
+                format!("fromJsValue(new (toJsValue(fromJsValue('{}')))({})))", class_name, args_js.join(", "))
+            }
+            Expr::InstanceOf { expr, ty } => {
+                let e = self.emit_js_expr(expr, locals);
+                // Use the bridge instanceof check
+                format!("(toJsValue({}) instanceof {} ? u64ToF64(TAG_TRUE) : u64ToF64(TAG_FALSE))", e, ty)
+            }
+            Expr::TypeOf(operand) => {
+                let o = self.emit_js_expr(operand, locals);
+                format!("fromJsValue(typeof toJsValue({}))", o)
+            }
+            Expr::Void(e) => {
+                let v = self.emit_js_expr(e, locals);
+                format!("({}, u64ToF64(TAG_UNDEFINED))", v)
+            }
+            Expr::Delete(e) => {
+                let v = self.emit_js_expr(e, locals);
+                format!("(delete toJsValue({}), u64ToF64(TAG_TRUE))", v)
+            }
+            _ => {
+                // Fallback: return undefined for unhandled expressions
+                "u64ToF64(TAG_UNDEFINED)".to_string()
+            }
+        }
+    }
+
     fn collect_strings(&mut self, module: &perry_hir::ir::Module) {
+        // Pre-intern common strings used by bridge calls
+        self.intern_string("Authorization");
+        self.intern_string("POST");
+        self.intern_string("GET");
+
         for func in &module.functions {
             self.collect_strings_in_stmts(&func.body);
         }
@@ -1019,12 +2096,37 @@ impl WasmModuleEmitter {
             }
             if let Some(ctor) = &class.constructor {
                 self.collect_strings_in_stmts(&ctor.body);
+                for param in &ctor.params {
+                    if let Some(default) = &param.default {
+                        self.collect_strings_in_expr(default);
+                    }
+                }
             }
             for method in &class.methods {
                 self.intern_string(&method.name);
                 self.collect_strings_in_stmts(&method.body);
             }
+            for method in &class.static_methods {
+                self.intern_string(&method.name);
+                self.collect_strings_in_stmts(&method.body);
+            }
+            for (name, getter) in &class.getters {
+                self.intern_string(name);
+                self.intern_string(&format!("__get_{}", name));
+                self.collect_strings_in_stmts(&getter.body);
+            }
+            for (name, setter) in &class.setters {
+                self.intern_string(name);
+                self.intern_string(&format!("__set_{}", name));
+                self.collect_strings_in_stmts(&setter.body);
+            }
             for field in &class.fields {
+                self.intern_string(&field.name);
+                if let Some(init) = &field.init {
+                    self.collect_strings_in_expr(init);
+                }
+            }
+            for field in &class.static_fields {
                 self.intern_string(&field.name);
                 if let Some(init) = &field.init {
                     self.collect_strings_in_expr(init);
@@ -1325,6 +2427,8 @@ struct FuncEmitCtx<'a> {
     break_depth: Vec<u32>,
     loop_depth: Vec<u32>,
     block_depth: u32,
+    /// Current class name (set when compiling class methods/constructors)
+    current_class: Option<String>,
 }
 
 impl<'a> FuncEmitCtx<'a> {
@@ -1335,6 +2439,7 @@ impl<'a> FuncEmitCtx<'a> {
             break_depth: Vec::new(),
             loop_depth: Vec::new(),
             block_depth: 0,
+            current_class: None,
         }
     }
 
@@ -1719,15 +2824,60 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&Instruction::Br(0));
             }
             Stmt::Throw(expr) => {
-                // WASM doesn't have exceptions yet; just log and unreachable
+                // Set exception in bridge and return
                 self.emit_expr(func, expr);
-                func.instruction(&Instruction::Call(self.rt().console_error));
-                func.instruction(&Instruction::Unreachable);
+                func.instruction(&Instruction::Call(self.rt().throw_value));
+                if in_returning_func {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::Return);
+                }
             }
-            Stmt::Try { body, .. } => {
-                // Best effort: just emit the try body (WASM exception handling is limited)
+            Stmt::Try { body, catch, finally } => {
+                // Bridge-based exception handling:
+                // try_start(); <try body>; try_end();
+                // if has_exception(): <bind catch param>; <catch body>
+                // <finally body>
+                func.instruction(&Instruction::Call(self.rt().try_start));
+
                 for s in body {
                     self.emit_stmt(func, s, in_returning_func);
+                }
+
+                func.instruction(&Instruction::Call(self.rt().try_end));
+
+                // Check for exception and execute catch block
+                if let Some(catch_clause) = catch {
+                    func.instruction(&Instruction::Call(self.rt().has_exception));
+                    func.instruction(&Instruction::If(wasm_encoder::BlockType::Empty));
+                    self.block_depth += 1;
+
+                    // Bind catch parameter
+                    if let Some((param_id, _)) = &catch_clause.param {
+                        func.instruction(&Instruction::Call(self.rt().get_exception));
+                        if let Some(&local_idx) = self.local_map.get(param_id) {
+                            func.instruction(&Instruction::LocalSet(local_idx));
+                        } else {
+                            func.instruction(&Instruction::Drop);
+                        }
+                    } else {
+                        // No param, just clear the exception
+                        func.instruction(&Instruction::Call(self.rt().get_exception));
+                        func.instruction(&Instruction::Drop);
+                    }
+
+                    for s in &catch_clause.body {
+                        self.emit_stmt(func, s, in_returning_func);
+                    }
+
+                    self.block_depth -= 1;
+                    func.instruction(&Instruction::End);
+                }
+
+                // Finally block (unconditional)
+                if let Some(finally_stmts) = finally {
+                    for s in finally_stmts {
+                        self.emit_stmt(func, s, in_returning_func);
+                    }
                 }
             }
             Stmt::Switch { discriminant, cases } => {
@@ -2036,6 +3186,25 @@ impl<'a> FuncEmitCtx<'a> {
                     if self.emit_method_call(func, object, property, args) {
                         return;
                     }
+
+                    // Fallback: try class method dispatch via bridge
+                    {
+                        let array_new = self.rt().array_new;
+                        let array_push = self.rt().array_push;
+                        let class_call_method = self.rt().class_call_method;
+                        self.emit_expr(func, object);
+                        let method_id = self.emitter.string_map.get(property.as_str()).copied().unwrap_or(0);
+                        let method_bits = (STRING_TAG << 48) | (method_id as u64);
+                        func.instruction(&f64_const(f64::from_bits(method_bits)));
+                        // Build args array
+                        func.instruction(&Instruction::Call(array_new));
+                        for arg in args {
+                            self.emit_expr(func, arg);
+                            func.instruction(&Instruction::Call(array_push));
+                        }
+                        func.instruction(&Instruction::Call(class_call_method));
+                        return;
+                    }
                 }
 
                 // Evaluate arguments first
@@ -2049,6 +3218,17 @@ impl<'a> FuncEmitCtx<'a> {
                             func.instruction(&Instruction::Call(idx));
                         } else {
                             // Unknown function — push undefined
+                            for _ in args {
+                                func.instruction(&Instruction::Drop);
+                            }
+                            func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                        }
+                    }
+                    Expr::ExternFuncRef { name, .. } => {
+                        // Cross-module function call — look up by name
+                        if let Some(&idx) = self.emitter.func_name_map.get(name) {
+                            func.instruction(&Instruction::Call(idx));
+                        } else {
                             for _ in args {
                                 func.instruction(&Instruction::Drop);
                             }
@@ -2333,10 +3513,30 @@ impl<'a> FuncEmitCtx<'a> {
                                 "length" => {
                                     func.instruction(&Instruction::Call(self.rt().array_length));
                                 }
+                                // Response methods
+                                "json" => {
+                                    func.instruction(&Instruction::Call(self.rt().response_json));
+                                }
+                                "text" => {
+                                    func.instruction(&Instruction::Call(self.rt().response_text));
+                                }
+                                "status" => {
+                                    func.instruction(&Instruction::Call(self.rt().response_status));
+                                }
                                 _ => {
-                                    // Unknown method — drop object, return undefined
-                                    func.instruction(&Instruction::Drop);
-                                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                                    // Fall back to class_call_method for class instances
+                                    let array_new = self.rt().array_new;
+                                    let array_push = self.rt().array_push;
+                                    let class_call_method = self.rt().class_call_method;
+                                    let method_id = self.emitter.string_map.get(method.as_str()).copied().unwrap_or(0);
+                                    let method_bits = (STRING_TAG << 48) | (method_id as u64);
+                                    func.instruction(&f64_const(f64::from_bits(method_bits)));
+                                    func.instruction(&Instruction::Call(array_new));
+                                    for arg in args {
+                                        self.emit_expr(func, arg);
+                                        func.instruction(&Instruction::Call(array_push));
+                                    }
+                                    func.instruction(&Instruction::Call(class_call_method));
                                 }
                             }
                         } else {
@@ -2404,10 +3604,13 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&Instruction::Call(self.rt().js_typeof));
             }
 
-            // --- Misc expressions that produce undefined for now ---
+            // --- Async ---
             Expr::Await(e) => {
-                // WASM is synchronous; just evaluate the expression
+                // Evaluate inner expression, then call await_promise bridge
+                // If the value is a promise handle, tries to get resolved value
+                // If not a promise, returns the value as-is
                 self.emit_expr(func, e);
+                func.instruction(&Instruction::Call(self.rt().await_promise));
             }
 
             // --- Object literal ---
@@ -2514,11 +3717,18 @@ impl<'a> FuncEmitCtx<'a> {
                     func.instruction(&Instruction::Call(self.rt().string_len));
                     return;
                 }
+                // Special case: .message on error objects
+                if property == "message" {
+                    self.emit_expr(func, object);
+                    func.instruction(&Instruction::Call(self.rt().error_message));
+                    return;
+                }
                 self.emit_expr(func, object);
                 let key_id = self.emitter.string_map.get(property.as_str()).copied().unwrap_or(0);
                 let key_bits = (STRING_TAG << 48) | (key_id as u64);
                 func.instruction(&f64_const(f64::from_bits(key_bits)));
-                func.instruction(&Instruction::Call(self.rt().object_get));
+                // Use class_get_field (works for both plain objects and class instances)
+                func.instruction(&Instruction::Call(self.rt().class_get_field));
             }
             Expr::PropertySet { object, property, value } => {
                 self.emit_expr(func, object);
@@ -2526,15 +3736,10 @@ impl<'a> FuncEmitCtx<'a> {
                 let key_bits = (STRING_TAG << 48) | (key_id as u64);
                 func.instruction(&f64_const(f64::from_bits(key_bits)));
                 self.emit_expr(func, value);
-                func.instruction(&Instruction::Call(self.rt().object_set));
-                // Returns handle (but we want the value for assignment expression)
-                // Actually PropertySet should return the assigned value.
-                // We'll emit value again for the expression result.
-                // The bridge object_set returns handle, but we actually want the value.
-                // Let's just re-emit value. Actually this is wrong if value has side effects.
-                // For now, push the value. The bridge returns handle, but we can drop and re-push.
-                // Actually: object_set returns the handle for chaining. For PropertySet as expr,
-                // the typical use is as a statement (result dropped). So returning handle is fine.
+                // Use class_set_field (works for both plain objects and class instances)
+                func.instruction(&Instruction::Call(self.rt().class_set_field));
+                // class_set_field is void; push the object back for chaining
+                self.emit_expr(func, object);
             }
             Expr::PropertyUpdate { object, property, op, prefix } => {
                 // obj.prop++ or ++obj.prop
@@ -2862,8 +4067,17 @@ impl<'a> FuncEmitCtx<'a> {
                     func.instruction(&f64_const_bits(TAG_UNDEFINED));
                 }
             }
-            Expr::ExternFuncRef { .. } => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+            Expr::ExternFuncRef { name, .. } => {
+                // Look up by function name in the flat function index space
+                if let Some(&func_idx) = self.emitter.func_name_map.get(name) {
+                    // Create a closure wrapper with 0 captures (like FuncRef)
+                    let table_idx = self.emitter.func_to_table_idx.get(&func_idx).copied().unwrap_or(func_idx);
+                    func.instruction(&f64_const(table_idx as f64));
+                    func.instruction(&f64_const(0.0));
+                    func.instruction(&Instruction::Call(self.rt().closure_new));
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
             }
 
             // --- Class instantiation ---
@@ -2874,23 +4088,18 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&f64_const(f64::from_bits(class_bits)));
                 func.instruction(&f64_const(args.len() as f64));
                 func.instruction(&Instruction::Call(self.rt().class_new));
-                // Now call constructor with the new instance and args
-                // For now, just push args and call constructor method
-                // The bridge class_new creates the instance; constructor is called separately
-                // Build args array for constructor
-                if !args.is_empty() {
-                    let rt = self.rt();
-                    let arr_new = rt.array_new;
-                    let arr_push = rt.array_push;
-                    // We need to save the instance handle, build args, call constructor
-                    // Without scratch locals, this is tricky. The bridge handles it.
+                // Call the compiled constructor if it exists
+                if let Some(&ctor_idx) = self.emitter.class_ctor_map.get(class_name.as_str()) {
+                    // Stack: [instance_handle]
+                    // Constructor takes: (this, arg0, arg1, ...)
+                    // instance_handle is already on stack as first arg (this)
                     for arg in args {
                         self.emit_expr(func, arg);
-                        func.instruction(&Instruction::Call(arr_push));
                     }
-                    // The last array_push returns the instance (constructor called in class_new)
-                    let _ = arr_new;
+                    func.instruction(&Instruction::Call(ctor_idx));
+                    // Constructor returns this
                 }
+                // If no compiled constructor, just leave the instance handle on stack
             }
             Expr::NewDynamic { callee, args } => {
                 // Dynamic new — approximate with regular call
@@ -2916,20 +4125,49 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&Instruction::LocalGet(0));
             }
             Expr::SuperCall(args) => {
-                // Call parent constructor — approximate
-                for arg in args {
-                    self.emit_expr(func, arg);
-                    func.instruction(&Instruction::Drop);
+                // Call parent constructor: super(args)
+                // this is local 0 in the current constructor
+                let mut called = false;
+                if let Some(ref current_class) = self.current_class {
+                    // Look up parent class name
+                    if let Some(parent_name) = self.emitter.class_parent_map.get(current_class) {
+                        if let Some(&ctor_idx) = self.emitter.class_ctor_map.get(parent_name) {
+                            // Call parent constructor with this + args
+                            func.instruction(&Instruction::LocalGet(0)); // this
+                            for arg in args {
+                                self.emit_expr(func, arg);
+                            }
+                            func.instruction(&Instruction::Call(ctor_idx));
+                            func.instruction(&Instruction::Drop); // parent ctor returns this, discard
+                            called = true;
+                        }
+                    }
+                }
+                if !called {
+                    // No parent constructor found, drop args
+                    for arg in args {
+                        self.emit_expr(func, arg);
+                        func.instruction(&Instruction::Drop);
+                    }
                 }
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
             Expr::SuperMethodCall { method, args } => {
-                let _ = method;
+                // Call parent method on this via class_call_method (walks parent chain)
+                let array_new = self.rt().array_new;
+                let array_push = self.rt().array_push;
+                let class_call_method = self.rt().class_call_method;
+                func.instruction(&Instruction::LocalGet(0)); // this handle
+                let method_id = self.emitter.string_map.get(method.as_str()).copied().unwrap_or(0);
+                let method_bits = (STRING_TAG << 48) | (method_id as u64);
+                func.instruction(&f64_const(f64::from_bits(method_bits)));
+                // Build args array
+                func.instruction(&Instruction::Call(array_new));
                 for arg in args {
                     self.emit_expr(func, arg);
-                    func.instruction(&Instruction::Drop);
+                    func.instruction(&Instruction::Call(array_push));
                 }
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                func.instruction(&Instruction::Call(class_call_method));
             }
             Expr::ClassRef(_) => {
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
@@ -2956,18 +4194,28 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_expr(func, value);
             }
             Expr::StaticMethodCall { class_name, method_name, args } => {
+                // Try to call compiled static method directly
+                if let Some(statics) = self.emitter.class_static_map.get(class_name.as_str()) {
+                    if let Some(&static_idx) = statics.get(method_name.as_str()) {
+                        // Direct call to compiled static method (no this param)
+                        for arg in args {
+                            self.emit_expr(func, arg);
+                        }
+                        func.instruction(&Instruction::Call(static_idx));
+                        return;
+                    }
+                }
+                // Fallback: bridge dispatch
                 let class_id = self.emitter.string_map.get(class_name.as_str()).copied().unwrap_or(0);
                 let class_bits = (STRING_TAG << 48) | (class_id as u64);
                 let method_id = self.emitter.string_map.get(method_name.as_str()).copied().unwrap_or(0);
                 let method_bits = (STRING_TAG << 48) | (method_id as u64);
-                // Build args array
                 let rt = self.rt();
                 let arr_new = rt.array_new;
                 let arr_push = rt.array_push;
                 let call_method = rt.class_call_method;
                 func.instruction(&f64_const(f64::from_bits(class_bits)));
                 func.instruction(&f64_const(f64::from_bits(method_bits)));
-                // Create args array
                 func.instruction(&Instruction::Call(arr_new));
                 for arg in args {
                     self.emit_expr(func, arg);
@@ -3317,26 +4565,61 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::UrlNew { url, base } => {
                 self.emit_expr(func, url);
                 if let Some(b) = base {
+                    // URL(url, base) — for now just use url
                     self.emit_expr(func, b);
-                } else {
-                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                    func.instruction(&Instruction::Drop);
                 }
-                // URL operations via object bridge (not implemented yet)
-                func.instruction(&Instruction::Drop);
-                // just return url for now
+                func.instruction(&Instruction::Call(self.rt().url_parse));
             }
-            Expr::UrlGetHref(u) | Expr::UrlGetPathname(u) | Expr::UrlGetProtocol(u) |
-            Expr::UrlGetHost(u) | Expr::UrlGetHostname(u) | Expr::UrlGetPort(u) |
-            Expr::UrlGetSearch(u) | Expr::UrlGetHash(u) | Expr::UrlGetOrigin(u) |
+            Expr::UrlGetHref(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_href));
+            }
+            Expr::UrlGetPathname(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_pathname));
+            }
+            Expr::UrlGetProtocol(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_protocol));
+            }
+            Expr::UrlGetHost(u) | Expr::UrlGetHostname(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_hostname));
+            }
+            Expr::UrlGetPort(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_port));
+            }
+            Expr::UrlGetSearch(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_search));
+            }
+            Expr::UrlGetHash(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_hash));
+            }
+            Expr::UrlGetOrigin(u) => {
+                self.emit_expr(func, u);
+                func.instruction(&Instruction::Call(self.rt().url_get_origin));
+            }
             Expr::UrlGetSearchParams(u) => {
                 self.emit_expr(func, u);
-                // URL property access — approximate with identity
+                func.instruction(&Instruction::Call(self.rt().url_get_search_params));
             }
 
-            // --- Process/OS/FS stubs ---
-            Expr::ProcessArgv | Expr::ProcessCwd | Expr::ProcessUptime |
-            Expr::ProcessMemoryUsage | Expr::OsPlatform | Expr::OsArch |
-            Expr::OsHostname | Expr::OsHomedir | Expr::OsTmpdir |
+            // --- Process/OS ---
+            Expr::ProcessArgv => {
+                func.instruction(&Instruction::Call(self.rt().process_argv));
+            }
+            Expr::ProcessCwd => {
+                func.instruction(&Instruction::Call(self.rt().process_cwd));
+            }
+            Expr::OsPlatform => {
+                func.instruction(&Instruction::Call(self.rt().os_platform));
+            }
+            Expr::ProcessUptime | Expr::ProcessMemoryUsage |
+            Expr::OsArch | Expr::OsHostname | Expr::OsHomedir | Expr::OsTmpdir |
             Expr::OsTotalmem | Expr::OsFreemem | Expr::OsUptime |
             Expr::OsType | Expr::OsRelease | Expr::OsCpus | Expr::OsNetworkInterfaces |
             Expr::OsUserInfo | Expr::OsEOL => {
@@ -3353,23 +4636,186 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::FsReadFileBinary(_) | Expr::FsRmRecursive(_) => {
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
-            // --- Path stubs ---
-            Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
-            Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::PathIsAbsolute(_) |
-            Expr::FileURLToPath(_) => {
+            // --- Path ---
+            Expr::PathJoin(a, b) => {
+                self.emit_expr(func, a);
+                self.emit_expr(func, b);
+                func.instruction(&Instruction::Call(self.rt().path_join));
+            }
+            Expr::PathDirname(p) => {
+                self.emit_expr(func, p);
+                func.instruction(&Instruction::Call(self.rt().path_dirname));
+            }
+            Expr::PathBasename(p) => {
+                self.emit_expr(func, p);
+                func.instruction(&Instruction::Call(self.rt().path_basename));
+            }
+            Expr::PathExtname(p) => {
+                self.emit_expr(func, p);
+                func.instruction(&Instruction::Call(self.rt().path_extname));
+            }
+            Expr::PathResolve(p) => {
+                self.emit_expr(func, p);
+                func.instruction(&Instruction::Call(self.rt().path_resolve));
+            }
+            Expr::PathIsAbsolute(p) => {
+                self.emit_expr(func, p);
+                func.instruction(&Instruction::Call(self.rt().path_is_absolute));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::Else);
+                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::End);
+            }
+            Expr::FileURLToPath(p) => {
+                self.emit_expr(func, p);
+                // In WASM, just return the string as-is
+            }
+            // --- Buffer/TypedArray ---
+            Expr::BufferAlloc { ref size, .. } => {
+                self.emit_expr(func, size.as_ref());
+                func.instruction(&Instruction::Call(self.rt().buffer_alloc));
+            }
+            Expr::BufferAllocUnsafe(size) => {
+                self.emit_expr(func, size);
+                func.instruction(&Instruction::Call(self.rt().buffer_alloc));
+            }
+            Expr::BufferFrom { data, encoding } => {
+                self.emit_expr(func, data);
+                if let Some(enc) = encoding {
+                    self.emit_expr(func, enc);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                func.instruction(&Instruction::Call(self.rt().buffer_from_string));
+            }
+            Expr::BufferToString { buffer, encoding } => {
+                self.emit_expr(func, buffer);
+                if let Some(enc) = encoding {
+                    self.emit_expr(func, enc);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                func.instruction(&Instruction::Call(self.rt().buffer_to_string));
+            }
+            Expr::BufferLength(buf) => {
+                self.emit_expr(func, buf);
+                func.instruction(&Instruction::Call(self.rt().buffer_length));
+            }
+            Expr::BufferSlice { buffer, start, end } => {
+                self.emit_expr(func, buffer);
+                if let Some(s) = start {
+                    self.emit_expr(func, s);
+                } else {
+                    func.instruction(&f64_const(0.0));
+                }
+                if let Some(e) = end {
+                    self.emit_expr(func, e);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                func.instruction(&Instruction::Call(self.rt().buffer_slice));
+            }
+            Expr::BufferConcat(arr) => {
+                self.emit_expr(func, arr);
+                func.instruction(&Instruction::Call(self.rt().buffer_concat));
+            }
+            Expr::BufferIndexGet { buffer, index } => {
+                self.emit_expr(func, buffer);
+                self.emit_expr(func, index);
+                func.instruction(&Instruction::Call(self.rt().buffer_get));
+            }
+            Expr::BufferIndexSet { buffer, index, value } => {
+                self.emit_expr(func, buffer);
+                self.emit_expr(func, index);
+                self.emit_expr(func, value);
+                func.instruction(&Instruction::Call(self.rt().buffer_set));
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
-            // --- Buffer/TypedArray stubs ---
-            Expr::BufferFrom { .. } | Expr::BufferAlloc { .. } |
-            Expr::BufferAllocUnsafe(_) | Expr::BufferConcat(_) |
-            Expr::BufferIsBuffer(_) | Expr::BufferByteLength(_) |
-            Expr::BufferToString { .. } | Expr::BufferLength(_) |
-            Expr::BufferSlice { .. } | Expr::BufferCopy { .. } |
-            Expr::BufferWrite { .. } | Expr::BufferEquals { .. } |
-            Expr::BufferIndexGet { .. } | Expr::BufferIndexSet { .. } |
-            Expr::Uint8ArrayNew(_) | Expr::Uint8ArrayFrom(_) |
-            Expr::Uint8ArrayLength(_) | Expr::Uint8ArrayGet { .. } |
-            Expr::Uint8ArraySet { .. } => {
+            Expr::BufferCopy { source, target, target_start, source_start, source_end } => {
+                self.emit_expr(func, source);
+                self.emit_expr(func, target);
+                if let Some(ts) = target_start {
+                    self.emit_expr(func, ts);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                if let Some(ss) = source_start {
+                    self.emit_expr(func, ss);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                if let Some(se) = source_end {
+                    self.emit_expr(func, se);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                func.instruction(&Instruction::Call(self.rt().buffer_copy));
+            }
+            Expr::BufferWrite { buffer, string, offset, encoding } => {
+                self.emit_expr(func, buffer);
+                self.emit_expr(func, string);
+                if let Some(o) = offset {
+                    self.emit_expr(func, o);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                if let Some(e) = encoding {
+                    self.emit_expr(func, e);
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+                func.instruction(&Instruction::Call(self.rt().buffer_write));
+            }
+            Expr::BufferEquals { buffer, other } => {
+                self.emit_expr(func, buffer);
+                self.emit_expr(func, other);
+                func.instruction(&Instruction::Call(self.rt().buffer_equals));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::Else);
+                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::End);
+            }
+            Expr::BufferIsBuffer(val) => {
+                self.emit_expr(func, val);
+                func.instruction(&Instruction::Call(self.rt().buffer_is_buffer));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::Else);
+                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::End);
+            }
+            Expr::BufferByteLength(val) => {
+                self.emit_expr(func, val);
+                func.instruction(&Instruction::Call(self.rt().buffer_byte_length));
+            }
+            Expr::Uint8ArrayNew(size) => {
+                if let Some(s) = size {
+                    self.emit_expr(func, s);
+                } else {
+                    func.instruction(&f64_const(0.0));
+                }
+                func.instruction(&Instruction::Call(self.rt().uint8array_new));
+            }
+            Expr::Uint8ArrayFrom(val) => {
+                self.emit_expr(func, val);
+                func.instruction(&Instruction::Call(self.rt().uint8array_from));
+            }
+            Expr::Uint8ArrayLength(buf) => {
+                self.emit_expr(func, buf);
+                func.instruction(&Instruction::Call(self.rt().uint8array_length));
+            }
+            Expr::Uint8ArrayGet { array, index } => {
+                self.emit_expr(func, array);
+                self.emit_expr(func, index);
+                func.instruction(&Instruction::Call(self.rt().uint8array_get));
+            }
+            Expr::Uint8ArraySet { array, index, value } => {
+                self.emit_expr(func, array);
+                self.emit_expr(func, index);
+                self.emit_expr(func, value);
+                func.instruction(&Instruction::Call(self.rt().uint8array_set));
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
             // --- Child process stubs ---
@@ -3379,10 +4825,60 @@ impl<'a> FuncEmitCtx<'a> {
             Expr::ChildProcessGetProcessStatus(_) | Expr::ChildProcessKillProcess(_) => {
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
-            // --- Fetch stubs ---
-            Expr::FetchWithOptions { .. } | Expr::FetchGetWithAuth { .. } |
-            Expr::FetchPostWithAuth { .. } => {
-                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+            // --- Fetch ---
+            Expr::FetchWithOptions { url, method, body, headers } => {
+                self.emit_expr(func, url);
+                self.emit_expr(func, method);
+                self.emit_expr(func, body);
+                // Build headers object
+                if headers.is_empty() {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                } else {
+                    let obj_new = self.rt().object_new;
+                    let obj_set = self.rt().object_set;
+                    func.instruction(&Instruction::Call(obj_new));
+                    for (key, val) in headers {
+                        let key_id = self.emitter.string_map.get(key.as_str()).copied().unwrap_or(0);
+                        let key_bits = (STRING_TAG << 48) | (key_id as u64);
+                        func.instruction(&f64_const(f64::from_bits(key_bits)));
+                        self.emit_expr(func, val);
+                        func.instruction(&Instruction::Call(obj_set));
+                    }
+                }
+                func.instruction(&Instruction::Call(self.rt().fetch_with_options));
+            }
+            Expr::FetchGetWithAuth { url, auth_header } => {
+                self.emit_expr(func, url);
+                func.instruction(&f64_const_bits(TAG_UNDEFINED)); // method (default GET)
+                func.instruction(&f64_const_bits(TAG_UNDEFINED)); // body
+                // Build headers object with Authorization
+                let obj_new = self.rt().object_new;
+                let obj_set = self.rt().object_set;
+                func.instruction(&Instruction::Call(obj_new));
+                let auth_key_id = self.emitter.string_map.get("Authorization").copied().unwrap_or(0);
+                let auth_key_bits = (STRING_TAG << 48) | (auth_key_id as u64);
+                func.instruction(&f64_const(f64::from_bits(auth_key_bits)));
+                self.emit_expr(func, auth_header);
+                func.instruction(&Instruction::Call(obj_set));
+                func.instruction(&Instruction::Call(self.rt().fetch_with_options));
+            }
+            Expr::FetchPostWithAuth { url, auth_header, body } => {
+                self.emit_expr(func, url);
+                // POST method string
+                let post_id = self.emitter.string_map.get("POST").copied().unwrap_or(0);
+                let post_bits = (STRING_TAG << 48) | (post_id as u64);
+                func.instruction(&f64_const(f64::from_bits(post_bits)));
+                self.emit_expr(func, body);
+                // Build headers object with Authorization
+                let obj_new = self.rt().object_new;
+                let obj_set = self.rt().object_set;
+                func.instruction(&Instruction::Call(obj_new));
+                let auth_key_id = self.emitter.string_map.get("Authorization").copied().unwrap_or(0);
+                let auth_key_bits = (STRING_TAG << 48) | (auth_key_id as u64);
+                func.instruction(&f64_const(f64::from_bits(auth_key_bits)));
+                self.emit_expr(func, auth_header);
+                func.instruction(&Instruction::Call(obj_set));
+                func.instruction(&Instruction::Call(self.rt().fetch_with_options));
             }
             // --- Net stubs ---
             Expr::NetCreateServer { .. } | Expr::NetCreateConnection { .. } |
@@ -3391,16 +4887,70 @@ impl<'a> FuncEmitCtx<'a> {
             }
             // --- Crypto ---
             Expr::CryptoRandomUUID => {
+                func.instruction(&Instruction::Call(self.rt().crypto_random_uuid));
+            }
+            Expr::CryptoRandomBytes(n) => {
+                self.emit_expr(func, n);
+                func.instruction(&Instruction::Call(self.rt().crypto_random_bytes));
+            }
+            Expr::CryptoSha256(data) => {
+                self.emit_expr(func, data);
+                func.instruction(&Instruction::Call(self.rt().crypto_sha256));
+            }
+            Expr::CryptoMd5(data) => {
+                self.emit_expr(func, data);
+                func.instruction(&Instruction::Call(self.rt().crypto_md5));
+            }
+            // --- URL SearchParams ---
+            Expr::UrlSearchParamsNew(init) => {
+                if let Some(init_expr) = init {
+                    self.emit_expr(func, init_expr);
+                    func.instruction(&Instruction::Call(self.rt().url_parse));
+                    func.instruction(&Instruction::Call(self.rt().url_get_search_params));
+                } else {
+                    func.instruction(&f64_const_bits(TAG_UNDEFINED));
+                }
+            }
+            Expr::UrlSearchParamsGet { params, name } => {
+                self.emit_expr(func, params);
+                self.emit_expr(func, name);
+                func.instruction(&Instruction::Call(self.rt().searchparams_get));
+            }
+            Expr::UrlSearchParamsHas { params, name } => {
+                self.emit_expr(func, params);
+                self.emit_expr(func, name);
+                func.instruction(&Instruction::Call(self.rt().searchparams_has));
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::F64)));
+                func.instruction(&f64_const_bits(TAG_TRUE));
+                func.instruction(&Instruction::Else);
+                func.instruction(&f64_const_bits(TAG_FALSE));
+                func.instruction(&Instruction::End);
+            }
+            Expr::UrlSearchParamsSet { params, name, value } => {
+                self.emit_expr(func, params);
+                self.emit_expr(func, name);
+                self.emit_expr(func, value);
+                func.instruction(&Instruction::Call(self.rt().searchparams_set));
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
-            Expr::CryptoRandomBytes(_) | Expr::CryptoSha256(_) | Expr::CryptoMd5(_) => {
+            Expr::UrlSearchParamsAppend { params, name, value } => {
+                self.emit_expr(func, params);
+                self.emit_expr(func, name);
+                self.emit_expr(func, value);
+                func.instruction(&Instruction::Call(self.rt().searchparams_append));
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
-            // --- URL SearchParams stubs ---
-            Expr::UrlSearchParamsNew(_) | Expr::UrlSearchParamsGet { .. } |
-            Expr::UrlSearchParamsHas { .. } | Expr::UrlSearchParamsSet { .. } |
-            Expr::UrlSearchParamsAppend { .. } | Expr::UrlSearchParamsDelete { .. } |
-            Expr::UrlSearchParamsToString(_) | Expr::UrlSearchParamsGetAll { .. } => {
+            Expr::UrlSearchParamsDelete { params, name } => {
+                self.emit_expr(func, params);
+                self.emit_expr(func, name);
+                func.instruction(&Instruction::Call(self.rt().searchparams_delete));
+                func.instruction(&f64_const_bits(TAG_UNDEFINED));
+            }
+            Expr::UrlSearchParamsToString(params) => {
+                self.emit_expr(func, params);
+                func.instruction(&Instruction::Call(self.rt().searchparams_to_string));
+            }
+            Expr::UrlSearchParamsGetAll { .. } => {
                 func.instruction(&f64_const_bits(TAG_UNDEFINED));
             }
             // --- JS runtime interop stubs ---

@@ -88,15 +88,21 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
         let ns_title = NSString::from_str(title);
         window.setTitle(&ns_title);
 
-        // Set dark appearance on the window so all native controls (NSPopUpButton, etc.)
-        // render with dark theme colors.
-        let dark_appearance_name = NSString::from_str("NSAppearanceNameDarkAqua");
+        // Match window appearance to the system setting so native controls
+        // (NSTextField, NSPopUpButton, etc.) use the correct light/dark theme.
+        // isDarkMode() is called here (after NSApp exists) to get the correct value.
+        let is_dark = super::perry_system_is_dark_mode() != 0;
+        let appearance_name = if is_dark {
+            NSString::from_str("NSAppearanceNameDarkAqua")
+        } else {
+            NSString::from_str("NSAppearanceNameAqua")
+        };
         let appearance_cls = objc2::runtime::AnyClass::get(c"NSAppearance").unwrap();
-        let dark_appearance: *mut objc2::runtime::AnyObject = objc2::msg_send![
-            appearance_cls, appearanceNamed: &*dark_appearance_name
+        let appearance: *mut objc2::runtime::AnyObject = objc2::msg_send![
+            appearance_cls, appearanceNamed: &*appearance_name
         ];
-        if !dark_appearance.is_null() {
-            let _: () = objc2::msg_send![&*window, setAppearance: dark_appearance];
+        if !appearance.is_null() {
+            let _: () = objc2::msg_send![&*window, setAppearance: appearance];
         }
 
         APPS.with(|a| {

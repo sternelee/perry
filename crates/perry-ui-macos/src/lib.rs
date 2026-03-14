@@ -920,15 +920,31 @@ pub extern "C" fn perry_system_open_url(url_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_system_is_dark_mode() -> i64 {
     unsafe {
+        // Method 1: NSUserDefaults — works before the window exists and for
+        // explicit Dark mode. Returns nil for Auto mode.
+        let defaults_cls = objc2::runtime::AnyClass::get(c"NSUserDefaults").unwrap();
+        let defaults: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults_cls, standardUserDefaults];
+        let key = objc2_foundation::NSString::from_str("AppleInterfaceStyle");
+        let style: *mut objc2::runtime::AnyObject = objc2::msg_send![defaults, stringForKey: &*key];
+        if !style.is_null() {
+            let dark_str = objc2_foundation::NSString::from_str("Dark");
+            let is_dark: bool = objc2::msg_send![style, isEqualToString: &*dark_str];
+            if is_dark { return 1; }
+        }
+
+        // Method 2: NSApp.effectiveAppearance — works once the app is initialized.
         let app_cls = objc2::runtime::AnyClass::get(c"NSApplication").unwrap();
         let app: *mut objc2::runtime::AnyObject = objc2::msg_send![app_cls, sharedApplication];
         let appearance: *mut objc2::runtime::AnyObject = objc2::msg_send![app, effectiveAppearance];
-        if appearance.is_null() { return 0; }
-        let name: *mut objc2::runtime::AnyObject = objc2::msg_send![appearance, name];
-        if name.is_null() { return 0; }
-        let dark_name = objc2_foundation::NSString::from_str("NSAppearanceNameDarkAqua");
-        let is_dark: bool = objc2::msg_send![name, isEqualToString: &*dark_name];
-        if is_dark { 1 } else { 0 }
+        if !appearance.is_null() {
+            let name: *mut objc2::runtime::AnyObject = objc2::msg_send![appearance, name];
+            if !name.is_null() {
+                let dark_name = objc2_foundation::NSString::from_str("NSAppearanceNameDarkAqua");
+                let is_dark: bool = objc2::msg_send![name, isEqualToString: &*dark_name];
+                if is_dark { return 1; }
+            }
+        }
+        0
     }
 }
 

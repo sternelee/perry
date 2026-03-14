@@ -610,22 +610,55 @@ function buildImports() {
         const obj = getHandle(handle);
         if (!obj) return u64ToF64(TAG_UNDEFINED);
         const mname = getString(methodName);
-        const cls = obj.__class__;
-        const methods = classMethodTable[cls];
-        if (!methods || !(mname in methods)) return u64ToF64(TAG_UNDEFINED);
-        const fn = wasmInstance?.exports.__indirect_function_table?.get(methods[mname]);
-        if (!fn) return u64ToF64(TAG_UNDEFINED);
-        const args = getHandle(argsHandle) || [];
-        return fn(handle, ...args.map(v => fromJsValue(v)));
+        let cls = obj.__class__;
+        while (cls) {
+          const methods = classMethodTable[cls];
+          if (methods && mname in methods) {
+            const fn = wasmInstance?.exports.__indirect_function_table?.get(methods[mname]);
+            if (fn) {
+              const args = getHandle(argsHandle) || [];
+              return fn(handle, ...args.map(v => fromJsValue(v)));
+            }
+          }
+          cls = classParentTable[cls] || null;
+        }
+        return u64ToF64(TAG_UNDEFINED);
       },
       class_get_field: (handle, name) => {
         const obj = getHandle(handle);
         if (!obj) return u64ToF64(TAG_UNDEFINED);
-        return fromJsValue(obj[getString(name)]);
+        const fname = getString(name);
+        // Check for compiled getter method
+        if (obj.__class__) {
+          let cls = obj.__class__;
+          while (cls) {
+            const methods = classMethodTable[cls];
+            if (methods && ('__get_' + fname) in methods) {
+              const fn = wasmInstance?.exports.__indirect_function_table?.get(methods['__get_' + fname]);
+              if (fn) return fn(handle);
+            }
+            cls = classParentTable[cls] || null;
+          }
+        }
+        return fromJsValue(obj[fname]);
       },
       class_set_field: (handle, name, value) => {
         const obj = getHandle(handle);
-        if (obj) obj[getString(name)] = toJsValue(value);
+        if (!obj) return;
+        const fname = getString(name);
+        // Check for compiled setter method
+        if (obj.__class__) {
+          let cls = obj.__class__;
+          while (cls) {
+            const methods = classMethodTable[cls];
+            if (methods && ('__set_' + fname) in methods) {
+              const fn = wasmInstance?.exports.__indirect_function_table?.get(methods['__set_' + fname]);
+              if (fn) { fn(handle, value); return; }
+            }
+            cls = classParentTable[cls] || null;
+          }
+        }
+        obj[fname] = toJsValue(value);
       },
       class_set_static: (classId, name, value) => {
         const cls = getString(classId);
@@ -641,7 +674,13 @@ function buildImports() {
       class_instanceof: (handle, classId) => {
         const obj = getHandle(handle);
         if (!obj) return 0;
-        return obj.__class__ === getString(classId) ? 1 : 0;
+        let cls = obj.__class__;
+        const target = getString(classId);
+        while (cls) {
+          if (cls === target) return 1;
+          cls = classParentTable[cls] || null;
+        }
+        return 0;
       },
 
       // ===== Phase 4: JSON =====
@@ -650,7 +689,10 @@ function buildImports() {
         try {
           const s = getString(str);
           return fromJsValue(JSON.parse(s));
-        } catch { return u64ToF64(TAG_UNDEFINED); }
+        } catch (e) {
+          if (tryDepth > 0) { currentException = fromJsValue(e); }
+          return u64ToF64(TAG_UNDEFINED);
+        }
       },
       json_stringify: (val) => {
         const js = toJsValue(val);
@@ -771,9 +813,14 @@ function buildImports() {
       // ===== Phase 4: RegExp =====
 
       regexp_new: (pattern, flags) => {
-        const p = getString(pattern);
-        const f = getString(flags);
-        return nanboxPointer(allocHandle(new RegExp(p, f)));
+        try {
+          const p = getString(pattern);
+          const f = getString(flags);
+          return nanboxPointer(allocHandle(new RegExp(p, f)));
+        } catch (e) {
+          if (tryDepth > 0) { currentException = fromJsValue(e); }
+          return u64ToF64(TAG_UNDEFINED);
+        }
       },
       regexp_test: (regex, str) => {
         const re = getHandle(regex);
@@ -796,13 +843,434 @@ function buildImports() {
         const args = getHandle(argsHandle);
         if (args) console.log(...args.map(toJsValue));
       },
+
+      // ===== Phase 1 Addition: Class inheritance =====
+
+      class_set_parent: (childId, parentId) => {
+        const child = getString(childId);
+        const parent = getString(parentId);
+        classParentTable[child] = parent;
+      },
+
+      // ===== Phase 3: Try/Catch =====
+
+      try_start: () => { tryDepth++; },
+      try_end: () => { if (tryDepth > 0) tryDepth--; },
+      throw_value: (val) => { currentException = val; },
+      has_exception: () => currentException !== null ? 1 : 0,
+      get_exception: () => {
+        const e = currentException;
+        currentException = null;
+        return e !== null ? e : u64ToF64(TAG_UNDEFINED);
+      },
+
+      // ===== Phase 4: URL =====
+
+      url_parse: (urlStr) => {
+        try {
+          return nanboxPointer(allocHandle(new URL(getString(urlStr))));
+        } catch (e) {
+          if (tryDepth > 0) { currentException = fromJsValue(e); }
+          return u64ToF64(TAG_UNDEFINED);
+        }
+      },
+      url_get_href: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.href); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_pathname: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.pathname); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_hostname: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.hostname); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_port: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.port); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_search: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.search); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_hash: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.hash); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_origin: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.origin); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_protocol: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) { stringTable.push(u.protocol); return nanboxString(stringTable.length - 1); }
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      url_get_search_params: (handle) => {
+        const u = getHandle(handle);
+        if (u instanceof URL) return nanboxPointer(allocHandle(u.searchParams));
+        return u64ToF64(TAG_UNDEFINED);
+      },
+      searchparams_get: (handle, key) => {
+        const sp = getHandle(handle);
+        if (!sp || typeof sp.get !== 'function') return u64ToF64(TAG_NULL);
+        const v = sp.get(getString(key));
+        if (v === null) return u64ToF64(TAG_NULL);
+        stringTable.push(v);
+        return nanboxString(stringTable.length - 1);
+      },
+      searchparams_has: (handle, key) => {
+        const sp = getHandle(handle);
+        return (sp && typeof sp.has === 'function' && sp.has(getString(key))) ? 1 : 0;
+      },
+      searchparams_set: (handle, key, val) => {
+        const sp = getHandle(handle);
+        if (sp && typeof sp.set === 'function') sp.set(getString(key), getString(val));
+      },
+      searchparams_append: (handle, key, val) => {
+        const sp = getHandle(handle);
+        if (sp && typeof sp.append === 'function') sp.append(getString(key), getString(val));
+      },
+      searchparams_delete: (handle, key) => {
+        const sp = getHandle(handle);
+        if (sp && typeof sp.delete === 'function') sp.delete(getString(key));
+      },
+      searchparams_to_string: (handle) => {
+        const sp = getHandle(handle);
+        stringTable.push(sp ? sp.toString() : '');
+        return nanboxString(stringTable.length - 1);
+      },
+
+      // ===== Phase 4: Crypto =====
+
+      crypto_random_uuid: () => {
+        stringTable.push(crypto.randomUUID());
+        return nanboxString(stringTable.length - 1);
+      },
+      crypto_random_bytes: (n) => {
+        return nanboxPointer(allocHandle(crypto.getRandomValues(new Uint8Array(n))));
+      },
+
+      // ===== Phase 4: Path =====
+
+      path_join: (a, b) => {
+        const sa = getString(a), sb = getString(b);
+        const joined = (sa + '/' + sb).replace(/\/+/g, '/');
+        stringTable.push(joined);
+        return nanboxString(stringTable.length - 1);
+      },
+      path_dirname: (str) => {
+        const s = getString(str);
+        const idx = s.lastIndexOf('/');
+        stringTable.push(idx >= 0 ? (s.substring(0, idx) || '/') : '.');
+        return nanboxString(stringTable.length - 1);
+      },
+      path_basename: (str) => {
+        const s = getString(str);
+        const idx = s.lastIndexOf('/');
+        stringTable.push(idx >= 0 ? s.substring(idx + 1) : s);
+        return nanboxString(stringTable.length - 1);
+      },
+      path_extname: (str) => {
+        const s = getString(str);
+        const base = s.substring(s.lastIndexOf('/') + 1);
+        const idx = base.lastIndexOf('.');
+        stringTable.push(idx > 0 ? base.substring(idx) : '');
+        return nanboxString(stringTable.length - 1);
+      },
+      path_resolve: (str) => {
+        stringTable.push(getString(str));
+        return nanboxString(stringTable.length - 1);
+      },
+
+      // ===== Phase 4: Process/OS =====
+
+      os_platform: () => {
+        stringTable.push('wasm');
+        return nanboxString(stringTable.length - 1);
+      },
+      process_argv: () => nanboxPointer(allocHandle([])),
+      process_cwd: () => {
+        stringTable.push('/');
+        return nanboxString(stringTable.length - 1);
+      },
+
+      // ===== Phase 6: Buffer/Uint8Array =====
+
+      buffer_alloc: (size) => nanboxPointer(allocHandle(new Uint8Array(size))),
+      buffer_from_string: (str, encoding) => {
+        const s = getString(str);
+        return nanboxPointer(allocHandle(new TextEncoder().encode(s)));
+      },
+      buffer_to_string: (handle, encoding) => {
+        const buf = getHandle(handle);
+        if (!buf) { stringTable.push(''); return nanboxString(stringTable.length - 1); }
+        stringTable.push(new TextDecoder().decode(buf));
+        return nanboxString(stringTable.length - 1);
+      },
+      buffer_get: (handle, idx) => {
+        const buf = getHandle(handle);
+        return buf ? buf[idx] : 0;
+      },
+      buffer_set: (handle, idx, val) => {
+        const buf = getHandle(handle);
+        if (buf) buf[idx] = val;
+      },
+      buffer_length: (handle) => {
+        const buf = getHandle(handle);
+        return buf ? buf.length : 0;
+      },
+      buffer_slice: (handle, start, end) => {
+        const buf = getHandle(handle);
+        if (!buf) return nanboxPointer(allocHandle(new Uint8Array(0)));
+        const e = isUndefined(end) ? undefined : end;
+        return nanboxPointer(allocHandle(buf.slice(start, e)));
+      },
+      buffer_concat: (arrHandle) => {
+        const arr = getHandle(arrHandle);
+        if (!arr || !Array.isArray(arr)) return nanboxPointer(allocHandle(new Uint8Array(0)));
+        const bufs = arr.map(v => {
+          const h = typeof v === 'number' ? getHandle(v) : v;
+          return h instanceof Uint8Array ? h : new Uint8Array(0);
+        });
+        const total = bufs.reduce((s, b) => s + b.length, 0);
+        const result = new Uint8Array(total);
+        let offset = 0;
+        bufs.forEach(b => { result.set(b, offset); offset += b.length; });
+        return nanboxPointer(allocHandle(result));
+      },
+      uint8array_new: (size) => nanboxPointer(allocHandle(new Uint8Array(size))),
+      uint8array_from: (val) => {
+        const v = toJsValue(val);
+        return nanboxPointer(allocHandle(Uint8Array.from(Array.isArray(v) ? v : [])));
+      },
+      uint8array_length: (handle) => {
+        const buf = getHandle(handle);
+        return buf ? buf.length : 0;
+      },
+      uint8array_get: (handle, idx) => {
+        const buf = getHandle(handle);
+        return buf ? buf[idx] : 0;
+      },
+      uint8array_set: (handle, idx, val) => {
+        const buf = getHandle(handle);
+        if (buf) buf[idx] = val;
+      },
+
+      // ===== Timers =====
+
+      set_timeout: (closureHandle, delay) => {
+        const cb = getHandle(closureHandle);
+        if (!cb || !wasmInstance) return 0;
+        const id = setTimeout(() => {
+          const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+          if (fn) fn(...cb.captures);
+        }, delay);
+        return id;
+      },
+      set_interval: (closureHandle, delay) => {
+        const cb = getHandle(closureHandle);
+        if (!cb || !wasmInstance) return 0;
+        const id = setInterval(() => {
+          const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+          if (fn) fn(...cb.captures);
+        }, delay);
+        return id;
+      },
+      clear_timeout: (id) => { clearTimeout(id); },
+      clear_interval: (id) => { clearInterval(id); },
+
+      // ===== Response properties =====
+
+      response_status: (handle) => {
+        const r = getHandle(handle);
+        return (r && typeof r.status === 'number') ? r.status : 0;
+      },
+      response_ok: (handle) => {
+        const r = getHandle(handle);
+        return (r && r.ok) ? 1 : 0;
+      },
+      response_headers_get: (handle, name) => {
+        const r = getHandle(handle);
+        if (!r || !r.headers) return u64ToF64(TAG_NULL);
+        const v = r.headers.get(getString(name));
+        if (v === null) return u64ToF64(TAG_NULL);
+        stringTable.push(v);
+        return nanboxString(stringTable.length - 1);
+      },
+      response_url: (handle) => {
+        const r = getHandle(handle);
+        if (!r || typeof r.url !== 'string') return u64ToF64(TAG_UNDEFINED);
+        stringTable.push(r.url);
+        return nanboxString(stringTable.length - 1);
+      },
+
+      // ===== Buffer extras =====
+
+      buffer_copy: (source, target, targetStart, sourceStart, sourceEnd) => {
+        const src = getHandle(source);
+        const tgt = getHandle(target);
+        if (!src || !tgt) return 0;
+        const ts = isUndefined(targetStart) ? 0 : targetStart;
+        const ss = isUndefined(sourceStart) ? 0 : sourceStart;
+        const se = isUndefined(sourceEnd) ? src.length : sourceEnd;
+        let copied = 0;
+        for (let i = ss; i < se && (ts + copied) < tgt.length; i++) {
+          tgt[ts + copied] = src[i];
+          copied++;
+        }
+        return copied;
+      },
+      buffer_write: (handle, str, offset, encoding) => {
+        const buf = getHandle(handle);
+        if (!buf) return 0;
+        const s = getString(str);
+        const encoded = new TextEncoder().encode(s);
+        const off = isUndefined(offset) ? 0 : offset;
+        let written = 0;
+        for (let i = 0; i < encoded.length && (off + i) < buf.length; i++) {
+          buf[off + i] = encoded[i];
+          written++;
+        }
+        return written;
+      },
+      buffer_equals: (handle, other) => {
+        const a = getHandle(handle);
+        const b = getHandle(other);
+        if (!a || !b) return 0;
+        if (a.length !== b.length) return 0;
+        for (let i = 0; i < a.length; i++) {
+          if (a[i] !== b[i]) return 0;
+        }
+        return 1;
+      },
+      buffer_is_buffer: (val) => {
+        if (!isPointer(val)) return 0;
+        const obj = getHandle(val);
+        return (obj instanceof Uint8Array || (obj && obj.constructor && obj.constructor.name === 'Buffer')) ? 1 : 0;
+      },
+      buffer_byte_length: (val) => {
+        if (isString(val)) return new TextEncoder().encode(getString(val)).length;
+        if (isPointer(val)) {
+          const obj = getHandle(val);
+          if (obj instanceof Uint8Array) return obj.length;
+        }
+        return 0;
+      },
+
+      // ===== Crypto extras =====
+
+      crypto_sha256: (data) => {
+        const str = getString(data);
+        const p = (typeof crypto !== 'undefined' && crypto.subtle)
+          ? crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))
+              .then(buf => { const hex = [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join(''); stringTable.push(hex); return nanboxString(stringTable.length - 1); })
+          : Promise.resolve(u64ToF64(TAG_UNDEFINED));
+        return nanboxPointer(allocHandle(p));
+      },
+      crypto_md5: (data) => {
+        // MD5 not available in Web Crypto API; return undefined
+        // Users should use SHA-256 instead
+        return u64ToF64(TAG_UNDEFINED);
+      },
+
+      // ===== Path extras =====
+
+      path_is_absolute: (str) => {
+        const s = getString(str);
+        return (s.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(s)) ? 1 : 0;
+      },
+
+      // ===== Phase 5: Async/Promise/Fetch =====
+
+      fetch_url: (urlStr) => {
+        const url = getString(urlStr);
+        const p = fetch(url);
+        return nanboxPointer(allocHandle(p));
+      },
+      fetch_with_options: (urlStr, methodVal, bodyVal, headersVal) => {
+        const url = getString(urlStr);
+        const opts = {};
+        if (!isUndefined(methodVal)) opts.method = getString(methodVal);
+        if (!isUndefined(bodyVal)) opts.body = getString(bodyVal);
+        if (isPointer(headersVal)) {
+          const h = getHandle(headersVal);
+          if (h && typeof h === 'object') opts.headers = h;
+        }
+        const p = fetch(url, opts);
+        return nanboxPointer(allocHandle(p));
+      },
+      response_json: (handle) => {
+        const resp = getHandle(handle);
+        if (!resp || typeof resp.json !== 'function') return u64ToF64(TAG_UNDEFINED);
+        const p = resp.json().then(v => fromJsValue(v));
+        return nanboxPointer(allocHandle(p));
+      },
+      response_text: (handle) => {
+        const resp = getHandle(handle);
+        if (!resp || typeof resp.text !== 'function') return u64ToF64(TAG_UNDEFINED);
+        const p = resp.text().then(v => fromJsValue(v));
+        return nanboxPointer(allocHandle(p));
+      },
+      promise_new: () => {
+        let resolve;
+        const p = new Promise(r => { resolve = r; });
+        p.__resolve = resolve;
+        return nanboxPointer(allocHandle(p));
+      },
+      promise_resolve: (handle, value) => {
+        const p = getHandle(handle);
+        if (p && p.__resolve) p.__resolve(toJsValue(value));
+      },
+      promise_then: (handle, closureHandle) => {
+        const p = getHandle(handle);
+        const cb = getHandle(closureHandle);
+        if (!p || !(p instanceof Promise)) return handle;
+        const newP = p.then(val => {
+          if (cb && wasmInstance) {
+            const fn = wasmInstance.exports.__indirect_function_table?.get(cb.funcIdx | 0);
+            if (fn) return fn(...cb.captures, fromJsValue(val));
+          }
+          return fromJsValue(val);
+        });
+        return nanboxPointer(allocHandle(newP));
+      },
+      await_promise: (val) => {
+        // In synchronous WASM context, we can't truly await.
+        // If it's not a promise handle, return as-is.
+        // If it IS a promise, return the handle (caller gets a promise handle back).
+        // True awaiting happens in JS async functions.
+        if (!isPointer(val)) return val;
+        const obj = getHandle(val);
+        if (obj instanceof Promise) {
+          // Can't await synchronously; return the promise handle
+          return val;
+        }
+        return val;
+      },
+
+      // Async function implementations (merged from generated code)
+      ...(typeof __asyncFuncImpls !== 'undefined' ? __asyncFuncImpls : {}),
     }
   };
 }
 
-// Class method/static tables
+// Class method/static/parent tables
 const classMethodTable = {};
 const classStaticTable = {};
+const classParentTable = {};
+
+// Exception state for try/catch bridge
+let tryDepth = 0;
+let currentException = null;
 
 // Boot the WASM module
 async function bootPerryWasm(wasmBase64) {

@@ -21,13 +21,20 @@ pub fn compile_modules_to_wasm_html(
     title: &str,
     minify: bool,
 ) -> Result<String> {
-    let wasm_bytes = emit::compile_to_wasm(modules);
-    let wasm_b64 = BASE64.encode(&wasm_bytes);
+    let output = emit::compile_to_wasm_with_async(modules);
+    let wasm_b64 = BASE64.encode(&output.wasm_bytes);
 
     let runtime_js = if minify {
         perry_codegen_js::minify::minify_js(WASM_RUNTIME_JS)
     } else {
         WASM_RUNTIME_JS.to_string()
+    };
+
+    // If there are async functions, inject them into the runtime
+    let async_inject = if output.async_js.is_empty() {
+        String::new()
+    } else {
+        format!("\n// === Generated async function implementations ===\nconst __asyncFuncImpls = {{\n{}\n}};\n", output.async_js)
     };
 
     let html = format!(
@@ -46,7 +53,7 @@ pub fn compile_modules_to_wasm_html(
 <body>
   <div id="perry-root"></div>
   <script>
-{runtime_js}
+{runtime_js}{async_inject}
   </script>
   <script>
 bootPerryWasm("{wasm_b64}");
@@ -55,6 +62,7 @@ bootPerryWasm("{wasm_b64}");
 </html>"#,
         title = html_escape(title),
         runtime_js = runtime_js,
+        async_inject = async_inject,
         wasm_b64 = wasm_b64,
     );
 

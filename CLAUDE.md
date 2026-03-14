@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.185
+**Current Version:** 0.2.187
 
 ## Workflow Requirements
 
@@ -152,6 +152,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.187
+- **WASM target: complete gap fixes**: class getters/setters auto-invoked via `__get_`/`__set_` prefix dispatch in `class_get_field`/`class_set_field`; bridge exception propagation (JSON.parse, RegExp, URL errors set `currentException` when inside try/catch); setTimeout/setInterval/clearTimeout/clearInterval bridges; response property bridges (`response_status`, `response_ok`, `response_headers_get`, `response_url`); `response.json()`/`response.text()` dispatch in NativeMethodCall; Buffer `copy`/`write`/`equals`/`isBuffer`/`byteLength` implemented; `crypto.sha256` via SubtleCrypto (async), `path.isAbsolute` fixed; fetch auth headers for `FetchGetWithAuth`/`FetchPostWithAuth`; expanded JS emitter (IndexGet/Set, ArrayPush, StringCoerce, Math, typeof, delete, Sequence, ExternFuncRef); NativeMethodCall unknown-method fallback to `class_call_method`; void method return fix
+
+### v0.2.186
+- **WASM target: Phases 1-6 implementation**: full class compilation (constructors, methods, static methods, getters/setters, field initializers, inheritance via `super()`, `instanceof` with parent chain walking); multi-module `ExternFuncRef` resolution via `func_name_map`; bridge-based try/catch/finally; URL/URLSearchParams (16 bridges), crypto, path, process/OS, Buffer/Uint8Array (13 bridges); async functions compiled to JS bridge (HIR→JS emitter for async bodies), fetch/promise bridges (`fetch_url`, `fetch_with_options`, `response_json/text`, `promise_new/resolve/then`, `await_promise`); 192+ runtime bridge imports
 
 ### v0.2.185
 - **WASM target: complete implementation (Phases 0-4)**: fix for-loop local scoping, modulo, bitwise ops, nullish coalescing; add handle-based object/array system with JS bridge (30+ bridge functions); closures via indirect call table with capture support; higher-order array methods (map/filter/reduce/forEach/find/sort); class instantiation, enum members, switch statements; JSON parse/stringify, Map/Set, Date, Error, RegExp, string methods (trim/split/replace/includes/etc.); 139 runtime bridge imports total; comprehensive test passing 30/30 cases including fibonacci, closures with captures, and method chaining
