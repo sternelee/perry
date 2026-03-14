@@ -15,7 +15,7 @@ bench_*
 # Named binaries from example/benchmark compilation
 worker
 controls
-main
+/main
 /cli
 counter_web
 fastify
