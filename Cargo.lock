@@ -3977,7 +3977,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "atty",
@@ -4016,7 +4016,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "cranelift",
@@ -4035,7 +4035,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-js"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-swiftui"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4053,7 +4053,7 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "serde",
  "serde_json",
@@ -4061,7 +4061,7 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4073,7 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -4092,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4104,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -4124,7 +4124,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4184,7 +4184,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4194,7 +4194,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",
@@ -4202,11 +4202,11 @@ dependencies = [
 
 [[package]]
 name = "perry-ui"
-version = "0.2.180"
+version = "0.2.181"
 
 [[package]]
 name = "perry-ui-android"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "itoa",
  "jni",
@@ -4220,7 +4220,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-gtk4"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "cairo-rs",
  "gtk4",
@@ -4231,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-ios"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "block2",
  "libc",
@@ -4245,7 +4245,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-macos"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "libc",
  "objc2",
@@ -4261,7 +4261,7 @@ version = "0.1.0"
 
 [[package]]
 name = "perry-ui-windows"
-version = "0.2.180"
+version = "0.2.181"
 dependencies = [
  "perry-runtime",
  "perry-ui",

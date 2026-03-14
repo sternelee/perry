@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.180
+**Current Version:** 0.2.181
 
 ## Workflow Requirements
 
@@ -152,6 +152,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.181
+- **Fix `RefCell already borrowed` panic in state callbacks (GH-4)**: `state_set()` now snapshots onChange/forEach callbacks into a local Vec before invoking them, releasing the RefCell borrow first — fixes crash when perry-react's `useEffect` triggers a re-render that registers new `useState` onChange handlers during callback iteration
+- **Fix fetch linker error without stdlib imports (GH-5)**: `fetch()` is a global built-in (no import needed) but `js_fetch_with_options` lives in perry-stdlib — added `uses_fetch` flag to HIR Module, set during lowering, checked in compile.rs to ensure stdlib is linked when `fetch()` is used
 
 ### v0.2.180
 - **`perry run` command**: compile and launch in one step — auto-detects entry file (perry.toml, src/main.ts, main.ts), platform-aware device detection (iOS simulators via simctl, devices via devicectl, Android via adb), interactive prompts with dialoguer when multiple targets found, forwards program args via `--`

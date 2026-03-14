@@ -93,6 +93,8 @@ pub struct LoweringContext {
     /// Module-level native instances that survive scope exits.
     /// Used for variables assigned from native calls inside functions (e.g., `mongoClient = await MongoClient.connect(uri)`).
     pub(crate) module_native_instances: Vec<(String, String, String)>,
+    /// Whether this module uses fetch() — requires perry-stdlib
+    pub(crate) uses_fetch: bool,
 }
 
 impl LoweringContext {
@@ -136,6 +138,7 @@ impl LoweringContext {
             namespace_vars: Vec::new(),
             current_namespace: None,
             module_native_instances: Vec::new(),
+            uses_fetch: false,
         }
     }
 
@@ -709,6 +712,7 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
         }
     }
 
+    module.uses_fetch = ctx.uses_fetch;
     Ok((module, ctx.next_class_id))
 }
 
@@ -4227,6 +4231,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 if args.len() >= 2 {
                                     let url = args.remove(0);
                                     let auth_header = args.remove(0);
+                                    ctx.uses_fetch = true;
                                     return Ok(Expr::FetchGetWithAuth {
                                         url: Box::new(url),
                                         auth_header: Box::new(auth_header),
@@ -4242,6 +4247,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     let url = args.remove(0);
                                     let auth_header = args.remove(0);
                                     let body = args.remove(0);
+                                    ctx.uses_fetch = true;
                                     return Ok(Expr::FetchPostWithAuth {
                                         url: Box::new(url),
                                         auth_header: Box::new(auth_header),
@@ -4328,6 +4334,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             }
 
                                             // Create a FetchWithOptions expression
+                                            ctx.uses_fetch = true;
                                             return Ok(Expr::FetchWithOptions {
                                                 url: Box::new(url),
                                                 method: Box::new(method),
@@ -4339,6 +4346,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 }
 
                                 // Simple fetch(url) with no options - use GET
+                                ctx.uses_fetch = true;
                                 return Ok(Expr::FetchWithOptions {
                                     url: Box::new(url),
                                     method: Box::new(Expr::String("GET".to_string())),

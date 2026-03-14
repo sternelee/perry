@@ -191,6 +191,8 @@ pub struct Module {
     pub exported_functions: Vec<(String, FuncId)>,
     /// Widget extension declarations (perry/widget)
     pub widgets: Vec<WidgetDecl>,
+    /// Whether this module uses fetch() — requires perry-stdlib for js_fetch_with_options
+    pub uses_fetch: bool,
 }
 
 /// A widget extension declaration (WidgetKit on iOS, Glance on Android)
@@ -1443,6 +1445,7 @@ impl Module {
             exported_objects: Vec::new(),
             exported_functions: Vec::new(),
             widgets: Vec::new(),
+            uses_fetch: false,
         }
     }
 }

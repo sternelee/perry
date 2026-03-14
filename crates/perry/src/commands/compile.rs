@@ -1465,6 +1465,11 @@ fn collect_modules(
         }
     }
 
+    // Detect fetch() usage — js_fetch_with_options lives in perry-stdlib
+    if !ctx.needs_stdlib && hir_module.uses_fetch {
+        ctx.needs_stdlib = true;
+    }
+
     // Detect ioredis usage (detected by class name, not import path)
     if !ctx.needs_stdlib {
         for (_, module_name, _) in &hir_module.exported_native_instances {

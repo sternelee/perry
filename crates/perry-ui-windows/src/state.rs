@@ -194,24 +194,35 @@ pub fn state_set(handle: i64, value: f64) {
         }
     });
 
-    // Update forEach bindings (dynamic lists)
-    FOR_EACH_BINDINGS.with(|b| {
-        if let Some(bindings) = b.borrow().get(&handle) {
-            for binding in bindings {
-                widgets::clear_children(binding.container_handle);
-                render_for_each(binding.container_handle, binding.render_closure, value);
-            }
-        }
+    // Update forEach bindings (dynamic lists).
+    // Clone into local Vec to release borrow before calling user closures
+    // (render_for_each invokes js_closure_call1 which could re-enter state code).
+    let foreach_snapshot: Vec<(i64, f64)> = FOR_EACH_BINDINGS.with(|b| {
+        b.borrow()
+            .get(&handle)
+            .map(|bindings| bindings.iter().map(|b| (b.container_handle, b.render_closure)).collect())
+            .unwrap_or_default()
     });
+    for (container, closure) in foreach_snapshot {
+        widgets::clear_children(container);
+        render_for_each(container, closure, value);
+    }
 
-    // Invoke onChange callbacks
-    ON_CHANGE_BINDINGS.with(|b| {
-        if let Some(bindings) = b.borrow().get(&handle) {
-            for binding in bindings {
-                unsafe { js_closure_call1(binding.callback_ptr, value) };
-            }
-        }
+    // Invoke onChange callbacks.
+    // Clone callbacks into a local Vec before invoking, so the immutable borrow
+    // on ON_CHANGE_BINDINGS is released before user code runs. Without this,
+    // a callback that registers new onChange handlers (e.g. perry-react's
+    // _scheduleRerender -> re-render -> new useState -> sig.onChange) would try
+    // borrow_mut while the immutable borrow is still held -> RefCell panic.
+    let onchange_snapshot: Vec<*const u8> = ON_CHANGE_BINDINGS.with(|b| {
+        b.borrow()
+            .get(&handle)
+            .map(|bindings| bindings.iter().map(|b| b.callback_ptr).collect())
+            .unwrap_or_default()
     });
+    for callback_ptr in onchange_snapshot {
+        unsafe { js_closure_call1(callback_ptr, value) };
+    }
 
     // Update textfield bindings (state → textfield direction)
     TEXTFIELD_BINDINGS.with(|b| {
