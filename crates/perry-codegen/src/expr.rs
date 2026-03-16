@@ -4369,8 +4369,9 @@ pub(crate) fn compile_expr(
                 let converted_val = if var_type != val_type {
                     // Types don't match - convert
                     if var_type == types::F64 && val_type == types::I64 {
-                        let result = builder.ins().bitcast(types::F64, MemFlags::new(), val);
-                        result
+                        // NaN-box with POINTER_TAG so closures/objects stored in F64 locals
+                        // retain their type identity (typeof returns 'object', not 'number')
+                        inline_nanbox_pointer(builder, val)
                     } else if var_type == types::I64 && val_type == types::F64 {
                         let result = ensure_i64(builder, val);
                         result

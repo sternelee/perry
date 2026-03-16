@@ -1506,14 +1506,6 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
         key_ptr,
     );
 
-    let result_bits = result.to_bits();
-    let result_tag = result_bits >> 48;
-    if property_name == "deposit" || property_name == "totalSupply" || property_name == "depositEth" {
-        eprintln!("[get_prop] '{}' result_bits=0x{:016x} tag=0x{:04x} is_ptr={} is_closure={}",
-            property_name, result_bits, result_tag,
-            result_tag == 0x7FFD, crate::closure::is_closure_ptr((result_bits & 0x0000_FFFF_FFFF_FFFF) as usize));
-    }
-
     result
 }
 
