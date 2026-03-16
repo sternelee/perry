@@ -1166,7 +1166,7 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 }
                 let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
                 let mutable_captures: Vec<LocalId> = captures.iter()
-                    .filter(|id| assigned_set.contains(id))
+                    .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                     .copied()
                     .collect();
 
@@ -1205,51 +1205,40 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             result.push(Stmt::Continue);
         }
         ast::Stmt::For(for_stmt) => {
-            // Lower the init part (can be a variable declaration or expression)
             let init = if let Some(init) = &for_stmt.init {
                 match init {
                     ast::VarDeclOrExpr::VarDecl(var_decl) => {
-                        // Emit extra declarators (index > 0) as separate Let statements before the loop
-                        for decl in var_decl.decls.iter().skip(1) {
-                            let name = get_binding_name(&decl.name)?;
-                            let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
-                            let id = ctx.define_local(name.clone(), Type::Any);
-                            result.push(Stmt::Let {
-                                id,
-                                name,
-                                ty: Type::Any,
-                                mutable: true,
-                                init: init_expr,
-                            });
-                        }
-                        // Keep the first declarator as the for-loop init
-                        if let Some(decl) = var_decl.decls.first() {
-                            let name = get_binding_name(&decl.name)?;
-                            let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
-                            let id = ctx.define_local(name.clone(), Type::Any);
-                            Some(Box::new(Stmt::Let {
-                                id,
-                                name,
-                                ty: Type::Any,
-                                mutable: true,
-                                init: init_expr,
-                            }))
-                        } else {
+                        let is_var = var_decl.kind == ast::VarDeclKind::Var;
+                        if is_var {
+                            for decl in var_decl.decls.iter() {
+                                let name = get_binding_name(&decl.name)?;
+                                let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                                let id = ctx.define_local(name.clone(), Type::Any);
+                                ctx.var_hoisted_ids.insert(id);
+                                result.push(Stmt::Let { id, name, ty: Type::Any, mutable: true, init: init_expr });
+                            }
                             None
+                        } else {
+                            for decl in var_decl.decls.iter().skip(1) {
+                                let name = get_binding_name(&decl.name)?;
+                                let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                                let id = ctx.define_local(name.clone(), Type::Any);
+                                result.push(Stmt::Let { id, name, ty: Type::Any, mutable: true, init: init_expr });
+                            }
+                            if let Some(decl) = var_decl.decls.first() {
+                                let name = get_binding_name(&decl.name)?;
+                                let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                                let id = ctx.define_local(name.clone(), Type::Any);
+                                Some(Box::new(Stmt::Let { id, name, ty: Type::Any, mutable: true, init: init_expr }))
+                            } else { None }
                         }
                     }
-                    ast::VarDeclOrExpr::Expr(expr) => {
-                        Some(Box::new(Stmt::Expr(lower_expr(ctx, expr)?)))
-                    }
+                    ast::VarDeclOrExpr::Expr(expr) => { Some(Box::new(Stmt::Expr(lower_expr(ctx, expr)?))) }
                 }
-            } else {
-                None
-            };
-
+            } else { None };
             let condition = for_stmt.test.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let update = for_stmt.update.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let body = lower_body_stmt(ctx, &for_stmt.body)?;
-
             result.push(Stmt::For { init, condition, update, body });
         }
         ast::Stmt::Try(try_stmt) => {

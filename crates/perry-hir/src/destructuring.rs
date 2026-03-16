@@ -707,6 +707,21 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                 ty = Type::Named("URLSearchParams".to_string());
                             } else if class_name == "Uint8Array" || class_name == "Buffer" {
                                 ty = Type::Named("Uint8Array".to_string());
+                            } else if ctx.classes.iter().any(|(n, _)| n == class_name) {
+                                // User-defined class: infer type from new ClassName(...)
+                                let type_args: Vec<Type> = new_expr.type_args.as_ref()
+                                    .map(|ta| ta.params.iter()
+                                        .map(|t| extract_ts_type(t))
+                                        .collect())
+                                    .unwrap_or_default();
+                                if type_args.is_empty() {
+                                    ty = Type::Named(class_name.to_string());
+                                } else {
+                                    ty = Type::Generic {
+                                        base: class_name.to_string(),
+                                        type_args,
+                                    };
+                                }
                             }
                         }
                     }

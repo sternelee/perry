@@ -61,6 +61,7 @@ impl crate::codegen::Compiler {
 
         // Collect all variables that will be mutably captured by closures (before borrowing self.ctx)
         let all_boxed_vars = self.collect_mutable_captures_from_stmts(stmts);
+        // Debug: all_boxed and modvar_keys
         // Module-level variables use global slots as their box pointer (handled after
         // data_id assignment below). Only pass non-module-level vars for heap-boxing in Stmt::Let.
         let boxed_vars: std::collections::HashSet<LocalId> = all_boxed_vars.iter()

@@ -2288,10 +2288,9 @@ pub(crate) fn compile_stmt(
                 // Check for pattern: Compare { op: Lt, left: LocalGet(i), right: ... }
                 if let Expr::Compare { left, op: CompareOp::Lt, right } = cond {
                     if let Expr::LocalGet(index_id) = left.as_ref() {
+                        let is_boxed_var = locals.get(index_id).map(|i| i.is_boxed).unwrap_or(false);
                         let idx_var = locals.get(index_id).map(|i| i.var);
-
-                        // Try to get the limit as i32
-                        let limit_i32: Option<Value> = match right.as_ref() {
+                        let limit_i32: Option<Value> = if is_boxed_var { None } else { match right.as_ref() {
                             // Pattern 1: i < arr.length
                             Expr::PropertyGet { object, property } if property == "length" => {
                                 if let Expr::LocalGet(array_id) = object.as_ref() {
@@ -2340,7 +2339,7 @@ pub(crate) fn compile_stmt(
                                 } else { None }
                             }
                             _ => None,
-                        };
+                        } };
 
                         if let (Some(idx_v), Some(limit_val)) = (idx_var, limit_i32) {
                             // Check if the index variable is already i32

@@ -95,6 +95,7 @@ pub struct LoweringContext {
     pub(crate) module_native_instances: Vec<(String, String, String)>,
     /// Whether this module uses fetch() — requires perry-stdlib
     pub(crate) uses_fetch: bool,
+    pub(crate) var_hoisted_ids: HashSet<LocalId>,
 }
 
 impl LoweringContext {
@@ -139,6 +140,7 @@ impl LoweringContext {
             current_namespace: None,
             module_native_instances: Vec::new(),
             uses_fetch: false,
+            var_hoisted_ids: HashSet::new(),
         }
     }
 
@@ -1655,51 +1657,40 @@ fn lower_stmt(
             module.init.push(Stmt::While { condition, body });
         }
         ast::Stmt::For(for_stmt) => {
-            // Lower the init part (can be a variable declaration or expression)
             let init = if let Some(init) = &for_stmt.init {
                 match init {
                     ast::VarDeclOrExpr::VarDecl(var_decl) => {
-                        // Emit extra declarators (index > 0) as separate Let statements before the loop
-                        for decl in var_decl.decls.iter().skip(1) {
-                            let name = get_binding_name(&decl.name)?;
-                            let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
-                            let id = ctx.define_local(name.clone(), Type::Any);
-                            module.init.push(Stmt::Let {
-                                id,
-                                name,
-                                ty: Type::Any,
-                                mutable: true,
-                                init: init_expr,
-                            });
-                        }
-                        // Keep the first declarator as the for-loop init
-                        if let Some(decl) = var_decl.decls.first() {
-                            let name = get_binding_name(&decl.name)?;
-                            let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
-                            let id = ctx.define_local(name.clone(), Type::Any);
-                            Some(Box::new(Stmt::Let {
-                                id,
-                                name,
-                                ty: Type::Any,
-                                mutable: true,
-                                init: init_expr,
-                            }))
-                        } else {
+                        let is_var = var_decl.kind == ast::VarDeclKind::Var;
+                        if is_var {
+                            for decl in var_decl.decls.iter() {
+                                let name = get_binding_name(&decl.name)?;
+                                let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                                let id = ctx.define_local(name.clone(), Type::Any);
+                                ctx.var_hoisted_ids.insert(id);
+                                module.init.push(Stmt::Let { id, name, ty: Type::Any, mutable: true, init: init_expr });
+                            }
                             None
+                        } else {
+                            for decl in var_decl.decls.iter().skip(1) {
+                                let name = get_binding_name(&decl.name)?;
+                                let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                                let id = ctx.define_local(name.clone(), Type::Any);
+                                module.init.push(Stmt::Let { id, name, ty: Type::Any, mutable: true, init: init_expr });
+                            }
+                            if let Some(decl) = var_decl.decls.first() {
+                                let name = get_binding_name(&decl.name)?;
+                                let init_expr = decl.init.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
+                                let id = ctx.define_local(name.clone(), Type::Any);
+                                Some(Box::new(Stmt::Let { id, name, ty: Type::Any, mutable: true, init: init_expr }))
+                            } else { None }
                         }
                     }
-                    ast::VarDeclOrExpr::Expr(expr) => {
-                        Some(Box::new(Stmt::Expr(lower_expr(ctx, expr)?)))
-                    }
+                    ast::VarDeclOrExpr::Expr(expr) => { Some(Box::new(Stmt::Expr(lower_expr(ctx, expr)?))) }
                 }
-            } else {
-                None
-            };
-
+            } else { None };
             let condition = for_stmt.test.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let update = for_stmt.update.as_ref().map(|e| lower_expr(ctx, e)).transpose()?;
             let body = lower_body_stmt(ctx, &for_stmt.body)?;
-
             module.init.push(Stmt::For { init, condition, update, body });
         }
         ast::Stmt::Block(block) => {
@@ -3413,7 +3404,11 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             }
                                         }
                                         "map" => {
-                                            if args.len() >= 1 {
+                                            // Only use ArrayMap if receiver is not a class instance
+                                            let is_class_instance = ctx.lookup_local_type(&arr_name)
+                                                .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
+                                                .unwrap_or(false);
+                                            if !is_class_instance && args.len() >= 1 {
                                                 return Ok(Expr::ArrayMap {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(args.into_iter().next().unwrap()),
@@ -3968,11 +3963,21 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         });
                                     }
                                     "map" if args.len() >= 1 => {
-                                        let array_expr = lower_expr(ctx, &member.obj)?;
-                                        return Ok(Expr::ArrayMap {
-                                            array: Box::new(array_expr),
-                                            callback: Box::new(args.into_iter().next().unwrap()),
-                                        });
+                                        // Skip if receiver is a known class instance (e.g., Box.map())
+                                        let is_class_instance = if let ast::Expr::Ident(ident) = member.obj.as_ref() {
+                                            ctx.lookup_local_type(&ident.sym.to_string())
+                                                .map(|ty| matches!(ty, Type::Named(_) | Type::Generic { .. }) && !matches!(ty, Type::Array(_)))
+                                                .unwrap_or(false)
+                                        } else {
+                                            false
+                                        };
+                                        if !is_class_instance {
+                                            let array_expr = lower_expr(ctx, &member.obj)?;
+                                            return Ok(Expr::ArrayMap {
+                                                array: Box::new(array_expr),
+                                                callback: Box::new(args.into_iter().next().unwrap()),
+                                            });
+                                        }
                                     }
                                     "filter" if args.len() >= 1 => {
                                         let array_expr = lower_expr(ctx, &member.obj)?;
@@ -5293,7 +5298,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     }
                                     let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
                                     let mutable_captures: Vec<LocalId> = captures.iter()
-                                        .filter(|id| assigned_set.contains(id))
+                                        .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                                         .copied()
                                         .collect();
                                     let captures_this = closure_uses_this(&body);
@@ -5581,7 +5586,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             }
             let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
             let mutable_captures: Vec<LocalId> = captures.iter()
-                .filter(|id| assigned_set.contains(id))
+                .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                 .copied()
                 .collect();
 
@@ -5688,7 +5693,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             }
             let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
             let mutable_captures: Vec<LocalId> = captures.iter()
-                .filter(|id| assigned_set.contains(id))
+                .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                 .copied()
                 .collect();
 
