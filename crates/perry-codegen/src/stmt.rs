@@ -1313,7 +1313,13 @@ pub(crate) fn compile_stmt(
             } else {
                 None
             };
-            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id, class_ref_name });
+            // Extract closure func_id if init is a Closure expression (for rest param lookup)
+            let closure_func_id = if let Some(Expr::Closure { func_id: cfid, .. }) = init {
+                Some(*cfid)
+            } else {
+                None
+            };
+            locals.insert(*id, LocalInfo { var: final_var, name: Some(var_name.clone()), class_name, type_args, is_pointer, is_array, is_string, is_bigint, is_closure, closure_func_id, is_boxed: is_boxed_var, is_map, is_set, is_buffer, is_event_emitter, is_union, is_mixed_array, is_integer, is_integer_array: false, is_i32: should_use_i32, i32_shadow, bounded_by_array: None, bounded_by_constant: None, scalar_fields: None, squared_cache: None, product_cache: None, cached_array_ptr: None, const_value, hoisted_element_loads: None, hoisted_i32_products: None, module_var_data_id: existing_data_id, class_ref_name });
 
             // If this variable has a module-level data global (promoted for class capture),
             // write the initial value to the data global so class methods can read it.
@@ -2928,7 +2934,7 @@ pub(crate) fn compile_stmt(
                         is_array: false,
                         is_string: false,
                         is_bigint: false,
-                        is_closure: false,
+                        is_closure: false, closure_func_id: None,
                         is_boxed: false,
                         is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,
@@ -3983,7 +3989,7 @@ pub(crate) fn compile_stmt(
                         is_array: false,
                         is_string: false,
                         is_bigint: false,
-                        is_closure: false,
+                        is_closure: false, closure_func_id: None,
                         is_boxed: false,
                         // Caught exceptions can be any type, so mark as union for runtime type checking
                         is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: true,

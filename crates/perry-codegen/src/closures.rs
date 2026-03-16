@@ -1300,8 +1300,12 @@ impl crate::codegen::Compiler {
         // First parameter is closure pointer
         self.ctx.func.signature.params.push(AbiParam::new(types::I64));
 
-        for _ in params {
+        for (i, param) in params.iter().enumerate() {
             self.ctx.func.signature.params.push(AbiParam::new(types::F64));
+            // Track rest parameter index for closures (same as functions.rs does for standalone functions)
+            if param.is_rest {
+                self.func_rest_param_index.insert(func_id, i);
+            }
         }
         // All closures return F64 for consistent ABI with js_closure_call* functions
         // Async closures bitcast Promise pointer to F64 before returning
@@ -1398,7 +1402,7 @@ impl crate::codegen::Compiler {
                     is_array,
                     is_string,
                     is_bigint,
-                    is_closure,
+                    is_closure, closure_func_id: None,
                     is_boxed: false,
                     is_map, is_set, is_buffer: false, is_event_emitter: false, is_union: is_union_type,
                     is_mixed_array: false,
@@ -1474,7 +1478,7 @@ impl crate::codegen::Compiler {
                         is_array: orig.map(|o| o.is_array).unwrap_or(false),
                         is_string: orig.map(|o| o.is_string).unwrap_or(false),
                         is_bigint: orig.map(|o| o.is_bigint).unwrap_or(false),
-                        is_closure: orig.map(|o| o.is_closure).unwrap_or(false),
+                        is_closure: orig.map(|o| o.is_closure).unwrap_or(false), closure_func_id: orig.and_then(|o| o.closure_func_id),
                         is_boxed: true,
                         is_map: orig.map(|o| o.is_map).unwrap_or(false),
                         is_set: orig.map(|o| o.is_set).unwrap_or(false),
@@ -1510,7 +1514,7 @@ impl crate::codegen::Compiler {
                         is_array: orig.map(|o| o.is_array).unwrap_or(false),
                         is_string: orig.map(|o| o.is_string).unwrap_or(false),
                         is_bigint: orig.map(|o| o.is_bigint).unwrap_or(false),
-                        is_closure: orig.map(|o| o.is_closure).unwrap_or(false),
+                        is_closure: orig.map(|o| o.is_closure).unwrap_or(false), closure_func_id: orig.and_then(|o| o.closure_func_id),
                         is_boxed: false,
                         is_map: orig.map(|o| o.is_map).unwrap_or(false),
                         is_set: orig.map(|o| o.is_set).unwrap_or(false),
@@ -1564,7 +1568,7 @@ impl crate::codegen::Compiler {
                         is_array: false,
                         is_string: false,
                         is_bigint: false,
-                        is_closure: false,
+                        is_closure: false, closure_func_id: None,
                         is_boxed: false,
                         is_map: false, is_set: false, is_buffer: false, is_event_emitter: false, is_union: false,
                         is_mixed_array: false,

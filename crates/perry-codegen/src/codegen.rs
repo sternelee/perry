@@ -121,6 +121,8 @@ pub struct Compiler {
     /// Compile-time feature flags. Each entry becomes a `__feature_NAME__` constant (1).
     /// Missing features default to 0. Used for dead-code elimination via `if (__plugins__)`.
     pub(crate) enabled_features: HashSet<String>,
+    /// Whether geisterhand is enabled (starts HTTP server on startup)
+    pub(crate) needs_geisterhand: bool,
 }
 
 impl Compiler {
@@ -252,6 +254,7 @@ impl Compiler {
             native_library_functions: Vec::new(),
             compile_target,
             enabled_features: HashSet::new(),
+            needs_geisterhand: false,
         })
     }
 
@@ -297,6 +300,11 @@ impl Compiler {
         ENABLED_FEATURES.with(|f| {
             *f.borrow_mut() = self.enabled_features.clone();
         });
+    }
+
+    /// Set whether geisterhand (in-process input fuzzer) is enabled
+    pub fn set_needs_geisterhand(&mut self, needs: bool) {
+        self.needs_geisterhand = needs;
     }
 
     /// Register a bundled extension for static plugin registration in the entry module init.
@@ -915,7 +923,7 @@ impl Compiler {
                             false
                         }
                     },
-                    is_closure,
+                    is_closure, closure_func_id: None,
                     is_boxed: false,
                     is_map: matches!(init, Some(Expr::MapNew)) || is_map_from_type,
                     is_set: matches!(init, Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_))) || is_set_from_type,
@@ -1182,6 +1190,12 @@ impl Compiler {
         for (func_id, params, _body, captures, _mutable_captures, captures_this, _enclosing_class, is_async) in &deduped_closures {
             let capture_count = if *captures_this { captures.len() + 1 } else { captures.len() };
             self.declare_closure(*func_id, params.len(), capture_count, *is_async)?;
+            // Track rest parameter index for closures (before code generation so callers can see it)
+            for (i, param) in params.iter().enumerate() {
+                if param.is_rest {
+                    self.func_rest_param_index.insert(*func_id, i);
+                }
+            }
         }
 
         // Collect FuncRef expressions that need closure-compatible wrappers
@@ -1274,7 +1288,7 @@ impl Compiler {
                         is_array,
                         is_string,
                         is_bigint,
-                        is_closure,
+                        is_closure, closure_func_id: None,
                         is_boxed: false,
                         is_map, is_set,
                         is_buffer: false, is_event_emitter: false, is_union,

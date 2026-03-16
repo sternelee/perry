@@ -29,6 +29,8 @@ pub(crate) struct LocalInfo {
     pub is_bigint: bool,
     /// Is this a closure?
     pub is_closure: bool,
+    /// If this is a closure, its HIR func_id (for rest param lookup etc.)
+    pub closure_func_id: Option<u32>,
     /// Is this a boxed mutable capture? (stored as box pointer)
     pub is_boxed: bool,
     /// Is this a Map?
