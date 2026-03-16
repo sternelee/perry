@@ -4100,6 +4100,16 @@ impl Compiler {
             self.extern_funcs.insert("js_buffer_write".to_string(), func_id);
         }
 
+        // js_buffer_set_from(target: i64, source: i64, offset: i32) -> void
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // target buffer ptr
+            sig.params.push(AbiParam::new(types::I64)); // source buffer ptr
+            sig.params.push(AbiParam::new(types::I32)); // offset
+            let func_id = self.module.declare_function("js_buffer_set_from", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_buffer_set_from".to_string(), func_id);
+        }
+
         // js_buffer_fill(buf_ptr: i64, value: i32) -> i64
         {
             let mut sig = self.module.make_signature();
