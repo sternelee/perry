@@ -4145,41 +4145,48 @@ pub(crate) fn compile_expr(
                             // Use js_string_append for in-place appending
 
                             // Helper to check if expression is a string
-                            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::StringFromCharCode(_) => true,
                                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                                     Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                        is_string_operand(left, locals) || is_string_operand(right, locals)
+                                        is_string_operand(left, locals, frt) || is_string_operand(right, locals, frt)
                                     }
                                     Expr::FsReadFileSync(_) |
                                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                                     Expr::Conditional { then_expr, else_expr, .. } => {
-                                        is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
+                                        is_string_operand(then_expr, locals, frt) && is_string_operand(else_expr, locals, frt)
                                     }
                                     Expr::Call { callee, .. } => {
+                                        // Check if calling a function that returns string
+                                        match callee.as_ref() {
+                                            Expr::FuncRef(id) => {
+                                                if matches!(frt.get(id), Some(perry_types::Type::String)) {
+                                                    return true;
+                                                }
+                                            }
+                                            Expr::ExternFuncRef { return_type, name, .. } => {
+                                                if matches!(return_type, perry_types::Type::String) {
+                                                    return true;
+                                                }
+                                                let is_imported_string = IMPORTED_FUNC_RETURN_TYPES.with(|p| {
+                                                    matches!(p.borrow().get(name), Some(perry_types::Type::String))
+                                                });
+                                                if is_imported_string { return true; }
+                                            }
+                                            _ => {}
+                                        }
                                         if let Expr::PropertyGet { object, property } = callee.as_ref() {
                                             if property == "slice" || property == "substring" || property == "trim"
                                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
-                                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
+                                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt"
+                                               || property == "toString" || property == "toFixed" || property == "toLocaleString" {
                                                 if let Expr::LocalGet(id) = object.as_ref() {
                                                     return locals.get(id).map(|i| i.is_string).unwrap_or(true);
                                                 }
                                                 return true;
-                                            }
-                                            // toString/toFixed always return strings, even on non-string objects
-                                            // But they return NaN-boxed strings, so mark as string only when
-                                            // on a string-typed object (otherwise let union path handle NaN-boxing)
-                                            if property == "toString" || property == "toFixed" || property == "toLocaleString" {
-                                                if let Expr::LocalGet(id) = object.as_ref() {
-                                                    if locals.get(id).map(|i| i.is_string).unwrap_or(false) {
-                                                        return true;
-                                                    }
-                                                }
-                                                // Non-string object.toString() — returns NaN-boxed, handle as union
-                                                return false;
                                             }
                                         }
                                         false
@@ -4208,7 +4215,7 @@ pub(crate) fn compile_expr(
 
                             // Convert to string pointer if needed
                             let rhs_type = builder.func.dfg.value_type(rhs_val);
-                            let rhs_ptr = if is_string_operand(right, locals) || rhs_type == types::I64 {
+                            let rhs_ptr = if is_string_operand(right, locals, func_hir_return_types) || rhs_type == types::I64 {
                                 // String operand or already a raw i64 pointer (e.g., from function call returning string)
                                 if rhs_type == types::I64 {
                                     // Already a raw pointer
@@ -4611,7 +4618,7 @@ pub(crate) fn compile_expr(
 
             // Check if this is string concatenation (recursively for nested binary expressions)
             // Note: EnvGet is NOT included because it can return undefined (handled as union type)
-            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
@@ -4620,19 +4627,38 @@ pub(crate) fn compile_expr(
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
                     Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) | Expr::JsonStringify(_) => true,
                     Expr::Binary { op: BinaryOp::Add, left, right } => {
-                        is_string_operand(left, locals) || is_string_operand(right, locals)
+                        is_string_operand(left, locals, frt) || is_string_operand(right, locals, frt)
                     }
                     // Conditional expressions with string branches (from template literals)
                     Expr::Conditional { then_expr, else_expr, .. } => {
-                        is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
+                        is_string_operand(then_expr, locals, frt) && is_string_operand(else_expr, locals, frt)
                     }
-                    // String method calls (substring, slice, trim, etc.)
+                    // Function calls — check return type and string methods
                     Expr::Call { callee, .. } => {
+                        // Check if calling a function that returns string
+                        match callee.as_ref() {
+                            Expr::FuncRef(id) => {
+                                if matches!(frt.get(id), Some(perry_types::Type::String)) {
+                                    return true;
+                                }
+                            }
+                            Expr::ExternFuncRef { return_type, name, .. } => {
+                                if matches!(return_type, perry_types::Type::String) {
+                                    return true;
+                                }
+                                let is_imported_string = IMPORTED_FUNC_RETURN_TYPES.with(|p| {
+                                    matches!(p.borrow().get(name), Some(perry_types::Type::String))
+                                });
+                                if is_imported_string { return true; }
+                            }
+                            _ => {}
+                        }
+                        // String method calls
                         if let Expr::PropertyGet { property, .. } = callee.as_ref() {
-                            // These methods only exist on strings and always return strings
                             if property == "slice" || property == "substring" || property == "trim"
                                || property == "toLowerCase" || property == "toUpperCase" || property == "replace"
-                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt" {
+                               || property == "padStart" || property == "padEnd" || property == "repeat" || property == "charAt"
+                               || property == "toString" || property == "toFixed" || property == "toLocaleString" {
                                 return true;
                             }
                         }
@@ -4643,10 +4669,10 @@ pub(crate) fn compile_expr(
             }
 
             // Check if an expression produces a NaN-boxed string (from Conditional)
-            fn is_nanboxed_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+            fn is_nanboxed_string_operand(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
                 match expr {
                     Expr::Conditional { then_expr, else_expr, .. } => {
-                        is_string_operand(then_expr, locals) && is_string_operand(else_expr, locals)
+                        is_string_operand(then_expr, locals, frt) && is_string_operand(else_expr, locals, frt)
                     }
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union && i.is_string).unwrap_or(false),
                     _ => false,
@@ -4675,10 +4701,10 @@ pub(crate) fn compile_expr(
                 }
             }
 
-            let is_string_left = is_string_operand(left, locals);
-            let is_string_right = is_string_operand(right, locals);
-            let is_nanboxed_left = is_nanboxed_string_operand(left, locals);
-            let is_nanboxed_right = is_nanboxed_string_operand(right, locals);
+            let is_string_left = is_string_operand(left, locals, func_hir_return_types);
+            let is_string_right = is_string_operand(right, locals, func_hir_return_types);
+            let is_nanboxed_left = is_nanboxed_string_operand(left, locals, func_hir_return_types);
+            let is_nanboxed_right = is_nanboxed_string_operand(right, locals, func_hir_return_types);
             let is_union_left = is_union_operand(left, locals);
             let is_union_right = is_union_operand(right, locals);
 
@@ -6464,7 +6490,7 @@ pub(crate) fn compile_expr(
                         if args.len() > 1 {
                             if let Some(spread_func) = extern_funcs.get("js_console_log_spread") {
                                 // Helper to check if an expression produces a string
-                                fn is_string_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>) -> bool {
+                                fn is_string_expr_for_multi(expr: &Expr, locals: &BTreeMap<LocalId, LocalInfo>, frt: &BTreeMap<u32, perry_types::Type>) -> bool {
                                     match expr {
                                         Expr::String(_) => true,
                                         Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
@@ -6479,19 +6505,39 @@ pub(crate) fn compile_expr(
                                         // Prioritize is_string over is_union (is_union can be set for Any-typed vars)
                                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                                         Expr::Binary { op: BinaryOp::Add, left, right } => {
-                                            is_string_expr_for_multi(left, locals) || is_string_expr_for_multi(right, locals)
+                                            is_string_expr_for_multi(left, locals, frt) || is_string_expr_for_multi(right, locals, frt)
                                         }
-                                        // String method calls on string variables
+                                        // Function calls — check return type and string methods
                                         Expr::Call { callee, .. } => {
+                                            // Check function return type
+                                            match callee.as_ref() {
+                                                Expr::FuncRef(id) => {
+                                                    if matches!(frt.get(id), Some(perry_types::Type::String)) {
+                                                        return true;
+                                                    }
+                                                }
+                                                Expr::ExternFuncRef { return_type, name, .. } => {
+                                                    if matches!(return_type, perry_types::Type::String) {
+                                                        return true;
+                                                    }
+                                                    let is_imported_string = IMPORTED_FUNC_RETURN_TYPES.with(|p| {
+                                                        matches!(p.borrow().get(name), Some(perry_types::Type::String))
+                                                    });
+                                                    if is_imported_string { return true; }
+                                                }
+                                                _ => {}
+                                            }
+                                            // String method calls
                                             if let Expr::PropertyGet { object, property } = callee.as_ref() {
                                                 if property == "slice" || property == "substring" || property == "trim"
                                                     || property == "toLowerCase" || property == "toUpperCase"
                                                     || property == "charAt" || property == "padStart" || property == "padEnd"
-                                                    || property == "repeat" || property == "replace" {
-                                                    // Check if object is a string
+                                                    || property == "repeat" || property == "replace"
+                                                    || property == "toString" || property == "toFixed" || property == "toLocaleString" {
                                                     if let Expr::LocalGet(id) = object.as_ref() {
-                                                        return locals.get(id).map(|i| i.is_string).unwrap_or(false);
+                                                        return locals.get(id).map(|i| i.is_string).unwrap_or(true);
                                                     }
+                                                    return true;
                                                 }
                                             }
                                             false
@@ -6579,7 +6625,7 @@ pub(crate) fn compile_expr(
                                     let val = arg_vals[i];
 
                                     // Determine how to encode this value for the spread array
-                                    let val_f64 = if is_string_expr_for_multi(arg, locals) {
+                                    let val_f64 = if is_string_expr_for_multi(arg, locals, func_hir_return_types) {
                                         // Raw string - needs NaN-boxing
                                         // The value might be i64 (from closure params) or f64 (from string literals)
                                         let ptr = ensure_i64(builder, val);
