@@ -822,11 +822,13 @@ impl crate::codegen::Compiler {
 
             let i64_func_ref = self.module.declare_func_in_func(i64_func_id, builder.func);
 
-            // Convert f64 params to i64 via fcvt_to_sint
+            // Convert f64 params to i64 via bitcast (NOT fcvt_to_sint which destroys NaN-boxed values)
+            // NaN-boxed strings/pointers/bigints are IEEE NaN values — fcvt_to_sint_sat converts
+            // NaN to 0, destroying the pointer. Bitcast preserves the raw bits.
             let mut i64_args = Vec::new();
             for i in 0..func.params.len() {
                 let f64_val = builder.block_params(entry_block)[i];
-                let i64_val = builder.ins().fcvt_to_sint_sat(types::I64, f64_val);
+                let i64_val = builder.ins().bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), f64_val);
                 i64_args.push(i64_val);
             }
 
@@ -834,8 +836,8 @@ impl crate::codegen::Compiler {
             let call = builder.ins().call(i64_func_ref, &i64_args);
             let i64_result = builder.inst_results(call)[0];
 
-            // Convert i64 result back to f64
-            let f64_result = builder.ins().fcvt_from_sint(types::F64, i64_result);
+            // Convert i64 result back to f64 via bitcast (preserve NaN-boxing)
+            let f64_result = builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), i64_result);
             builder.ins().return_(&[f64_result]);
 
             builder.finalize();

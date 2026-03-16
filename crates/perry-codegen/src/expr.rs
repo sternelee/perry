@@ -5963,14 +5963,19 @@ pub(crate) fn compile_expr(
                     let lhs_type = builder.func.dfg.value_type(lhs);
 
                     // Check if lhs is null/undefined
-                    // For i64: null/undefined is 0
-                    // For f64: undefined is NaN (TAG_UNDEFINED is NaN when bitcast to f64)
+                    // Must check for specific null/undefined tags, NOT generic NaN,
+                    // because NaN-boxed strings and pointers are also NaN values.
                     let is_null = if lhs_type == types::I64 {
                         let zero_i64 = builder.ins().iconst(types::I64, 0);
                         builder.ins().icmp(IntCC::Equal, lhs, zero_i64)
                     } else {
-                        // NaN check: fcmp Unordered with itself is true iff NaN
-                        builder.ins().fcmp(FloatCC::Unordered, lhs, lhs)
+                        // Bitcast to i64 and check for TAG_NULL or TAG_UNDEFINED
+                        let val_i64 = builder.ins().bitcast(types::I64, MemFlags::new(), lhs);
+                        let null_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0002u64 as i64);
+                        let is_null_tag = builder.ins().icmp(IntCC::Equal, val_i64, null_const);
+                        let undef_const = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
+                        let is_undef_tag = builder.ins().icmp(IntCC::Equal, val_i64, undef_const);
+                        builder.ins().bor(is_null_tag, is_undef_tag)
                     };
 
                     // Short-circuit: if lhs is null, evaluate rhs
