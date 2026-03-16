@@ -10294,7 +10294,8 @@ pub(crate) fn compile_expr(
                                 for &arg_val in arg_vals.iter() {
                                     let arg_type = builder.func.dfg.value_type(arg_val);
                                     let arg_f64 = if arg_type == types::I64 {
-                                        builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), arg_val)
+                                        // NaN-box with POINTER_TAG for correct typeof in closure
+                                        inline_nanbox_pointer(builder, arg_val)
                                     } else if arg_type == types::I32 {
                                         builder.ins().fcvt_from_sint(types::F64, arg_val)
                                     } else {
@@ -10351,7 +10352,9 @@ pub(crate) fn compile_expr(
                         for &arg_val in arg_vals.iter() {
                             let arg_type = builder.func.dfg.value_type(arg_val);
                             let arg_f64 = if arg_type == types::I64 {
-                                builder.ins().bitcast(types::F64, cranelift_codegen::ir::MemFlags::new(), arg_val)
+                                // NaN-box with POINTER_TAG so typeof inside closure returns 'object'
+                                // Raw bitcast would produce subnormal float that typeof sees as 'number'
+                                inline_nanbox_pointer(builder, arg_val)
                             } else if arg_type == types::I32 {
                                 builder.ins().fcvt_from_sint(types::F64, arg_val)
                             } else {
