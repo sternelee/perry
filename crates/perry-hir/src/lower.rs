@@ -4116,7 +4116,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         ast::Expr::Lit(ast::Lit::Regex(_)) => true,
                                         ast::Expr::Ident(ident) => {
                                             ctx.lookup_local_type(&ident.sym.to_string())
-                                                .map(|ty| matches!(ty, Type::Any | Type::Unknown))
+                                                .map(|ty| matches!(ty, Type::Any | Type::Unknown) || matches!(ty, Type::Named(n) if n == "RegExp"))
                                                 .unwrap_or(true)
                                         }
                                         _ => false,
@@ -4715,6 +4715,28 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     _ => {}
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // Check for Math constants (e.g., Math.PI, Math.E)
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                if obj_ident.sym.as_ref() == "Math" {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        let val = match prop_ident.sym.as_ref() {
+                            "PI" => Some(std::f64::consts::PI),
+                            "E" => Some(std::f64::consts::E),
+                            "LN2" => Some(std::f64::consts::LN_2),
+                            "LN10" => Some(std::f64::consts::LN_10),
+                            "LOG2E" => Some(std::f64::consts::LOG2_E),
+                            "LOG10E" => Some(std::f64::consts::LOG10_E),
+                            "SQRT2" => Some(std::f64::consts::SQRT_2),
+                            "SQRT1_2" => Some(std::f64::consts::FRAC_1_SQRT_2),
+                            _ => None,
+                        };
+                        if let Some(v) = val {
+                            return Ok(Expr::Number(v));
                         }
                     }
                 }
