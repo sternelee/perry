@@ -5298,8 +5298,14 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 captures.sort();
                                 captures.dedup();
 
-                                if captures.is_empty() {
-                                    // No captures: keep as standalone Function + FuncRef
+                                // Check if the method body uses `this` — even with no
+                                // outer-scope captures we must emit a Closure so the
+                                // object-literal creation code can patch capture slot 0
+                                // with the object pointer.
+                                let uses_this = closure_uses_this(&body);
+
+                                if captures.is_empty() && !uses_this {
+                                    // No captures and no `this`: keep as standalone Function + FuncRef
                                     ctx.functions.push((func_name.clone(), func_id));
                                     let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
                                     let param_ids: Vec<LocalId> = params.iter().map(|p| p.id).collect();

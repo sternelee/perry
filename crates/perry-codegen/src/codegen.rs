@@ -1392,6 +1392,60 @@ impl Compiler {
             if promoted_count > 0 {
                 eprintln!("[CLASS_CAPTURE] Promoted {} function-local variables to module-level for class method access", promoted_count);
             }
+            // Debug: print all class refs with source info
+            for id in &class_ref_set {
+                let name = self.module_level_locals.get(id)
+                    .and_then(|info| info.name.clone())
+                    .unwrap_or_else(|| format!("unknown_{}", id));
+                let is_already_module = self.module_var_data_ids.contains_key(id);
+                let is_known = self.module_level_locals.contains_key(id);
+                eprintln!("[CLASS_DEBUG] class_ref LocalId={} name={} already_module={} known={}", id, name, is_already_module, is_known);
+            }
+            // Debug: find WHERE each class_ref comes from
+            for class in &hir.classes {
+                let mut per_class_refs: Vec<LocalId> = Vec::new();
+                let mut visited2 = std::collections::HashSet::new();
+                for method in &class.methods {
+                    let mut method_refs: Vec<LocalId> = Vec::new();
+                    for stmt in &method.body {
+                        perry_hir::collect_local_refs_stmt(stmt, &mut method_refs, &mut visited2);
+                    }
+                    if !method_refs.is_empty() {
+                        eprintln!("[CLASS_DEBUG]   class={} method={} refs={:?}", class.name, method.name, method_refs);
+                    }
+                    per_class_refs.extend(method_refs);
+                }
+                if let Some(ctor) = &class.constructor {
+                    let mut ctor_refs: Vec<LocalId> = Vec::new();
+                    for stmt in &ctor.body {
+                        perry_hir::collect_local_refs_stmt(stmt, &mut ctor_refs, &mut visited2);
+                    }
+                    if !ctor_refs.is_empty() {
+                        eprintln!("[CLASS_DEBUG]   class={} constructor refs={:?}", class.name, ctor_refs);
+                    }
+                    per_class_refs.extend(ctor_refs);
+                }
+                for (gname, getter) in &class.getters {
+                    let mut getter_refs: Vec<LocalId> = Vec::new();
+                    for stmt in &getter.body {
+                        perry_hir::collect_local_refs_stmt(stmt, &mut getter_refs, &mut visited2);
+                    }
+                    if !getter_refs.is_empty() {
+                        eprintln!("[CLASS_DEBUG]   class={} getter={} refs={:?}", class.name, gname, getter_refs);
+                    }
+                    per_class_refs.extend(getter_refs);
+                }
+                for (sname, setter) in &class.setters {
+                    let mut setter_refs: Vec<LocalId> = Vec::new();
+                    for stmt in &setter.body {
+                        perry_hir::collect_local_refs_stmt(stmt, &mut setter_refs, &mut visited2);
+                    }
+                    if !setter_refs.is_empty() {
+                        eprintln!("[CLASS_DEBUG]   class={} setter={} refs={:?}", class.name, sname, setter_refs);
+                    }
+                    per_class_refs.extend(setter_refs);
+                }
+            }
         }
 
         // Now compile closures (after wrappers are created and module vars are registered)
@@ -1402,6 +1456,14 @@ impl Compiler {
         // Compile class constructors and methods
         for class in &hir.classes {
             if let Some(ref ctor) = class.constructor {
+                eprintln!("[CTOR_DEBUG] class={} ctor params:", class.name);
+                for p in &ctor.params {
+                    eprintln!("[CTOR_DEBUG]   param id={} name={}", p.id, p.name);
+                }
+                eprintln!("[CTOR_DEBUG] class={} ctor body:", class.name);
+                for (i, stmt) in ctor.body.iter().enumerate() {
+                    eprintln!("[CTOR_DEBUG]   stmt[{}]: {:?}", i, stmt);
+                }
                 self.compile_class_constructor(class, ctor)?;
             }
             for method in &class.methods {

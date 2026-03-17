@@ -1690,7 +1690,33 @@ impl crate::codegen::Compiler {
             }
 
             // Create ThisContext if we captured `this`
-            let this_ctx = if let (Some(var), Some(meta)) = (this_var, class_meta.clone()) {
+            let this_ctx = if let Some(var) = this_var {
+                let meta = class_meta.clone().unwrap_or_else(|| {
+                    // Object literal method: no class metadata, but we still
+                    // need a ThisContext so that `Expr::This` resolves to the
+                    // captured object pointer and `this.prop` falls through
+                    // to name-based property access.
+                    ClassMeta {
+                        id: 0,
+                        parent_class: None,
+                        native_parent: None,
+                        own_field_count: 0,
+                        field_count: 0,
+                        field_indices: std::collections::BTreeMap::new(),
+                        field_types: std::collections::BTreeMap::new(),
+                        constructor_id: None,
+                        method_ids: std::collections::BTreeMap::new(),
+                        getter_ids: std::collections::BTreeMap::new(),
+                        setter_ids: std::collections::BTreeMap::new(),
+                        static_method_ids: std::collections::BTreeMap::new(),
+                        static_field_ids: std::collections::BTreeMap::new(),
+                        method_param_counts: std::collections::BTreeMap::new(),
+                        method_return_types: std::collections::BTreeMap::new(),
+                        static_method_return_types: std::collections::BTreeMap::new(),
+                        type_params: Vec::new(),
+                        field_inits: std::collections::BTreeMap::new(),
+                    }
+                });
                 Some(ThisContext {
                     this_var: var,
                     class_meta: meta,
