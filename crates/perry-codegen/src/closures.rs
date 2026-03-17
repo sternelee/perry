@@ -1478,18 +1478,11 @@ impl crate::codegen::Compiler {
                                 let zero = builder.ins().iconst(types::I64, 0);
                                 builder.ins().icmp(IntCC::Equal, param_val, zero)
                             } else {
-                                // For f64 params: check if bits equal TAG_UNDEFINED (0x7FFC_0000_0000_0001)
-                                // Also check for NaN (missing args may arrive as NaN on some platforms)
+                                // Compare against TAG_UNDEFINED (0x7FFC_0000_0000_0001).
+                                // The call site pads missing args with TAG_UNDEFINED.
                                 let raw_bits = builder.ins().bitcast(types::I64, MemFlags::new(), param_val);
                                 let tag_undefined = builder.ins().iconst(types::I64, 0x7FFC_0000_0000_0001u64 as i64);
-                                let is_tag_undef = builder.ins().icmp(IntCC::Equal, raw_bits, tag_undefined);
-                                // Also check: if param val is 0.0 and the f64 bits are 0 (missing ABI arg)
-                                let zero_bits = builder.ins().iconst(types::I64, 0);
-                                let is_zero_bits = builder.ins().icmp(IntCC::Equal, raw_bits, zero_bits);
-                                // Check for canonical NaN (when closure called with fewer args, registers may be NaN)
-                                let is_nan = builder.ins().fcmp(FloatCC::Unordered, param_val, param_val);
-                                // Undefined if TAG_UNDEFINED or NaN (but not 0.0 bits, since 0.0 is valid)
-                                builder.ins().bor(is_tag_undef, is_nan)
+                                builder.ins().icmp(IntCC::Equal, raw_bits, tag_undefined)
                             };
 
                             let default_block = builder.create_block();
