@@ -392,6 +392,11 @@ pub extern "C" fn js_string_compare(a: *const StringHeader, b: *const StringHead
 /// Compare two strings for equality
 #[no_mangle]
 pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeader) -> bool {
+    // Pointer identity fast path
+    if std::ptr::eq(a, b) {
+        return true;
+    }
+
     let a_valid = is_valid_string_ptr(a);
     let b_valid = is_valid_string_ptr(b);
     if !a_valid && !b_valid {
@@ -411,15 +416,10 @@ pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeade
     unsafe {
         let data_a = string_data(a);
         let data_b = string_data(b);
-
-        for i in 0..len_a as usize {
-            if *data_a.add(i) != *data_b.add(i) {
-                return false;
-            }
-        }
+        let slice_a = std::slice::from_raw_parts(data_a, len_a as usize);
+        let slice_b = std::slice::from_raw_parts(data_b, len_b as usize);
+        slice_a == slice_b
     }
-
-    true
 }
 
 /// Check if a string starts with a prefix

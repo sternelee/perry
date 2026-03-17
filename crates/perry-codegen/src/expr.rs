@@ -2679,12 +2679,8 @@ pub(crate) fn compile_expr(
                 }
             }
 
-            // Get and return the new length
-            let len_func = extern_funcs.get("js_array_length")
-                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-            let len_ref = module.declare_func_in_func(*len_func, builder.func);
-            let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
-            let length = builder.inst_results(len_call)[0];
+            // Get and return the new length (inline load: ArrayHeader.length at offset 0)
+            let length = builder.ins().load(types::I32, MemFlags::new(), new_arr_ptr, 0);
 
             // Convert length to f64
             Ok(builder.ins().fcvt_from_uint(types::F64, length))
@@ -2750,12 +2746,8 @@ pub(crate) fn compile_expr(
                 }
             }
 
-            // Get and return the new length
-            let len_func = extern_funcs.get("js_array_length")
-                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-            let len_ref = module.declare_func_in_func(*len_func, builder.func);
-            let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
-            let length = builder.inst_results(len_call)[0];
+            // Get and return the new length (inline load: ArrayHeader.length at offset 0)
+            let length = builder.ins().load(types::I32, MemFlags::new(), new_arr_ptr, 0);
 
             Ok(builder.ins().fcvt_from_uint(types::F64, length))
         }
@@ -2905,12 +2897,8 @@ pub(crate) fn compile_expr(
                 }
             }
 
-            // Get and return the new length
-            let len_func = extern_funcs.get("js_array_length")
-                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-            let len_ref = module.declare_func_in_func(*len_func, builder.func);
-            let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
-            let length = builder.inst_results(len_call)[0];
+            // Get and return the new length (inline load: ArrayHeader.length at offset 0)
+            let length = builder.ins().load(types::I32, MemFlags::new(), new_arr_ptr, 0);
 
             Ok(builder.ins().fcvt_from_uint(types::F64, length))
         }
@@ -6392,12 +6380,8 @@ pub(crate) fn compile_expr(
                                                     // Store the new array back to the field (inline store)
                                                     builder.ins().store(MemFlags::new(), new_arr_val, obj_ptr, field_offset);
 
-                                                    // Return the new length (standard JavaScript push behavior)
-                                                    let len_func = extern_funcs.get("js_array_length")
-                                                        .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                                                    let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                                                    let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
-                                                    let len_i32 = builder.inst_results(len_call)[0];
+                                                    // Return the new length (inline load: ArrayHeader.length at offset 0)
+                                                    let len_i32 = builder.ins().load(types::I32, MemFlags::new(), new_arr_ptr, 0);
                                                     let len_f64 = builder.ins().fcvt_from_sint(types::F64, len_i32);
 
 
@@ -6464,12 +6448,8 @@ pub(crate) fn compile_expr(
                             let call = builder.ins().call(func_ref, &[arr_ptr, src_ptr]);
                             let new_arr_ptr = builder.inst_results(call)[0];
 
-                            // Return the new length using the new pointer (concat may reallocate)
-                            let len_func = extern_funcs.get("js_array_length")
-                                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                            let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                            let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
-                            let len_i32 = builder.inst_results(len_call)[0];
+                            // Return the new length (inline load: ArrayHeader.length at offset 0)
+                            let len_i32 = builder.ins().load(types::I32, MemFlags::new(), new_arr_ptr, 0);
                             return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                         } else {
                             // Single element push
@@ -6481,12 +6461,8 @@ pub(crate) fn compile_expr(
                             let func_ref = module.declare_func_in_func(*func, builder.func);
                             let _call = builder.ins().call(func_ref, &[arr_ptr, push_val]);
 
-                            // Return the new length
-                            let len_func = extern_funcs.get("js_array_length")
-                                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                            let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                            let len_call = builder.ins().call(len_ref, &[arr_ptr]);
-                            let len_i32 = builder.inst_results(len_call)[0];
+                            // Return the new length (inline load: ArrayHeader.length at offset 0)
+                            let len_i32 = builder.ins().load(types::I32, MemFlags::new(), arr_ptr, 0);
                             return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                         }
                     }
@@ -11169,10 +11145,6 @@ pub(crate) fn compile_expr(
                                 .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                             let push_ref = module.declare_func_in_func(*push_func, builder.func);
 
-                            let length_func = extern_funcs.get("js_array_length")
-                                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                            let length_ref = module.declare_func_in_func(*length_func, builder.func);
-
                             let get_func = extern_funcs.get("js_array_get_f64")
                                 .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
                             let get_ref = module.declare_func_in_func(*get_func, builder.func);
@@ -11227,9 +11199,8 @@ pub(crate) fn compile_expr(
                                         // Array might be i64 (from closure params) or f64 (from other sources)
                                         let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
 
-                                        // Get length of spread array
-                                        let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
-                                        let spread_len = builder.inst_results(len_call)[0];
+                                        // Get length of spread array (inline load: ArrayHeader.length at offset 0)
+                                        let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
 
                                         // Create loop to iterate over spread array
                                         let loop_header = builder.create_block();
@@ -11337,12 +11308,8 @@ pub(crate) fn compile_expr(
                         let get_call = builder.ins().call(get_field_ref, &[obj_ptr_i64, method_str_i64]);
                         let method_val = builder.inst_results(get_call)[0];
 
-                        // Get the array length
-                        let len_func = extern_funcs.get("js_array_length")
-                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                        let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                        let len_call = builder.ins().call(len_ref, &[arr_ptr]);
-                        let arr_len = builder.inst_results(len_call)[0];
+                        // Get the array length (inline load: ArrayHeader.length at offset 0)
+                        let arr_len = builder.ins().load(types::I32, MemFlags::new(), arr_ptr, 0);
                         let arr_len_i64 = builder.ins().uextend(types::I64, arr_len);
 
                         // Call the method with the spread array using js_native_call_value
@@ -11400,10 +11367,6 @@ pub(crate) fn compile_expr(
                             .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                         let push_ref = module.declare_func_in_func(*push_func, builder.func);
 
-                        let length_func = extern_funcs.get("js_array_length")
-                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                        let length_ref = module.declare_func_in_func(*length_func, builder.func);
-
                         let get_func = extern_funcs.get("js_array_get_f64")
                             .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
                         let get_ref = module.declare_func_in_func(*get_func, builder.func);
@@ -11425,9 +11388,8 @@ pub(crate) fn compile_expr(
                                     let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                                     let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
 
-                                    // Get length of spread array
-                                    let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
-                                    let spread_len = builder.inst_results(len_call)[0];
+                                    // Get length of spread array (inline load: ArrayHeader.length at offset 0)
+                                    let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
 
                                     // Create loop to iterate over spread array
                                     let loop_header = builder.create_block();
@@ -11480,10 +11442,9 @@ pub(crate) fn compile_expr(
                             }
                         }
 
-                        // Get final array pointer and length
+                        // Get final array pointer and length (inline load: ArrayHeader.length at offset 0)
                         let final_arr_ptr = builder.use_var(arr_var);
-                        let len_call = builder.ins().call(length_ref, &[final_arr_ptr]);
-                        let total_len = builder.inst_results(len_call)[0];
+                        let total_len = builder.ins().load(types::I32, MemFlags::new(), final_arr_ptr, 0);
                         let total_len_i64 = builder.ins().uextend(types::I64, total_len);
 
                         // Calculate data pointer: array pointer + 8 (size of ArrayHeader)
@@ -11523,9 +11484,6 @@ pub(crate) fn compile_expr(
                         let push_func = extern_funcs.get("js_array_push_f64")
                             .ok_or_else(|| anyhow!("js_array_push_f64 not declared"))?;
                         let push_ref = module.declare_func_in_func(*push_func, builder.func);
-                        let length_func = extern_funcs.get("js_array_length")
-                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                        let length_ref = module.declare_func_in_func(*length_func, builder.func);
                         let get_func = extern_funcs.get("js_array_get_f64")
                             .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
                         let get_ref = module.declare_func_in_func(*get_func, builder.func);
@@ -11544,8 +11502,8 @@ pub(crate) fn compile_expr(
                                     let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                                     let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
 
-                                    let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
-                                    let spread_len = builder.inst_results(len_call)[0];
+                                    // Inline load: ArrayHeader.length at offset 0
+                                    let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
 
                                     let loop_header = builder.create_block();
                                     let loop_body = builder.create_block();
@@ -11585,9 +11543,9 @@ pub(crate) fn compile_expr(
                             }
                         }
 
+                        // Inline load: ArrayHeader.length at offset 0
                         let final_arr_ptr = builder.use_var(arr_var);
-                        let len_call = builder.ins().call(length_ref, &[final_arr_ptr]);
-                        let total_len = builder.inst_results(len_call)[0];
+                        let total_len = builder.ins().load(types::I32, MemFlags::new(), final_arr_ptr, 0);
                         let total_len_i64 = builder.ins().uextend(types::I64, total_len);
 
                         let call_ref = module.declare_func_in_func(*call_func, builder.func);
@@ -11695,12 +11653,8 @@ pub(crate) fn compile_expr(
                     let base_i32 = builder.ins().fcvt_to_sint_sat(types::I32, base_f64);
                     // Get raw string pointer from value
                     let str_ptr = inline_get_string_pointer(builder, value_val);
-                    // Get string length
-                    let len_func = extern_funcs.get("js_string_length")
-                        .ok_or_else(|| anyhow!("js_string_length not declared"))?;
-                    let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                    let len_call = builder.ins().call(len_ref, &[str_ptr]);
-                    let len_i32 = builder.inst_results(len_call)[0];
+                    // Get string length (inline load: StringHeader.length at offset 0)
+                    let len_i32 = builder.ins().load(types::I32, MemFlags::new(), str_ptr, 0);
                     // Get raw data pointer (skip StringHeader)
                     let header_size = builder.ins().iconst(types::I64, 16); // StringHeader size
                     let data_ptr = builder.ins().iadd(str_ptr, header_size);
@@ -13076,9 +13030,17 @@ pub(crate) fn compile_expr(
                     builder.ins().fcvt_to_sint_sat(types::I32, idx_f64)
                 };
 
-                // Get current value using js_array_get_f64
-                let get_func = extern_funcs.get("js_array_get_f64")
-                    .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
+                // Check if object is a known array variable -- use unchecked (no polymorphic dispatch)
+                let is_known_array = if let Expr::LocalGet(id) = object.as_ref() {
+                    locals.get(id).map(|i| i.is_array && !i.is_union).unwrap_or(false)
+                } else {
+                    false
+                };
+
+                // Get current value: use unchecked variant for known arrays (skips buffer/set/map checks)
+                let get_func_name = if is_known_array { "js_array_get_f64_unchecked" } else { "js_array_get_f64" };
+                let get_func = extern_funcs.get(get_func_name)
+                    .ok_or_else(|| anyhow!("{} not declared", get_func_name))?;
                 let get_ref = module.declare_func_in_func(*get_func, builder.func);
                 let get_call = builder.ins().call(get_ref, &[obj_ptr, idx_i32]);
                 let old_val = builder.inst_results(get_call)[0];
@@ -13091,9 +13053,10 @@ pub(crate) fn compile_expr(
                     _ => return Err(anyhow!("Unexpected op in IndexUpdate: {:?}", op)),
                 };
 
-                // Set new value using js_array_set_f64
-                let set_func = extern_funcs.get("js_array_set_f64")
-                    .ok_or_else(|| anyhow!("js_array_set_f64 not declared"))?;
+                // Set new value: use unchecked variant for known arrays (skips buffer checks)
+                let set_func_name = if is_known_array { "js_array_set_f64_unchecked" } else { "js_array_set_f64" };
+                let set_func = extern_funcs.get(set_func_name)
+                    .ok_or_else(|| anyhow!("{} not declared", set_func_name))?;
                 let set_ref = module.declare_func_in_func(*set_func, builder.func);
                 builder.ins().call(set_ref, &[obj_ptr, idx_i32, new_val]);
 
@@ -13107,11 +13070,8 @@ pub(crate) fn compile_expr(
                 // Compile ProcessArgv to get the array pointer
                 let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
                 let arr_ptr = ensure_i64(builder, arr_val);
-                let len_func = extern_funcs.get("js_array_length")
-                    .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                let func_ref = module.declare_func_in_func(*len_func, builder.func);
-                let call = builder.ins().call(func_ref, &[arr_ptr]);
-                let len_i32 = builder.inst_results(call)[0];
+                // Inline load: ArrayHeader.length is u32 at offset 0
+                let len_i32 = builder.ins().load(types::I32, MemFlags::new(), arr_ptr, 0);
                 // Convert i32 to f64
                 let len_f64 = builder.ins().fcvt_from_sint(types::F64, len_i32);
                 return Ok(len_f64);
@@ -13131,11 +13091,8 @@ pub(crate) fn compile_expr(
                 let ptr_call = builder.ins().call(get_ptr_ref, &[arr_f64]);
                 let arr_ptr = builder.inst_results(ptr_call)[0];
 
-                let len_func = extern_funcs.get("js_array_length")
-                    .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                let func_ref = module.declare_func_in_func(*len_func, builder.func);
-                let call = builder.ins().call(func_ref, &[arr_ptr]);
-                let len_i32 = builder.inst_results(call)[0];
+                // Inline load: ArrayHeader.length is u32 at offset 0
+                let len_i32 = builder.ins().load(types::I32, MemFlags::new(), arr_ptr, 0);
                 let len_f64 = builder.ins().fcvt_from_sint(types::F64, len_i32);
                 return Ok(len_f64);
             }
@@ -13173,11 +13130,8 @@ pub(crate) fn compile_expr(
                         let ptr_call = builder.ins().call(get_ptr_ref, &[arr_f64]);
                         let arr_ptr = builder.inst_results(ptr_call)[0];
 
-                        let len_func = extern_funcs.get("js_array_length")
-                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                        let func_ref = module.declare_func_in_func(*len_func, builder.func);
-                        let call = builder.ins().call(func_ref, &[arr_ptr]);
-                        let len_i32 = builder.inst_results(call)[0];
+                        // Inline load: ArrayHeader.length is u32 at offset 0
+                        let len_i32 = builder.ins().load(types::I32, MemFlags::new(), arr_ptr, 0);
                         // Convert i32 to f64
                         let len_f64 = builder.ins().fcvt_from_sint(types::F64, len_i32);
                         return Ok(len_f64);
@@ -13205,11 +13159,8 @@ pub(crate) fn compile_expr(
                         let ptr_call = builder.ins().call(get_ptr_ref, &[str_f64]);
                         let str_ptr = builder.inst_results(ptr_call)[0];
 
-                        let len_func = extern_funcs.get("js_string_length")
-                            .ok_or_else(|| anyhow!("js_string_length not declared"))?;
-                        let func_ref = module.declare_func_in_func(*len_func, builder.func);
-                        let call = builder.ins().call(func_ref, &[str_ptr]);
-                        let len_i32 = builder.inst_results(call)[0];
+                        // Inline load: StringHeader.length is u32 at offset 0
+                        let len_i32 = builder.ins().load(types::I32, MemFlags::new(), str_ptr, 0);
                         // Convert i32 to f64
                         let len_f64 = builder.ins().fcvt_from_sint(types::F64, len_i32);
                         return Ok(len_f64);
@@ -13289,7 +13240,16 @@ pub(crate) fn compile_expr(
 
                                 return Ok(builder.inst_results(call)[0]);
                             }
-                            // No index-based field access — fall through to name-based
+
+                            // Direct inline field access for known class instances.
+                            // Since we know the class and field at compile time, use
+                            // offset-based access instead of runtime O(n) lookup.
+                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
+                                let field_offset = 24 + (field_idx as i32) * 8;
+                                let value = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+                                return Ok(value);
+                            }
+                            // Field not in field_indices — fall through to name-based
                         }
                     }
                 }
@@ -13444,11 +13404,6 @@ pub(crate) fn compile_expr(
             }
 
             // Handle class instance field access (obj.field where obj is a local variable with known class)
-            // NOTE: Only use index-based access for variables known to be Perry-constructed class instances.
-            // Function parameters and cross-module objects may be plain objects (e.g., MySQL rows) with
-            // different field ordering than the class definition. For safety, we only use index-based access
-            // for getters (which are compiled functions, not offset-based), and fall through to name-based
-            // access for regular field reads.
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(info) = locals.get(id) {
                     if let Some(ref class_name) = info.class_name {
@@ -13465,10 +13420,17 @@ pub(crate) fn compile_expr(
                                 return Ok(builder.inst_results(call)[0]);
                             }
 
-                            // Skip index-based field access for non-this variables:
-                            // Plain objects (MySQL rows, JSON.parse results) may have different
-                            // field ordering than the class definition. Fall through to name-based
-                            // access at the end of this function which works for all object types.
+                            // Direct inline field access for known class instances.
+                            // Since we know the class and field at compile time, use
+                            // offset-based access instead of runtime O(n) lookup.
+                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
+                                let obj_val = builder.use_var(info.var);
+                                let obj_ptr = ensure_i64(builder, obj_val);
+                                let field_offset = 24 + (field_idx as i32) * 8;
+                                let value = builder.ins().load(types::F64, MemFlags::new(), obj_ptr, field_offset);
+                                return Ok(value);
+                            }
+                            // Field not in field_indices — fall through to name-based
                         }
                     }
                 }
@@ -13975,10 +13937,6 @@ pub(crate) fn compile_expr(
                 .ok_or_else(|| anyhow!("js_array_push_jsvalue not declared"))?;
             let push_jsvalue_ref = module.declare_func_in_func(*push_jsvalue_func, builder.func);
 
-            let length_func = extern_funcs.get("js_array_length")
-                .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-            let length_ref = module.declare_func_in_func(*length_func, builder.func);
-
             let get_func = extern_funcs.get("js_array_get_f64")
                 .ok_or_else(|| anyhow!("js_array_get_f64 not declared"))?;
             let get_ref = module.declare_func_in_func(*get_func, builder.func);
@@ -14024,9 +13982,8 @@ pub(crate) fn compile_expr(
                         let spread_arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, spread_expr, this_ctx)?;
                         let spread_arr_ptr = ensure_i64(builder, spread_arr_val);
 
-                        // Get length of spread array
-                        let len_call = builder.ins().call(length_ref, &[spread_arr_ptr]);
-                        let spread_len = builder.inst_results(len_call)[0];
+                        // Get length of spread array (inline load: ArrayHeader.length at offset 0)
+                        let spread_len = builder.ins().load(types::I32, MemFlags::new(), spread_arr_ptr, 0);
 
                         // Create loop to iterate over spread array
                         let loop_header = builder.create_block();
@@ -17215,12 +17172,8 @@ pub(crate) fn compile_expr(
                         let call = builder.ins().call(func_ref, &[arr_ptr, src_ptr]);
                         let new_arr_ptr = builder.inst_results(call)[0];
 
-                        // Return length using new pointer (concat may reallocate)
-                        let len_func = extern_funcs.get("js_array_length")
-                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                        let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                        let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
-                        let len_i32 = builder.inst_results(len_call)[0];
+                        // Return length (inline load: ArrayHeader.length at offset 0)
+                        let len_i32 = builder.ins().load(types::I32, MemFlags::new(), new_arr_ptr, 0);
                         return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                     } else if !arg_vals.is_empty() {
                         // Single element push — capture new pointer (push may reallocate)
@@ -17291,21 +17244,13 @@ pub(crate) fn compile_expr(
                             }
                         }
 
-                        // Return the new length using the new pointer
-                        let len_func = extern_funcs.get("js_array_length")
-                            .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                        let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                        let len_call = builder.ins().call(len_ref, &[new_arr_ptr]);
-                        let len_i32 = builder.inst_results(len_call)[0];
+                        // Return the new length (inline load: ArrayHeader.length at offset 0)
+                        let len_i32 = builder.ins().load(types::I32, MemFlags::new(), new_arr_ptr, 0);
                         return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                     }
 
-                    // Return the new length (fallback for no args)
-                    let len_func = extern_funcs.get("js_array_length")
-                        .ok_or_else(|| anyhow!("js_array_length not declared"))?;
-                    let len_ref = module.declare_func_in_func(*len_func, builder.func);
-                    let len_call = builder.ins().call(len_ref, &[arr_ptr]);
-                    let len_i32 = builder.inst_results(len_call)[0];
+                    // Return the new length (fallback, inline load: ArrayHeader.length at offset 0)
+                    let len_i32 = builder.ins().load(types::I32, MemFlags::new(), arr_ptr, 0);
                     return Ok(builder.ins().fcvt_from_sint(types::F64, len_i32));
                 }
             }

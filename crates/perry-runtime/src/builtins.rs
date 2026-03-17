@@ -717,25 +717,54 @@ pub extern "C" fn js_ge(a: JSValue, b: JSValue) -> JSValue {
 /// Return the typeof a value as a string
 /// Takes an f64 that uses NaN-boxing to distinguish types.
 /// Returns a pointer to a string: "undefined", "boolean", "number", "string", "object", "function"
+///
+/// Optimization: typeof only returns 7 possible strings, so we cache them as
+/// pre-allocated StringHeader pointers to avoid heap allocation on every call.
 #[no_mangle]
 pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
-    use crate::string::js_string_from_bytes;
+    use std::cell::Cell;
+
+    thread_local! {
+        static TYPEOF_UNDEFINED: Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_OBJECT:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_BOOLEAN:   Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_NUMBER:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_STRING:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_FUNCTION:  Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_BIGINT:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+    }
+
+    /// Get or initialize a cached typeof string.
+    fn get_cached(
+        cache: &'static std::thread::LocalKey<Cell<*mut StringHeader>>,
+        s: &str,
+    ) -> *mut StringHeader {
+        cache.with(|cell| {
+            let ptr = cell.get();
+            if !ptr.is_null() {
+                return ptr;
+            }
+            let new_ptr = crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32);
+            cell.set(new_ptr);
+            new_ptr
+        })
+    }
 
     let jsval = JSValue::from_bits(value.to_bits());
 
-    let type_str = if jsval.is_undefined() {
-        "undefined"
+    if jsval.is_undefined() {
+        get_cached(&TYPEOF_UNDEFINED, "undefined")
     } else if jsval.is_null() {
         // typeof null === "object" in JavaScript
-        "object"
+        get_cached(&TYPEOF_OBJECT, "object")
     } else if jsval.is_bool() {
-        "boolean"
+        get_cached(&TYPEOF_BOOLEAN, "boolean")
     } else if jsval.is_string() {
         // String pointer (uses STRING_TAG)
-        "string"
+        get_cached(&TYPEOF_STRING, "string")
     } else if crate::value::is_js_handle(value) {
         // JS handle from V8 runtime - always an object
-        "object"
+        get_cached(&TYPEOF_OBJECT, "object")
     } else if jsval.is_pointer() {
         // Object/array/closure pointer - check if it's a closure
         let ptr = jsval.as_pointer::<u8>();
@@ -743,23 +772,21 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
             // ClosureHeader has type_tag at offset 12 (after func_ptr:8 + capture_count:4)
             let type_tag = unsafe { *(ptr.add(12) as *const u32) };
             if type_tag == crate::closure::CLOSURE_MAGIC {
-                "function"
+                get_cached(&TYPEOF_FUNCTION, "function")
             } else {
-                "object"
+                get_cached(&TYPEOF_OBJECT, "object")
             }
         } else {
-            "object"
+            get_cached(&TYPEOF_OBJECT, "object")
         }
     } else if jsval.is_bigint() {
-        "bigint"
+        get_cached(&TYPEOF_BIGINT, "bigint")
     } else if jsval.is_int32() {
-        "number"
+        get_cached(&TYPEOF_NUMBER, "number")
     } else {
         // Regular f64 number
-        "number"
-    };
-
-    js_string_from_bytes(type_str.as_ptr(), type_str.len() as u32)
+        get_cached(&TYPEOF_NUMBER, "number")
+    }
 }
 
 /// parseInt(string, radix?) -> number

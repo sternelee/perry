@@ -128,6 +128,22 @@ pub extern "C" fn js_array_get_element_f64(arr: i64, index: i64) -> f64 {
     js_array_get_f64(arr as *const ArrayHeader, index as u32)
 }
 
+/// Fast-path array element access: skips all polymorphic registry checks
+/// (buffer, set, map). Only does bounds checking and element access.
+/// Use when the codegen KNOWS the pointer is a plain Array (not Map/Set/Buffer).
+#[no_mangle]
+pub extern "C" fn js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32) -> f64 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return f64::NAN; }
+    unsafe {
+        let length = (*arr).length;
+        if index >= length { return f64::NAN; }
+        if length > 100000 { return f64::NAN; }
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        *elements_ptr.add(index as usize)
+    }
+}
+
 /// Get an element from an array by index (returns f64)
 #[no_mangle]
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
@@ -170,6 +186,21 @@ pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
         }
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
         *elements_ptr.add(index as usize)
+    }
+}
+
+/// Fast-path array element write: skips all polymorphic registry checks
+/// (buffer). Only does bounds checking and element write.
+/// Use when the codegen KNOWS the pointer is a plain Array (not Buffer).
+#[no_mangle]
+pub extern "C" fn js_array_set_f64_unchecked(arr: *mut ArrayHeader, index: u32, value: f64) {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return; }
+    unsafe {
+        let length = (*arr).length;
+        if index >= length { return; }
+        let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        ptr::write(elements_ptr.add(index as usize), value);
     }
 }
 

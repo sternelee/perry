@@ -658,6 +658,21 @@ impl Compiler {
             self.extern_funcs.insert("js_array_get_f64".to_string(), func_id);
         }
 
+        // js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32) -> f64
+        // Fast path: skips polymorphic registry checks (buffer/set/map)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I32)); // index
+            sig.returns.push(AbiParam::new(types::F64)); // element value
+            let func_id = self.module.declare_function(
+                "js_array_get_f64_unchecked",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_get_f64_unchecked".to_string(), func_id);
+        }
+
         // js_array_set_f64(arr: *mut ArrayHeader, index: u32, value: f64)
         {
             let mut sig = self.module.make_signature();
@@ -670,6 +685,21 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert("js_array_set_f64".to_string(), func_id);
+        }
+
+        // js_array_set_f64_unchecked(arr: *mut ArrayHeader, index: u32, value: f64)
+        // Fast path: skips polymorphic registry checks (buffer)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I32)); // index
+            sig.params.push(AbiParam::new(types::F64)); // value
+            let func_id = self.module.declare_function(
+                "js_array_set_f64_unchecked",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert("js_array_set_f64_unchecked".to_string(), func_id);
         }
 
         // js_array_set_f64_extend(arr: *mut ArrayHeader, index: u32, value: f64) -> *mut ArrayHeader
