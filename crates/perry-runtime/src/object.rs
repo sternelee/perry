@@ -1630,8 +1630,61 @@ pub unsafe extern "C" fn js_native_call_method(
         let obj = jsval.as_pointer::<ObjectHeader>();
         // Validate GcHeader to confirm this is actually an object before reading class_id
         let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
-        if (*gc_header).obj_type == crate::gc::GC_TYPE_OBJECT && (*obj).class_id == NATIVE_MODULE_CLASS_ID {
-            return dispatch_native_module_method(obj, method_name, args_ptr, args_len);
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_OBJECT {
+            if (*obj).class_id == NATIVE_MODULE_CLASS_ID {
+                return dispatch_native_module_method(obj, method_name, args_ptr, args_len);
+            }
+
+            // Scan object fields for a callable property (closure stored via IndexSet)
+            let keys = (*obj).keys_array;
+            if !keys.is_null() {
+                let keys_ptr = keys as usize;
+                if keys_ptr >> 48 == 0 && keys_ptr >= 0x10000 {
+                    let key_count = crate::array::js_array_length(keys) as usize;
+                    if key_count <= 65536 {
+                        let method_key = crate::string::js_string_from_bytes(
+                            method_name.as_ptr(),
+                            method_name.len() as u32,
+                        );
+                        for i in 0..key_count {
+                            let key_val = crate::array::js_array_get(keys, i as u32);
+                            if key_val.is_string() {
+                                let stored_key = key_val.as_string_ptr();
+                                if crate::string::js_string_equals(method_key, stored_key) {
+                                    let field_val = js_object_get_field(obj as *mut _, i as u32);
+                                    if field_val.is_pointer() {
+                                        return crate::closure::js_native_call_value(
+                                            f64::from_bits(field_val.bits()),
+                                            args_ptr,
+                                            args_len,
+                                        );
+                                    }
+                                    // Field found but not callable — return the value as-is
+                                    return f64::from_bits(field_val.bits());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Vtable lookup for class instances
+            let class_id = (*obj).class_id;
+            if class_id != 0 {
+                if let Ok(registry) = CLASS_VTABLE_REGISTRY.read() {
+                    if let Some(ref reg) = *registry {
+                        if let Some(vtable) = reg.get(&class_id) {
+                            if let Some(entry) = vtable.methods.get(method_name) {
+                                let this_i64 = jsval.as_pointer::<u8>() as i64;
+                                return call_vtable_method(
+                                    entry.func_ptr, this_i64,
+                                    args_ptr, args_len, entry.param_count,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
