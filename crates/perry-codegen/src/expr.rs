@@ -1593,17 +1593,33 @@ pub(crate) fn compile_expr(
                         Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
                     }
                     _ => {
-                        // Generic argument - compile and assume it's a length (number)
+                        // Check if argument is an array variable → create from array
+                        let is_array_arg = match a.as_ref() {
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_array).unwrap_or(false),
+                            _ => false,
+                        };
                         let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a, this_ctx)?;
-                        let arg_f64 = ensure_f64(builder, arg_val);
-                        let alloc_func = extern_funcs.get("js_buffer_alloc")
-                            .ok_or_else(|| anyhow!("js_buffer_alloc not declared"))?;
-                        let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
-                        let size_i32 = builder.ins().fcvt_to_sint_sat(types::I32, arg_f64);
-                        let zero_fill = builder.ins().iconst(types::I32, 0);
-                        let call = builder.ins().call(func_ref, &[size_i32, zero_fill]);
-                        let buf_ptr = builder.inst_results(call)[0];
-                        Ok(builder.ins().bitcast(types::F64, MemFlags::new(), buf_ptr))
+                        if is_array_arg {
+                            // new Uint8Array(arrayVariable) — copy from array
+                            let arg_ptr = ensure_i64(builder, arg_val);
+                            let func = extern_funcs.get("js_buffer_from_array")
+                                .ok_or_else(|| anyhow!("js_buffer_from_array not declared"))?;
+                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                            let call = builder.ins().call(func_ref, &[arg_ptr]);
+                            let result_ptr = builder.inst_results(call)[0];
+                            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
+                        } else {
+                            // Generic argument - assume it's a length (number)
+                            let arg_f64 = ensure_f64(builder, arg_val);
+                            let alloc_func = extern_funcs.get("js_buffer_alloc")
+                                .ok_or_else(|| anyhow!("js_buffer_alloc not declared"))?;
+                            let func_ref = module.declare_func_in_func(*alloc_func, builder.func);
+                            let size_i32 = builder.ins().fcvt_to_sint_sat(types::I32, arg_f64);
+                            let zero_fill = builder.ins().iconst(types::I32, 0);
+                            let call = builder.ins().call(func_ref, &[size_i32, zero_fill]);
+                            let buf_ptr = builder.inst_results(call)[0];
+                            Ok(builder.ins().bitcast(types::F64, MemFlags::new(), buf_ptr))
+                        }
                     }
                 }
             } else {
