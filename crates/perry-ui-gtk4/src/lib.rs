@@ -703,6 +703,26 @@ pub extern "C" fn perry_ui_textfield_get_string(handle: i64) -> i64 {
     widgets::textfield::get_string_value(handle) as i64
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {
+    widgets::textfield::set_borderless(handle, borderless);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::textfield::set_background_color(handle, r, g, b, a);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_font_size(handle: i64, size: f64) {
+    widgets::textfield::set_font_size(handle, size);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::textfield::set_text_color(handle, r, g, b, a);
+}
+
 /// Make a widget expand to fill its parent's width.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {

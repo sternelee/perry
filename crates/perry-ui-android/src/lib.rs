@@ -1365,6 +1365,26 @@ pub extern "C" fn perry_ui_textfield_set_on_focus(_handle: f64, _callback: f64) 
     // TODO: wire OnFocusChangeListener
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_borderless(handle: i64, borderless: f64) {
+    widgets::textfield::set_borderless(handle, borderless);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::textfield::set_background_color(handle, r, g, b, a);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_font_size(handle: i64, size: f64) {
+    widgets::textfield::set_font_size(handle, size);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    widgets::textfield::set_text_color(handle, r, g, b, a);
+}
+
 /// perry_ui_widget_add_overlay(parent, child) — add overlay view
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_add_overlay(_parent: f64, _child: f64) {

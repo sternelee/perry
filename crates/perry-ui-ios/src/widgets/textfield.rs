@@ -147,6 +147,66 @@ pub fn get_string_value(handle: i64) -> *const u8 {
     unsafe { js_string_from_bytes(std::ptr::null(), 0) }
 }
 
+/// Set whether the text field is borderless (0 = bordered, 1 = borderless).
+pub fn set_borderless(handle: i64, borderless: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            if borderless > 0.5 {
+                // UITextBorderStyleNone = 0
+                let _: () = msg_send![&*view, setBorderStyle: 0i64];
+            } else {
+                // UITextBorderStyleRoundedRect = 3
+                let _: () = msg_send![&*view, setBorderStyle: 3i64];
+            }
+        }
+    }
+}
+
+/// Set the background color of the text field.
+pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let cls = objc2::runtime::AnyClass::get(c"UIColor").unwrap();
+            let color: Retained<AnyObject> = msg_send![
+                cls,
+                colorWithRed: r as f64,
+                green: g as f64,
+                blue: b as f64,
+                alpha: a as f64
+            ];
+            let _: () = msg_send![&*view, setBackgroundColor: &*color];
+        }
+    }
+}
+
+/// Set the font size of the text field.
+pub fn set_font_size(handle: i64, size: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let cls = objc2::runtime::AnyClass::get(c"UIFont").unwrap();
+            let font: Retained<AnyObject> = msg_send![cls, systemFontOfSize: size as f64];
+            let _: () = msg_send![&*view, setFont: &*font];
+        }
+    }
+}
+
+/// Set the text color of the text field.
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let cls = objc2::runtime::AnyClass::get(c"UIColor").unwrap();
+            let color: Retained<AnyObject> = msg_send![
+                cls,
+                colorWithRed: r as f64,
+                green: g as f64,
+                blue: b as f64,
+                alpha: a as f64
+            ];
+            let _: () = msg_send![&*view, setTextColor: &*color];
+        }
+    }
+}
+
 thread_local! {
     static SUBMIT_CALLBACKS: RefCell<HashMap<usize, (f64, *const objc2::runtime::AnyObject)>> = RefCell::new(HashMap::new());
 }

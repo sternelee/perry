@@ -7586,6 +7586,15 @@ impl Compiler {
             self.extern_funcs.insert("js_ethers_parse_units".to_string(), func_id);
         }
 
+        // js_keccak256_native_bytes(buf: i64) -> i64 (buffer pointer: raw 32-byte hash)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // buffer pointer
+            sig.returns.push(AbiParam::new(types::I64)); // buffer pointer
+            let func_id = self.module.declare_function("js_keccak256_native_bytes", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("js_keccak256_native_bytes".to_string(), func_id);
+        }
+
         // js_keccak256_native(buf: i64) -> i64 (string pointer: "0x" + hex hash)
         {
             let mut sig = self.module.make_signature();
@@ -8659,6 +8668,48 @@ impl Compiler {
             let mut sig = self.module.make_signature();
             let func_id = self.module.declare_function("perry_ui_textfield_blur_all", Linkage::Import, &sig)?;
             self.extern_funcs.insert("perry_ui_textfield_blur_all".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_set_borderless(handle: i64, borderless: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_textfield_set_borderless", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_set_borderless".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_textfield_set_background_color", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_set_background_color".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_set_font_size(handle: i64, size: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_textfield_set_font_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_set_font_size".to_string(), func_id);
+        }
+
+        // perry_ui_textfield_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("perry_ui_textfield_set_text_color", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_textfield_set_text_color".to_string(), func_id);
         }
 
         // perry_ui_scrollview_scroll_to(scroll_handle: i64, child_handle: i64)

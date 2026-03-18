@@ -231,6 +231,29 @@ pub unsafe extern "C" fn js_keccak256_native(buf_ptr: i64) -> *mut StringHeader 
     js_string_from_bytes(out.as_ptr(), out.len() as u32)
 }
 
+/// Native keccak256 returning raw bytes (Uint8Array/buffer).
+/// Used for internal ethkit calls (computeAddress, etc.) that need raw hash bytes.
+#[no_mangle]
+pub unsafe extern "C" fn js_keccak256_native_bytes(buf_ptr: i64) -> *mut perry_runtime::buffer::BufferHeader {
+    let buf_ptr = (buf_ptr as u64 & 0x0000_FFFF_FFFF_FFFF) as *const perry_runtime::buffer::BufferHeader;
+    let (data, len) = if buf_ptr.is_null() {
+        (&[] as &[u8], 0)
+    } else {
+        let len = (*buf_ptr).length as usize;
+        let data = (buf_ptr as *const u8).add(std::mem::size_of::<perry_runtime::buffer::BufferHeader>());
+        (std::slice::from_raw_parts(data, len), len)
+    };
+
+    let hash = keccak256(data);
+
+    // Allocate a buffer and copy hash bytes
+    let result = perry_runtime::buffer::buffer_alloc(32);
+    (*result).length = 32;
+    let dst = (result as *mut u8).add(std::mem::size_of::<perry_runtime::buffer::BufferHeader>());
+    std::ptr::copy_nonoverlapping(hash.as_ptr(), dst, 32);
+    result
+}
+
 /// formatUnits(value: bigint, decimals: number) -> string
 /// Converts a BigInt to a human-readable string with the given number of decimals.
 /// Example: formatUnits(1000000n, 6) -> "1.0"

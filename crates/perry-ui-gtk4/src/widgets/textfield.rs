@@ -92,6 +92,26 @@ pub fn get_string_value(handle: i64) -> i64 {
     unsafe { js_string_from_bytes(std::ptr::null(), 0) as i64 }
 }
 
+/// Set whether the text field is borderless (stub).
+pub fn set_borderless(handle: i64, borderless: f64) {
+    let _ = (handle, borderless);
+}
+
+/// Set the background color of the text field (stub).
+pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    let _ = (handle, r, g, b, a);
+}
+
+/// Set the font size of the text field (stub).
+pub fn set_font_size(handle: i64, size: f64) {
+    let _ = (handle, size);
+}
+
+/// Set the text color of the text field (stub).
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    let _ = (handle, r, g, b, a);
+}
+
 /// Set the text of an editable text field from a StringHeader pointer.
 pub fn set_string_value(handle: i64, text_ptr: *const u8) {
     let text = str_from_header(text_ptr);

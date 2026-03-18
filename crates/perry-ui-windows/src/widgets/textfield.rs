@@ -146,6 +146,45 @@ pub fn focus(handle: i64) {
     }
 }
 
+/// Set whether the text field is borderless.
+pub fn set_borderless(handle: i64, borderless: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = super::get_hwnd(handle) {
+            unsafe {
+                let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                if borderless > 0.5 {
+                    let new_style = style & !(WS_BORDER.0);
+                    SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
+                } else {
+                    let new_style = style | WS_BORDER.0;
+                    SetWindowLongW(hwnd, GWL_STYLE, new_style as i32);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (handle, borderless);
+    }
+}
+
+/// Set the background color of the text field (stub — not implemented on Windows).
+pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    let _ = (handle, r, g, b, a);
+}
+
+/// Set the font size of the text field (stub — not implemented on Windows).
+pub fn set_font_size(handle: i64, size: f64) {
+    let _ = (handle, size);
+}
+
+/// Set the text color of the text field (stub — not implemented on Windows).
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    let _ = (handle, r, g, b, a);
+}
+
 /// Set the text value of a TextField programmatically.
 pub fn set_string_value(handle: i64, text_ptr: *const u8) {
     let text = str_from_header(text_ptr);

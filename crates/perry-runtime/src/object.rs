@@ -737,10 +737,17 @@ pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32
     let obj = { let b = obj as usize; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return JSValue::undefined(); } (b & 0x0000_FFFF_FFFF_FFFF) as *const ObjectHeader } else { obj } };
     if obj.is_null() || (obj as usize) < 0x10000 { return JSValue::undefined(); }
     unsafe {
-        // Bounds check: return undefined for out-of-range field indices
+        // Bounds check: check inline fields first, then overflow map
         let fc = (*obj).field_count;
         if field_index >= fc {
-            return JSValue::undefined();
+            // Check overflow map for fields that didn't fit in inline storage
+            let overflow_val = OVERFLOW_FIELDS.with(|m| {
+                m.borrow().get(&(obj as usize)).and_then(|fields| fields.get(&(field_index as usize)).copied())
+            });
+            return match overflow_val {
+                Some(bits) => JSValue::from_bits(bits),
+                None => JSValue::undefined(),
+            };
         }
         // Guard: corrupted objects with unreasonably large field_count
         if fc > 10000 {

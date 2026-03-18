@@ -365,3 +365,68 @@ pub fn set_text_str(handle: i64, text: &str) {
         }
     }
 }
+
+/// Set whether the text field is borderless (0 = bordered, 1 = borderless).
+pub fn set_borderless(handle: i64, borderless: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            if borderless > 0.5 {
+                tf.setBezeled(false);
+                tf.setBordered(false);
+            } else {
+                tf.setBezeled(true);
+                tf.setBordered(true);
+            }
+        }
+    }
+}
+
+/// Set the background color of the text field.
+pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            tf.setDrawsBackground(true);
+            let color: Retained<objc2_app_kit::NSColor> = objc2::msg_send![
+                objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
+                colorWithRed: r as objc2_core_foundation::CGFloat,
+                green: g as objc2_core_foundation::CGFloat,
+                blue: b as objc2_core_foundation::CGFloat,
+                alpha: a as objc2_core_foundation::CGFloat
+            ];
+            tf.setBackgroundColor(Some(&color));
+        }
+    }
+}
+
+/// Set the font size of the text field.
+pub fn set_font_size(handle: i64, size: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            let font: Retained<objc2_app_kit::NSFont> = objc2::msg_send![
+                objc2::runtime::AnyClass::get(c"NSFont").unwrap(),
+                systemFontOfSize: size as objc2_core_foundation::CGFloat
+            ];
+            tf.setFont(Some(&font));
+        }
+    }
+}
+
+/// Set the text color of the text field.
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    if let Some(view) = super::get_widget(handle) {
+        unsafe {
+            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+            let color: Retained<objc2_app_kit::NSColor> = objc2::msg_send![
+                objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
+                colorWithRed: r as objc2_core_foundation::CGFloat,
+                green: g as objc2_core_foundation::CGFloat,
+                blue: b as objc2_core_foundation::CGFloat,
+                alpha: a as objc2_core_foundation::CGFloat
+            ];
+            tf.setTextColor(Some(&color));
+        }
+    }
+}

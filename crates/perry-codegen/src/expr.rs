@@ -10656,11 +10656,13 @@ pub(crate) fn compile_expr(
                     Err(anyhow!("Unsupported callee: LocalGet with unknown variable id={}", id))
                 }
                 Expr::ExternFuncRef { name: func_name, param_types, return_type } => {
-                    // Intercept keccak256: use native Rust implementation instead of
-                    // compiled TypeScript (which has bitwise operation bugs in the
-                    // keccak permutation). Takes Uint8Array, returns hex string.
-                    if func_name == "keccak256" {
-                        if let Some(&native_func) = extern_funcs.get("js_keccak256_native") {
+                    // Intercept keccakHash: native Rust keccak256 replacing the compiled
+                    // TypeScript version (which has bitwise operation bugs in the
+                    // keccak permutation). keccakHash is the raw bytes-returning function
+                    // in ethkit's crypto/keccak.ts. hash.ts's string-returning keccak256
+                    // calls keccakHash internally and formats the result.
+                    if func_name == "keccakHash" {
+                        if let Some(&native_func) = extern_funcs.get("js_keccak256_native_bytes") {
                             let func_ref = module.declare_func_in_func(native_func, builder.func);
                             let buf_ptr = if !arg_vals.is_empty() {
                                 ensure_i64(builder, arg_vals[0])
@@ -10669,7 +10671,7 @@ pub(crate) fn compile_expr(
                             };
                             let call = builder.ins().call(func_ref, &[buf_ptr]);
                             let result_ptr = builder.inst_results(call)[0];
-                            return Ok(inline_nanbox_string(builder, result_ptr));
+                            return Ok(result_ptr); // I64 buffer pointer
                         }
                     }
 
@@ -16341,7 +16343,8 @@ pub(crate) fn compile_expr(
                     }
                     "widgetSetHidden" | "stackSetDetachesHidden" | "stackSetDistribution" | "stackSetAlignment" | "textSetFontSize" | "textSetSelectable" |
                     "textSetWraps" |
-                    "buttonSetBordered" | "textfieldFocus" | "widgetClearChildren" | "widgetMatchParentHeight" | "widgetMatchParentWidth" |
+                    "buttonSetBordered" | "textfieldFocus" | "textfieldSetBorderless" | "textfieldSetFontSize" |
+                    "widgetClearChildren" | "widgetMatchParentHeight" | "widgetMatchParentWidth" |
                     "widgetSetWidth" | "widgetSetHeight" | "widgetSetHugging" | "buttonSetImagePosition" |
                     "widgetSetOverlayFrame" => {
                         // (handle, ...) — extract handle, pass remaining args as f64
@@ -16362,6 +16365,8 @@ pub(crate) fn compile_expr(
                             "textSetWraps" => "perry_ui_text_set_wraps",
                             "buttonSetBordered" => "perry_ui_button_set_bordered",
                             "textfieldFocus" => "perry_ui_textfield_focus",
+                            "textfieldSetBorderless" => "perry_ui_textfield_set_borderless",
+                            "textfieldSetFontSize" => "perry_ui_textfield_set_font_size",
                             "widgetClearChildren" => "perry_ui_widget_clear_children",
                             "widgetMatchParentHeight" => "perry_ui_widget_match_parent_height",
                             "widgetMatchParentWidth" => "perry_ui_widget_match_parent_width",
@@ -16424,7 +16429,8 @@ pub(crate) fn compile_expr(
                         let nanbox_call = builder.ins().call(nanbox_ref, &[result_i64]);
                         return Ok(builder.inst_results(nanbox_call)[0]);
                     }
-                    "textSetColor" | "buttonSetTextColor" | "buttonSetContentTintColor" => {
+                    "textSetColor" | "buttonSetTextColor" | "buttonSetContentTintColor" |
+                    "textfieldSetBackgroundColor" | "textfieldSetTextColor" => {
                         // (handle, r, g, b, a) — extract handle, pass 4 f64 args
                         let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
                             .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
@@ -16441,6 +16447,8 @@ pub(crate) fn compile_expr(
                         let ffi_name = match method.as_str() {
                             "buttonSetTextColor" => "perry_ui_button_set_text_color",
                             "buttonSetContentTintColor" => "perry_ui_button_set_content_tint_color",
+                            "textfieldSetBackgroundColor" => "perry_ui_textfield_set_background_color",
+                            "textfieldSetTextColor" => "perry_ui_textfield_set_text_color",
                             _ => "perry_ui_text_set_color",
                         };
                         let func = extern_funcs.get(ffi_name)

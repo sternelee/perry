@@ -142,6 +142,26 @@ pub fn get_string_value(handle: i64) -> *const u8 {
     unsafe { js_string_from_bytes(std::ptr::null(), 0) }
 }
 
+/// Set whether the text field is borderless (stub).
+pub fn set_borderless(handle: i64, borderless: f64) {
+    let _ = (handle, borderless);
+}
+
+/// Set the background color of the text field (stub).
+pub fn set_background_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    let _ = (handle, r, g, b, a);
+}
+
+/// Set the font size of the text field (stub).
+pub fn set_font_size(handle: i64, size: f64) {
+    let _ = (handle, size);
+}
+
+/// Set the text color of the text field (stub).
+pub fn set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
+    let _ = (handle, r, g, b, a);
+}
+
 /// Set a callback for when the user presses Enter/Done on the keyboard.
 pub fn set_on_submit(handle: i64, on_submit: f64) {
     if let Some(view_ref) = super::get_widget(handle) {
