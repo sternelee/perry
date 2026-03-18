@@ -222,21 +222,9 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
 /// This prevents double CRT initialization when both perry-stdlib and perry-ui-windows
 /// are linked (both bundle perry-runtime and Rust std as staticlib dependencies).
 /// Returns a path to a trimmed .lib, or the original path if stripping fails.
-#[cfg(target_os = "windows")]
 fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
-    // Find llvm-ar from the Rust toolchain
-    let llvm_ar = {
-        let mut found = None;
-        if let Ok(output) = Command::new("rustc").arg("--print").arg("sysroot").output() {
-            let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let ar_path = PathBuf::from(&sysroot)
-                .join("lib").join("rustlib").join("x86_64-pc-windows-msvc").join("bin").join("llvm-ar.exe");
-            if ar_path.exists() {
-                found = Some(ar_path);
-            }
-        }
-        found.ok_or_else(|| anyhow::anyhow!("llvm-ar not found in Rust toolchain"))?
-    };
+    let llvm_ar = find_llvm_tool("llvm-ar")
+        .ok_or_else(|| anyhow::anyhow!("llvm-ar not found (install llvm-tools: rustup component add llvm-tools)"))?;
 
     // List members of the .lib
     let output = Command::new(&llvm_ar).arg("t").arg(lib_path).output()?;
@@ -297,6 +285,52 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     Ok(trimmed_lib)
 }
 
+/// Locate an LLVM tool (lld-link, llvm-nm, llvm-ar) from the Rust toolchain or PATH.
+/// Search order: env var override (e.g. PERRY_LLD_LINK) → Rust sysroot → PATH.
+fn find_llvm_tool(tool_name: &str) -> Option<PathBuf> {
+    // 1. Env var override (e.g. PERRY_LLD_LINK for "lld-link")
+    let env_key = format!("PERRY_{}", tool_name.to_uppercase().replace('-', "_"));
+    if let Ok(path) = std::env::var(&env_key) {
+        let p = PathBuf::from(&path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+
+    // 2. Rust sysroot: lib/rustlib/<host-triple>/bin/<tool>
+    if let Ok(output) = Command::new("rustc").arg("--print").arg("sysroot").output() {
+        let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !sysroot.is_empty() {
+            if let Ok(vv) = Command::new("rustc").arg("-vV").output() {
+                let vv_str = String::from_utf8_lossy(&vv.stdout);
+                if let Some(host_line) = vv_str.lines().find(|l| l.starts_with("host:")) {
+                    let host_triple = host_line.trim_start_matches("host:").trim();
+                    let exe_suffix = if cfg!(target_os = "windows") { ".exe" } else { "" };
+                    let tool_path = PathBuf::from(&sysroot)
+                        .join("lib").join("rustlib").join(host_triple).join("bin")
+                        .join(format!("{}{}", tool_name, exe_suffix));
+                    if tool_path.exists() {
+                        return Some(tool_path);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. PATH lookup
+    let which_cmd = if cfg!(target_os = "windows") { "where" } else { "which" };
+    if let Ok(output) = Command::new(which_cmd).arg(tool_name).output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path.lines().next().unwrap_or(&path)));
+            }
+        }
+    }
+
+    None
+}
+
 /// Find MSVC link.exe by searching Visual Studio installation directories.
 /// On Windows, the PATH may contain a GNU `link` utility (e.g. from Git Bash/MSYS2)
 /// which is not the MSVC linker. This function searches for the real MSVC link.exe.
@@ -336,7 +370,7 @@ fn find_msvc_link_exe() -> Option<PathBuf> {
 
 #[cfg(not(target_os = "windows"))]
 fn find_msvc_link_exe() -> Option<PathBuf> {
-    None
+    find_llvm_tool("lld-link")
 }
 
 /// Find MSVC library search paths (MSVC CRT, Windows SDK um, Windows SDK ucrt).
@@ -401,7 +435,45 @@ fn find_msvc_lib_paths() -> Option<String> {
 
 #[cfg(not(target_os = "windows"))]
 fn find_msvc_lib_paths() -> Option<String> {
-    None
+    let sysroot = std::env::var("PERRY_WINDOWS_SYSROOT").ok()?;
+    let root = PathBuf::from(&sysroot);
+    if !root.exists() {
+        eprintln!("Warning: PERRY_WINDOWS_SYSROOT={} does not exist", root.display());
+        return None;
+    }
+
+    let mut paths = Vec::new();
+
+    // Search for xwin-style structured layout (crt/lib/x86_64, sdk/lib/um/x86_64, etc.)
+    for (crt_sub, um_sub, ucrt_sub) in &[
+        ("crt/lib/x86_64", "sdk/lib/um/x86_64", "sdk/lib/ucrt/x86_64"),
+        ("crt/lib/x64", "sdk/lib/um/x64", "sdk/lib/ucrt/x64"),
+    ] {
+        let crt = root.join(crt_sub);
+        let um = root.join(um_sub);
+        let ucrt = root.join(ucrt_sub);
+        if crt.exists() || um.exists() || ucrt.exists() {
+            if crt.exists() { paths.push(crt.to_string_lossy().to_string()); }
+            if um.exists() { paths.push(um.to_string_lossy().to_string()); }
+            if ucrt.exists() { paths.push(ucrt.to_string_lossy().to_string()); }
+            break;
+        }
+    }
+
+    // Flat lib/ directory
+    if paths.is_empty() {
+        let flat_lib = root.join("lib");
+        if flat_lib.exists() {
+            paths.push(flat_lib.to_string_lossy().to_string());
+        }
+    }
+
+    // Root itself as last resort
+    if paths.is_empty() {
+        paths.push(root.to_string_lossy().to_string());
+    }
+
+    Some(paths.join(";"))
 }
 
 /// Find a library by name, optionally searching cross-compilation target directories
@@ -3174,36 +3246,27 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 defined_syms.insert(func.name.clone());
             }
         }
-        // Find the nm tool: use system `nm` on macOS/Linux, or `llvm-nm` from Rust toolchain on Windows
-        let nm_cmd = {
-            #[cfg(target_os = "windows")]
-            {
-                // On Windows, nm is not available. Use llvm-nm from the Rust toolchain.
-                let mut found = None;
-                if let Ok(output) = std::process::Command::new("rustc").arg("--print").arg("sysroot").output() {
-                    let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let llvm_nm = PathBuf::from(&sysroot)
-                        .join("lib").join("rustlib").join("x86_64-pc-windows-msvc").join("bin").join("llvm-nm.exe");
-                    if llvm_nm.exists() {
-                        found = Some(llvm_nm.to_string_lossy().to_string());
-                    }
-                }
-                found.unwrap_or_else(|| "nm".to_string())
-            }
-            #[cfg(not(target_os = "windows"))]
-            { "nm".to_string() }
+        // Find the nm tool: for Windows targets use llvm-nm (reads COFF); otherwise system nm
+        let nm_cmd = if is_windows {
+            find_llvm_tool("llvm-nm")
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| "nm".to_string())
+        } else {
+            "nm".to_string()
         };
-        // On macOS (Mach-O), nm prefixes symbols with `_`; on Windows (COFF), no prefix.
-        let strip_underscore = !cfg!(target_os = "windows");
+        // Symbol prefix depends on object format:
+        // Mach-O (native macOS build, no --target): nm adds `_` prefix
+        // COFF (Windows targets): no prefix
+        // ELF (Linux/Android targets): no prefix
+        let is_macho = !is_windows && !is_linux && !is_android && !is_ios && cfg!(target_os = "macos");
         for scan_path in &all_scan_paths {
             if let Ok(output) = std::process::Command::new(&nm_cmd).arg("-g").arg(scan_path).output() {
                 for line in String::from_utf8_lossy(&output.stdout).lines() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
                         let (st, sn) = if parts.len() == 3 { (parts[1], parts[2]) } else { (parts[0], parts[1]) };
-                        // On macOS, nm adds a leading '_' prefix to all C symbols.
-                        // On Linux, nm shows symbols as-is. Only strip on macOS.
-                        let cn = if cfg!(target_os = "macos") {
+                        // Strip leading `_` only for Mach-O objects (native macOS builds)
+                        let cn = if is_macho {
                             sn.strip_prefix('_').unwrap_or(sn)
                         } else {
                             sn
@@ -3224,7 +3287,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             // archives, unlike macOS/Linux which only pull in needed objects.
                             // When perry/ui is not used, collect UI/system/plugin symbols from
                             // stdlib so stubs are generated for them.
-                            else if cfg!(target_os = "windows") && !ctx.needs_ui && (
+                            else if is_windows && !ctx.needs_ui && (
                                 cn.starts_with("perry_ui_") || cn.starts_with("perry_system_") ||
                                 cn.starts_with("perry_plugin_") || cn.starts_with("perry_get_")
                             ) {
@@ -3282,6 +3345,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             { PathBuf::from(format!("{}.dylib", stem)) }
             #[cfg(not(target_os = "macos"))]
             { PathBuf::from(format!("{}.so", stem)) }
+        } else if matches!(target.as_deref(), Some("windows"))
+            || (target.is_none() && cfg!(target_os = "windows"))
+        {
+            PathBuf::from(format!("{}.exe", stem))
         } else {
             PathBuf::from(stem)
         }
@@ -3334,6 +3401,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         || (target.is_none() && cfg!(target_os = "linux"));
     let is_windows = matches!(target.as_deref(), Some("windows"))
         || (target.is_none() && cfg!(target_os = "windows"));
+    let is_cross_windows = is_windows && !cfg!(target_os = "windows");
 
     // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
     if is_dylib {
@@ -3483,7 +3551,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         c
     } else if is_windows {
         // Windows target — use MSVC link.exe (native) or lld-link (cross)
-        let linker = find_msvc_link_exe().unwrap_or_else(|| PathBuf::from("link.exe"));
+        let linker = find_msvc_link_exe().unwrap_or_else(|| {
+            if is_cross_windows {
+                eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
+            }
+            PathBuf::from("link.exe")
+        });
         let mut c = Command::new(linker);
         c.arg("/SUBSYSTEM:WINDOWS")
          .arg("/ENTRY:mainCRTStartup")
@@ -3493,6 +3566,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
                 c.env("LIB", lib_paths);
+            } else if is_cross_windows {
+                eprintln!("Warning: No Windows SDK library paths found. Set PERRY_WINDOWS_SYSROOT to your xwin sysroot.");
             }
         }
         c
@@ -3726,7 +3801,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // Rust std. When perry-stdlib is also linked (which bundles the same), the
             // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
             // UI-specific objects from the .lib and link them individually.
-            #[cfg(target_os = "windows")]
             let ui_lib = if is_windows {
                 strip_duplicate_objects_from_lib(&ui_lib)
                     .unwrap_or(ui_lib)
