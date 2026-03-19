@@ -34,14 +34,18 @@ define_class!(
         fn menu_item_clicked(&self, _sender: &AnyObject) {
             crate::catch_callback_panic("menu callback", std::panic::AssertUnwindSafe(|| {
                 let key = self.ivars().callback_key.get();
-                MENU_ITEM_CALLBACKS.with(|cbs| {
-                    if let Some(&closure_f64) = cbs.borrow().get(&key) {
-                        let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) };
-                        unsafe {
-                            js_closure_call0(closure_ptr as *const u8);
-                        }
-                    }
+                // Extract callback BEFORE calling it — the JS callback may re-enter
+                // menuAddItem (e.g. building context menus), which needs borrow_mut().
+                // Holding the borrow across js_closure_call0 would panic.
+                let closure_f64 = MENU_ITEM_CALLBACKS.with(|cbs| {
+                    cbs.borrow().get(&key).copied()
                 });
+                if let Some(cf) = closure_f64 {
+                    let closure_ptr = unsafe { js_nanbox_get_pointer(cf) };
+                    unsafe {
+                        js_closure_call0(closure_ptr as *const u8);
+                    }
+                }
             }));
         }
     }
@@ -164,6 +168,13 @@ pub fn add_item_with_shortcut(menu_handle: i64, title_ptr: *const u8, callback: 
 
             menu.addItem(&item);
         }
+    }
+}
+
+/// Remove all items from a menu.
+pub fn clear(menu_handle: i64) {
+    if let Some(menu) = get_menu(menu_handle) {
+        menu.removeAllItems();
     }
 }
 

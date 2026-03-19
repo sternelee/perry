@@ -8805,6 +8805,14 @@ impl Compiler {
             self.extern_funcs.insert("perry_ui_menu_add_standard_action".to_string(), func_id);
         }
 
+        // perry_ui_menu_clear(menu: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // menu handle
+            let func_id = self.module.declare_function("perry_ui_menu_clear", Linkage::Import, &sig)?;
+            self.extern_funcs.insert("perry_ui_menu_clear".to_string(), func_id);
+        }
+
         // perry_ui_menu_add_separator(menu: i64)
         {
             let mut sig = self.module.make_signature();

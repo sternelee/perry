@@ -494,6 +494,12 @@ pub extern "C" fn perry_ui_menu_add_standard_action(menu_handle: i64, title_ptr:
     menu::add_standard_action(menu_handle, title_ptr as *const u8, selector_ptr as *const u8, shortcut_ptr as *const u8);
 }
 
+/// Remove all items from a menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_clear(menu_handle: i64) {
+    menu::clear(menu_handle);
+}
+
 /// Add a separator to a menu.
 #[no_mangle]
 pub extern "C" fn perry_ui_menu_add_separator(menu_handle: i64) {
