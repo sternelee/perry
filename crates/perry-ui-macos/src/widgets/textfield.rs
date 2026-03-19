@@ -367,6 +367,7 @@ pub fn set_text_str(handle: i64, text: &str) {
 }
 
 /// Set whether the text field is borderless (0 = bordered, 1 = borderless).
+/// When borderless, also disables the macOS blue focus ring.
 pub fn set_borderless(handle: i64, borderless: f64) {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
@@ -374,9 +375,13 @@ pub fn set_borderless(handle: i64, borderless: f64) {
             if borderless > 0.5 {
                 tf.setBezeled(false);
                 tf.setBordered(false);
+                // NSFocusRingTypeNone = 1
+                let _: () = objc2::msg_send![tf, setFocusRingType: 1u64];
             } else {
                 tf.setBezeled(true);
                 tf.setBordered(true);
+                // NSFocusRingTypeDefault = 0
+                let _: () = objc2::msg_send![tf, setFocusRingType: 0u64];
             }
         }
     }
