@@ -275,7 +275,10 @@ pub fn register_widget_with_layout(hwnd: isize, kind: WidgetKind, spacing: f64, 
 #[cfg(target_os = "windows")]
 pub fn get_hwnd(handle: i64) -> Option<HWND> {
     WIDGETS.with(|w| {
-        let widgets = w.borrow();
+        let widgets = match w.try_borrow() {
+            Ok(w) => w,
+            Err(_) => return None,
+        };
         let idx = (handle - 1) as usize;
         if idx < widgets.len() {
             Some(widgets[idx].hwnd)
@@ -288,7 +291,10 @@ pub fn get_hwnd(handle: i64) -> Option<HWND> {
 #[cfg(not(target_os = "windows"))]
 pub fn get_hwnd(handle: i64) -> Option<isize> {
     WIDGETS.with(|w| {
-        let widgets = w.borrow();
+        let widgets = match w.try_borrow() {
+            Ok(w) => w,
+            Err(_) => return None,
+        };
         let idx = (handle - 1) as usize;
         if idx < widgets.len() {
             Some(widgets[idx].hwnd)
@@ -301,7 +307,10 @@ pub fn get_hwnd(handle: i64) -> Option<isize> {
 /// Get widget info (clone-safe subset).
 pub fn get_widget_info(handle: i64) -> Option<WidgetInfo> {
     WIDGETS.with(|w| {
-        let widgets = w.borrow();
+        let widgets = match w.try_borrow() {
+            Ok(w) => w,
+            Err(_) => return None,
+        };
         let idx = (handle - 1) as usize;
         if idx < widgets.len() {
             Some(WidgetInfo {
@@ -324,16 +333,22 @@ pub fn get_widget_info(handle: i64) -> Option<WidgetInfo> {
 }
 
 /// Find the widget handle that owns a given HWND.
+/// Uses try_borrow to handle re-entrant calls from Win32 message loop
+/// (e.g. ShowWindow sends WM_SIZE while widgets are still being created).
 #[cfg(target_os = "windows")]
 pub fn find_handle_by_hwnd(hwnd: HWND) -> i64 {
     WIDGETS.with(|w| {
-        let widgets = w.borrow();
-        for (i, widget) in widgets.iter().enumerate() {
-            if widget.hwnd == hwnd {
-                return (i + 1) as i64;
+        match w.try_borrow() {
+            Ok(widgets) => {
+                for (i, widget) in widgets.iter().enumerate() {
+                    if widget.hwnd == hwnd {
+                        return (i + 1) as i64;
+                    }
+                }
+                0
             }
+            Err(_) => 0, // Re-entrant call — return 0 (not found)
         }
-        0
     })
 }
 
@@ -343,7 +358,10 @@ pub fn find_handle_by_hwnd(_hwnd: isize) -> i64 { 0 }
 /// Find widget handle by control ID.
 pub fn find_handle_by_control_id(id: u16) -> i64 {
     WIDGETS.with(|w| {
-        let widgets = w.borrow();
+        let widgets = match w.try_borrow() {
+            Ok(w) => w,
+            Err(_) => return 0,
+        };
         for (i, widget) in widgets.iter().enumerate() {
             if widget.control_id == id {
                 return (i + 1) as i64;
@@ -507,7 +525,10 @@ pub fn handle_command(control_id: u16, notify_code: u16, _lparam: LPARAM) {
         let handle = find_handle_by_control_id(control_id);
         if handle > 0 {
             let kind = WIDGETS.with(|w| {
-                let widgets = w.borrow();
+                let widgets = match w.try_borrow() {
+                    Ok(w) => w,
+                    Err(_) => return None,
+                };
                 let idx = (handle - 1) as usize;
                 if idx < widgets.len() {
                     Some(widgets[idx].kind.clone())
@@ -527,7 +548,10 @@ pub fn handle_command(control_id: u16, notify_code: u16, _lparam: LPARAM) {
         let handle = find_handle_by_control_id(control_id);
         if handle > 0 {
             let kind = WIDGETS.with(|w| {
-                let widgets = w.borrow();
+                let widgets = match w.try_borrow() {
+                    Ok(w) => w,
+                    Err(_) => return None,
+                };
                 let idx = (handle - 1) as usize;
                 if idx < widgets.len() {
                     Some(widgets[idx].kind.clone())
@@ -545,7 +569,10 @@ pub fn handle_command(control_id: u16, notify_code: u16, _lparam: LPARAM) {
         let handle = find_handle_by_control_id(control_id);
         if handle > 0 {
             let kind = WIDGETS.with(|w| {
-                let widgets = w.borrow();
+                let widgets = match w.try_borrow() {
+                    Ok(w) => w,
+                    Err(_) => return None,
+                };
                 let idx = (handle - 1) as usize;
                 if idx < widgets.len() {
                     Some(widgets[idx].kind.clone())
@@ -571,7 +598,10 @@ pub fn handle_scroll(wparam: WPARAM, lparam: LPARAM) {
     let handle = find_handle_by_hwnd(child_hwnd);
     if handle > 0 {
         let kind = WIDGETS.with(|w| {
-            let widgets = w.borrow();
+            let widgets = match w.try_borrow() {
+                Ok(w) => w,
+                Err(_) => return None,
+            };
             let idx = (handle - 1) as usize;
             if idx < widgets.len() {
                 Some(widgets[idx].kind.clone())

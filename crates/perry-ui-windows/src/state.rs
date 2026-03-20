@@ -338,10 +338,11 @@ pub fn bind_toggle(state_handle: i64, toggle_handle: i64) {
 
 /// Bind a text widget to multiple states with a template.
 pub fn bind_text_template(text_handle: i64, num_parts: i32, types_ptr: *const i32, values_ptr: *const i64) {
-    let mut parts = Vec::new();
-    let mut state_handles = Vec::new();
+    let n = num_parts as usize;
+    let mut parts = Vec::with_capacity(n);
+    let mut state_handles = Vec::with_capacity(n);
 
-    for i in 0..num_parts as usize {
+    for i in 0..n {
         let part_type = unsafe { *types_ptr.add(i) };
         let part_value = unsafe { *values_ptr.add(i) };
 

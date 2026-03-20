@@ -223,7 +223,7 @@ pub extern "C" fn js_child_process_exec_sync(
     _options_ptr: *const ObjectHeader,
 ) -> *mut StringHeader {
     if cmd_ptr.is_null() {
-        return std::ptr::null_mut();
+        return unsafe { js_string_from_bytes(b"".as_ptr(), 0) };
     }
 
     unsafe {
@@ -233,7 +233,7 @@ pub extern "C" fn js_child_process_exec_sync(
 
         let cmd_str = match std::str::from_utf8(cmd_bytes) {
             Ok(s) => s,
-            Err(_) => return std::ptr::null_mut(),
+            Err(_) => return js_string_from_bytes(b"".as_ptr(), 0),
         };
 
         // Execute the command using shell
@@ -255,7 +255,7 @@ pub extern "C" fn js_child_process_exec_sync(
                 let stdout = &output.stdout;
                 js_string_from_bytes(stdout.as_ptr(), stdout.len() as u32)
             }
-            Err(_) => std::ptr::null_mut(),
+            Err(_) => js_string_from_bytes(b"".as_ptr(), 0),
         }
     }
 }

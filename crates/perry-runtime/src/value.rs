@@ -420,9 +420,17 @@ pub extern "C" fn js_nanbox_pointer(ptr: i64) -> f64 {
 /// Create a NaN-boxed string pointer value from an i64 raw pointer.
 /// Returns the value as f64 for storage in union-typed variables.
 /// This uses STRING_TAG (0x7FFF) to distinguish from object pointers.
+/// If ptr is null, returns a NaN-boxed empty string to prevent null
+/// dereference when callers access .length on the result.
 #[no_mangle]
 pub extern "C" fn js_nanbox_string(ptr: i64) -> f64 {
-    let jsval = JSValue::string_ptr(ptr as *mut crate::string::StringHeader);
+    let actual_ptr = if ptr == 0 {
+        // Allocate an empty string instead of boxing null
+        unsafe { crate::string::js_string_from_bytes(b"".as_ptr(), 0) as i64 }
+    } else {
+        ptr
+    };
+    let jsval = JSValue::string_ptr(actual_ptr as *mut crate::string::StringHeader);
     f64::from_bits(jsval.bits())
 }
 

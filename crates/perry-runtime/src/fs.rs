@@ -25,7 +25,7 @@ pub extern "C" fn js_fs_read_file_sync(path_value: f64) -> *mut StringHeader {
     unsafe {
         let path_ptr = extract_string_ptr(path_value);
         if path_ptr.is_null() {
-            return std::ptr::null_mut();
+            return js_string_from_bytes(b"".as_ptr(), 0);
         }
 
         let len = (*path_ptr).length as usize;
@@ -68,7 +68,10 @@ pub extern "C" fn js_fs_read_file_sync(path_value: f64) -> *mut StringHeader {
                     let c_err = std::ffi::CString::new(format!("{}", _e)).unwrap_or_default();
                     __android_log_print(6, b"PerryFS\0".as_ptr(), b"readFileSync: ERROR: %s\0".as_ptr(), c_err.as_ptr());
                 }
-                std::ptr::null_mut()
+                // Return empty string instead of null to prevent crashes when
+                // callers access .length on the result without null-checking.
+                // Perry's try/catch doesn't catch null-pointer segfaults.
+                js_string_from_bytes(b"".as_ptr(), 0)
             }
         }
     }

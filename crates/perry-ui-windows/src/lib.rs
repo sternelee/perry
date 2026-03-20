@@ -988,37 +988,11 @@ pub extern "C" fn perry_plugin_load(_path_ptr: i64) -> i64 { 0 }
 #[no_mangle]
 pub extern "C" fn perry_plugin_unload(_handle: i64) {}
 
-/// Exponential backoff utility (stub — not yet implemented on Windows).
-#[no_mangle]
-pub extern "C" fn backOff(_func: f64, _opts: f64) -> f64 { 0.0 }
-
-// =============================================================================
-// Stubs for newly-generated symbols not yet implemented on Windows
-// =============================================================================
-
-#[no_mangle]
-pub extern "C" fn js_crypto_random_bytes_buffer(_len: i64) -> i64 { 0 }
-
-#[no_mangle]
-pub extern "C" fn js_fetch_get_with_auth(_url: i64, _auth: i64) -> f64 { 0.0 }
-
-#[no_mangle]
-pub extern "C" fn js_fetch_post_with_auth(_url: i64, _body: i64, _auth: i64) -> f64 { 0.0 }
-
-#[no_mangle]
-pub extern "C" fn js_fetch_stream_close(_handle: i64) {}
-
-#[no_mangle]
-pub extern "C" fn js_fetch_stream_poll(_handle: i64) -> f64 { 0.0 }
-
-#[no_mangle]
-pub extern "C" fn js_fetch_stream_start(_url: i64, _method: i64, _headers: i64, _body: i64) -> i64 { 0 }
-
-#[no_mangle]
-pub extern "C" fn js_fetch_stream_status(_handle: i64) -> i64 { 0 }
-
-#[no_mangle]
-pub extern "C" fn js_ws_handle_to_i64(_handle: f64) -> i64 { 0 }
+// NOTE: backOff, js_crypto_random_bytes_buffer, js_fetch_*, js_ws_handle_to_i64,
+// and js_fetch_stream_status are provided by perry-stdlib. When linking the IDE
+// (which uses both perry-stdlib and perry-ui-windows), these stubs caused
+// duplicate symbol errors (LNK2005). Removed — perry-stdlib provides the real
+// implementations.
 
 #[no_mangle]
 pub extern "C" fn perry_ui_qrcode_create() -> i64 { 0 }
@@ -1122,3 +1096,104 @@ pub extern "C" fn perry_ui_textfield_set_font_size(handle: i64, size: f64) {
 pub extern "C" fn perry_ui_textfield_set_text_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
     widgets::textfield::set_text_color(handle, r, g, b, a);
 }
+
+// =============================================================================
+// Device / screen stubs (iOS-only on macOS, stubs everywhere else)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_get_screen_width() -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_get_screen_height() -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_get_scale_factor() -> f64 { 0.0 }
+
+#[no_mangle]
+pub extern "C" fn perry_get_orientation() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_get_device_idiom() -> f64 { 0.0 }
+
+// =============================================================================
+// Splitview / VBox stubs (iOS-only layout containers)
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_add_child(_handle: i64, _child: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_create(_spacing: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_add_child(_handle: i64, _child: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_vbox_finalize(_handle: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_create() -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_frame_split_add_child(_handle: i64, _child: i64) {}
+
+// =============================================================================
+// App icon & file open polling
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_icon(_path_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_poll_open_file() -> i64 { 0 }
+
+// =============================================================================
+// TextArea (multi-line text editor) stubs
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_create(_on_change: f64) -> i64 { 0 }
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_set_string(_handle: i64, _text_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_get_string(_handle: i64) -> i64 { 0 }
+
+// =============================================================================
+// TextField focus stubs
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_set_on_focus(_handle: i64, _callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textfield_blur_all() {}
+
+// =============================================================================
+// Stack alignment stub
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_stack_set_alignment(_handle: i64, _alignment: f64) {}
+
+// =============================================================================
+// Widget overlay & edge insets stubs
+// =============================================================================
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_overlay(_parent: i64, _child: i64) {
+    // For now, treat as regular add_child
+    widgets::add_child(_parent, _child);
+    app::request_layout();
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_overlay_frame(_handle: i64, _x: f64, _y: f64, _w: f64, _h: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_edge_insets(_handle: i64, _top: f64, _left: f64, _bottom: f64, _right: f64) {}

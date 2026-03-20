@@ -218,72 +218,153 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// On Windows, strip duplicate perry-runtime / Rust std objects from a UI staticlib.
-/// This prevents double CRT initialization when both perry-stdlib and perry-ui-windows
-/// are linked (both bundle perry-runtime and Rust std as staticlib dependencies).
-/// Returns a path to a trimmed .lib, or the original path if stripping fails.
+/// On Windows, build a trimmed UI lib using the rlib (not staticlib).
+///
+/// perry-ui-windows builds as both rlib and staticlib. The staticlib bundles
+/// ALL transitive deps (std, alloc, core, perry-runtime -- 314 objects).
+/// perry-stdlib also bundles these. Linking both causes hundreds of duplicate
+/// symbols, and /FORCE:MULTIPLE produces corrupt binaries.
+///
+/// The rlib contains only the UI crate's own code (1 object). We extract it
+/// and combine with UI-only deps (windows, serde, regex...) from the staticlib.
+/// All shared deps come from perry-stdlib. No /FORCE:MULTIPLE needed.
 fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     let llvm_ar = find_llvm_tool("llvm-ar")
         .ok_or_else(|| anyhow::anyhow!("llvm-ar not found (install llvm-tools: rustup component add llvm-tools)"))?;
 
-    // List members of the .lib
-    let output = Command::new(&llvm_ar).arg("t").arg(lib_path).output()?;
-    let members: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    // Try to find the rlib alongside the staticlib
+    let rlib_name = lib_path.file_name()
+        .and_then(|f| f.to_str())
+        .map(|f| format!("lib{}", f.replace(".lib", ".rlib")))
+        .unwrap_or_default();
+    let rlib_path = lib_path.with_file_name(&rlib_name);
+
+    if !rlib_path.exists() {
+        eprintln!("Warning: rlib not found at {:?}, using staticlib as-is", rlib_path);
+        return Ok(lib_path.clone());
+    }
+
+    // Canonicalize paths so they work from any working directory
+    let abs_rlib = std::fs::canonicalize(&rlib_path)?;
+    let abs_staticlib = std::fs::canonicalize(lib_path)?;
+
+    // List rlib members (skip .rmeta metadata)
+    let rlib_out = Command::new(&llvm_ar).arg("t").arg(&abs_rlib).output()?;
+    let rlib_objects: Vec<String> = String::from_utf8_lossy(&rlib_out.stdout)
+        .lines()
+        .filter(|l| l.ends_with(".o"))
+        .map(|l| l.to_string())
+        .collect();
+
+    // List staticlib members to find UI-only deps
+    let staticlib_out = Command::new(&llvm_ar).arg("t").arg(&abs_staticlib).output()?;
+    let staticlib_members: Vec<String> = String::from_utf8_lossy(&staticlib_out.stdout)
         .lines()
         .map(|l| l.to_string())
         .collect();
 
-    // Identify members to DELETE. Strip Rust std, perry-runtime, alloc, core, and
-    // other duplicated objects from the UI lib. When perry-stdlib is also linked,
-    // it already contains all these symbols — keeping them in the UI lib causes
-    // MSVC /FORCE:MULTIPLE to produce corrupt binaries (LNK4088).
-    let remove: Vec<&String> = members.iter().filter(|m| {
-        // std contains .CRT$XCU entries that cause double init crash
-        if m.starts_with("std-") { return true; }
-        // DLL import stubs are already provided by system import libs
-        if m.ends_with(".dll") { return true; }
-        // Rust compiler_builtins are duplicated
-        if m.starts_with("compiler_builtins-") { return true; }
-        // perry-runtime objects — keep them since they may contain unique
-        // monomorphizations needed by UI code.
-        // alloc-*, core-*, hashbrown-* — also keep for same reason.
-        false
+    // Find perry-stdlib members so we can compute the set difference.
+    // Search multiple locations: next to the lib, in target/release/, and via
+    // find_stdlib_library() which checks standard Perry search paths.
+    let stdlib_path = lib_path.parent()
+        .map(|p| p.join("perry_stdlib.lib"))
+        .filter(|p| p.exists())
+        .or_else(|| find_stdlib_library(Some("windows")));
+
+    let stdlib_members: std::collections::HashSet<String> = if let Some(ref sp) = stdlib_path {
+        let abs_sp = std::fs::canonicalize(sp).unwrap_or(sp.clone());
+        let out = Command::new(&llvm_ar).arg("t").arg(&abs_sp).output()
+            .unwrap_or_else(|_| std::process::Command::new("true").output().unwrap());
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.to_string())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    // Determine the main crate prefix from rlib objects (e.g. "hone_editor_windows-")
+    // so we can skip alloc shim objects from the same crate in the staticlib.
+    let crate_prefix: Option<String> = rlib_objects.first()
+        .and_then(|o| o.split('.').next())
+        .and_then(|s| s.split('-').next())
+        .map(|s| format!("{}-", s));
+
+    // Keep only staticlib members that are NOT in perry-stdlib, NOT the main
+    // crate (already extracted from rlib), and not compiler_builtins.
+    let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
+        if m.ends_with(".dll") { return false; }
+        if m.contains("compiler_builtins") { return false; }
+        if stdlib_members.contains(m.as_str()) { return false; }
+        // Skip objects from the main crate (rlib provides these)
+        if let Some(ref prefix) = crate_prefix {
+            if m.starts_with(prefix.as_str()) { return false; }
+        }
+        true
     }).collect();
 
-    if remove.is_empty() {
+    let trimmed_lib = abs_staticlib.with_file_name("_perry_ui_trimmed.lib");
+    let extract_dir = abs_staticlib.with_file_name("_perry_ui_extract");
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    std::fs::create_dir_all(&extract_dir)?;
+
+    let mut all_objects: Vec<std::path::PathBuf> = Vec::new();
+
+    // Extract UI crate objects from rlib (use absolute paths).
+    // Skip allocator shim CGUs — these contain __rust_alloc etc. that are
+    // already provided by perry-stdlib. Shim CGUs have random hash names
+    // (not the standard "cgu.NN" pattern).
+    for member in &rlib_objects {
+        // Standard CGUs: "crate-hash.crate.hash-cgu.NN.rcgu.o"
+        // Alloc shims:   "crate-hash.RANDOMHASH.rcgu.o" (no "cgu." in name)
+        let is_alloc_shim = !member.contains(".cgu.") && !member.contains("-cgu.");
+        if is_alloc_shim {
+            continue;
+        }
+        let out = Command::new(&llvm_ar)
+            .arg("x").arg(&abs_rlib).arg(member)
+            .current_dir(&extract_dir)
+            .output()?;
+        if out.status.success() {
+            let p = extract_dir.join(member);
+            if p.exists() { all_objects.push(p); }
+        }
+    }
+
+    // Extract UI-only deps from staticlib (use absolute paths)
+    for member in &ui_only_deps {
+        let out = Command::new(&llvm_ar)
+            .arg("x").arg(&abs_staticlib).arg(member.as_str())
+            .current_dir(&extract_dir)
+            .output()?;
+        if out.status.success() {
+            let p = extract_dir.join(member.as_str());
+            if p.exists() { all_objects.push(p); }
+        }
+    }
+
+    eprintln!("Building trimmed UI lib: {} rlib + {} deps = {} objects (was {})",
+        rlib_objects.len(), ui_only_deps.len(), all_objects.len(), staticlib_members.len());
+
+    // Create new archive from just the UI-specific objects
+    let mut ar_cmd = Command::new(&llvm_ar);
+    ar_cmd.arg("crs").arg(&trimmed_lib);
+    for p in &all_objects {
+        ar_cmd.arg(p);
+    }
+    let ar_out = ar_cmd.output()?;
+    if !ar_out.status.success() {
+        let stderr = String::from_utf8_lossy(&ar_out.stderr);
+        eprintln!("Warning: archive creation failed: {}", stderr);
+        let _ = std::fs::remove_dir_all(&extract_dir);
         return Ok(lib_path.clone());
     }
 
-    eprintln!("Stripping {} duplicate objects from UI lib ({} → {} objects)",
-        remove.len(), members.len(), members.len() - remove.len());
-
-    // Copy the .lib to a temp file, then use `llvm-ar d` to delete unwanted members
-    let abs_lib = std::fs::canonicalize(lib_path)?;
-    let trimmed_lib = abs_lib.with_file_name("_perry_ui_trimmed.lib");
-    std::fs::copy(&abs_lib, &trimmed_lib)?;
-
-    // Delete members in batches (command line length limits)
-    for chunk in remove.chunks(50) {
-        let mut ar_cmd = Command::new(&llvm_ar);
-        ar_cmd.arg("d").arg(&trimmed_lib);
-        for member in chunk {
-            ar_cmd.arg(member.as_str());
-        }
-        let ar_output = ar_cmd.output()?;
-        if !ar_output.status.success() {
-            let stderr = String::from_utf8_lossy(&ar_output.stderr);
-            eprintln!("Warning: llvm-ar d failed: {}", stderr);
-            // Fall back to original lib
-            let _ = std::fs::remove_file(&trimmed_lib);
-            return Ok(lib_path.clone());
-        }
-    }
-
-    // Clean up stale extraction dirs from previous approach
+    let _ = std::fs::remove_dir_all(&extract_dir);
     let _ = std::fs::remove_dir_all("_perry_ui_objects");
-
     Ok(trimmed_lib)
 }
+
 
 /// Locate an LLVM tool (lld-link, llvm-nm, llvm-ar) from the Rust toolchain or PATH.
 /// Search order: env var override (e.g. PERRY_LLD_LINK) → Rust sysroot → PATH.
@@ -3569,8 +3650,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         c.arg("/SUBSYSTEM:WINDOWS")
          .arg("/ENTRY:mainCRTStartup")
          .arg("/NOLOGO")
-         .arg("/FORCE:MULTIPLE")
-         .arg("/FORCE:UNRESOLVED");
+         // Perry generates large init functions for TS modules (one function
+         // per module). Large codebases (100+ modules) can overflow the
+         // default 1MB stack. Reserve 8MB.
+         .arg("/STACK:67108864");
         // Set up MSVC library search paths if LIB env isn't already configured
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
@@ -3978,6 +4061,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             && native_lib.module.contains("plugin");
                         if force_load {
                             cmd.arg(format!("-Wl,-force_load,{}", lib.display()));
+                        } else if is_windows && lib.extension().map_or(false, |e| e == "lib") {
+                            // On Windows, native libs may be staticlibs that bundle
+                            // std/alloc/core, causing duplicate CRT init. Dedup them
+                            // the same way we dedup the UI lib.
+                            let deduped = strip_duplicate_objects_from_lib(&lib)
+                                .unwrap_or_else(|_| lib.clone());
+                            cmd.arg(&deduped);
                         } else {
                             cmd.arg(&lib);
                         }
