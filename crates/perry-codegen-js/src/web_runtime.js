@@ -2474,6 +2474,12 @@ function perry_ui_frame_split_add_child(split_h, child_h) {
     split.appendChild(child);
 }
 
+// --- Menu: Clear (remove all items from a menu) ---
+function perry_ui_menu_clear(menu_h) {
+    var items = _menus.get(menu_h);
+    if (items) items.length = 0;
+}
+
 // --- Menu: Standard Action (maps to no-op on web, native selectors don't apply) ---
 function perry_ui_menu_add_standard_action(menu_h, title, selector, shortcut) {
     // On web, standard selectors like "cut:", "copy:", "paste:" are handled by the browser.
@@ -3035,6 +3041,7 @@ window.__perry = {
     perry_ui_frame_split_create,
     perry_ui_frame_split_add_child,
     perry_ui_menu_add_standard_action,
+    perry_ui_menu_clear,
     perry_ui_embed_ns_view,
     // Timers
     perry_set_timeout,

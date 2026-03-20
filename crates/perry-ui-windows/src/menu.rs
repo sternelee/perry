@@ -360,15 +360,51 @@ pub fn handle_context_menu(parent_hwnd: HWND, child_hwnd: HWND, x: i32, y: i32) 
 #[cfg(not(target_os = "windows"))]
 pub fn handle_context_menu(_parent_hwnd: isize, _child_hwnd: isize, _x: i32, _y: i32) {}
 
-/// Dispatch a menu item click to its callback.
-pub fn dispatch_menu_item(id: u16) {
-    MENU_CALLBACKS.with(|cb| {
-        let callbacks = cb.borrow();
-        for &(item_id, callback_ptr) in callbacks.iter() {
-            if item_id == id {
-                unsafe { js_closure_call0(callback_ptr) };
-                return;
+/// Remove all items from a menu.
+pub fn clear(menu_handle: i64) {
+    // Collect item IDs before clearing so we can remove their callbacks
+    let item_ids: Vec<u16> = MENUS.with(|menus| {
+        let mut menus = menus.borrow_mut();
+        let idx = (menu_handle - 1) as usize;
+        if idx < menus.len() {
+            let ids: Vec<u16> = menus[idx].items.iter().map(|i| i.id).collect();
+            #[cfg(target_os = "windows")]
+            {
+                let hmenu = menus[idx].hmenu;
+                unsafe {
+                    while GetMenuItemCount(hmenu) > 0 {
+                        let _ = RemoveMenu(hmenu, 0, MF_BYPOSITION);
+                    }
+                }
             }
+            menus[idx].items.clear();
+            ids
+        } else {
+            Vec::new()
         }
     });
+    if !item_ids.is_empty() {
+        MENU_CALLBACKS.with(|cb| {
+            cb.borrow_mut().retain(|&(id, _)| !item_ids.contains(&id));
+        });
+    }
+}
+
+/// Dispatch a menu item click to its callback.
+pub fn dispatch_menu_item(id: u16) {
+    // Extract callback BEFORE calling it — the JS callback may re-enter
+    // menuAddItem (e.g. building context menus), which needs borrow_mut().
+    // Holding the borrow across js_closure_call0 would panic.
+    let callback_ptr = MENU_CALLBACKS.with(|cb| {
+        let callbacks = cb.borrow();
+        for &(item_id, ptr) in callbacks.iter() {
+            if item_id == id {
+                return Some(ptr);
+            }
+        }
+        None
+    });
+    if let Some(ptr) = callback_ptr {
+        unsafe { js_closure_call0(ptr) };
+    }
 }

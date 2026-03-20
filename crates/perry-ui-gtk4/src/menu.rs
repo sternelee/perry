@@ -75,6 +75,17 @@ pub fn add_item_with_shortcut(menu_handle: i64, title_ptr: *const u8, callback: 
     });
 }
 
+/// Remove all items from a menu.
+pub fn clear(menu_handle: i64) {
+    MENUS.with(|m| {
+        let mut menus = m.borrow_mut();
+        let idx = (menu_handle - 1) as usize;
+        if idx < menus.len() {
+            menus[idx].clear();
+        }
+    });
+}
+
 /// Add a separator to a menu.
 pub fn add_separator(menu_handle: i64) {
     MENUS.with(|m| {

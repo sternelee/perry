@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.2.196
+**Current Version:** 0.2.197
 
 ## Workflow Requirements
 
@@ -152,6 +152,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - `CGPoint`/`CGSize`/`CGRect` in `objc2_core_foundation`
 
 ## Recent Changes
+
+### v0.2.197
+- **Cross-platform `menuClear` + `menuAddStandardAction` + Windows RefCell fix**: add `perry_ui_menu_clear` and `perry_ui_menu_add_standard_action` FFI to all 6 platforms (were macOS-only); fix `dispatch_menu_item` RefCell re-entrancy panic on Windows (extract callback before calling, matching macOS fix from v0.2.196); update web/WASM runtimes and feature parity test matrix
 
 ### v0.2.196
 - **Fix `perry publish` showing wrong platform for Windows/Web**: `target_display` match was missing `"windows"` and `"web"` cases (fell through to `"macOS"`); also fix `is_macos` flag to exclude Windows/Web so they don't trigger macOS-specific signing/notarization logic

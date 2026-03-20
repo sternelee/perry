@@ -2525,6 +2525,7 @@ function perry_ui_menu_add_separator(menuH) { const m = uiGet(menuH); if (m) m._
 function perry_ui_menu_add_submenu(menuH, title, submenuH) {
   const m = uiGet(menuH); if (m) m._items.push({ title, submenu: submenuH });
 }
+function perry_ui_menu_clear(menuH) { const m = uiGet(menuH); if (m) m._items.length = 0; }
 function perry_ui_menu_add_standard_action(menuH, title, selector, shortcut) { perry_ui_menu_add_item_with_shortcut(menuH, title, undefined, shortcut); }
 function perry_ui_menubar_create() { const bar = document.createElement("div"); bar.style.display = "flex"; bar.style.background = "#f0f0f0"; bar.style.padding = "2px 8px"; bar._menus = []; return uiAlloc(bar); }
 function perry_ui_menubar_add_menu(barH, title, menuH) {
@@ -2713,7 +2714,7 @@ const __perryUiDispatch = {
   perry_ui_progressview_set_value,
   // Menu
   perry_ui_menu_create, perry_ui_menu_add_item, perry_ui_menu_add_item_with_shortcut,
-  perry_ui_menu_add_separator, perry_ui_menu_add_submenu, perry_ui_menu_add_standard_action,
+  perry_ui_menu_add_separator, perry_ui_menu_add_submenu, perry_ui_menu_add_standard_action, perry_ui_menu_clear,
   perry_ui_menubar_create, perry_ui_menubar_add_menu, perry_ui_menubar_attach,
   // Clipboard
   perry_ui_clipboard_read, perry_ui_clipboard_write,

@@ -2450,6 +2450,7 @@ impl JsEmitter {
             "menuCreate" | "menu_create" => "perry_ui_menu_create",
             "menuAddItem" | "menu_add_item" => "perry_ui_menu_add_item",
             "menuAddStandardAction" | "menu_add_standard_action" => "perry_ui_menu_add_standard_action",
+            "menuClear" | "menu_clear" => "perry_ui_menu_clear",
             "menuAddSeparator" | "menu_add_separator" => "perry_ui_menu_add_separator",
             "menuAddSubmenu" | "menu_add_submenu" => "perry_ui_menu_add_submenu",
             "menuBarCreate" | "menubar_create" => "perry_ui_menubar_create",

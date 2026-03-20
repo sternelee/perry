@@ -593,6 +593,18 @@ pub extern "C" fn perry_ui_menubar_attach(bar_handle: i64) {
     menu::menubar_attach(bar_handle);
 }
 
+/// Remove all items from a menu.
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_clear(menu_handle: i64) {
+    menu::clear(menu_handle);
+}
+
+/// Add a menu item with a standard action (no-op on GTK4 — macOS responder chain concept).
+#[no_mangle]
+pub extern "C" fn perry_ui_menu_add_standard_action(_menu_handle: i64, _title_ptr: i64, _selector_ptr: i64, _shortcut_ptr: i64) {
+    // No-op on GTK4 — standard actions are handled by GtkTextView built-in bindings
+}
+
 // =============================================================================
 // Clipboard
 // =============================================================================
