@@ -12,12 +12,6 @@ extern "C" {
     fn perry_geisterhand_queue_action1(closure_f64: f64, arg: f64);
     fn perry_geisterhand_queue_state_set(handle: i64, value: f64);
     fn perry_geisterhand_request_screenshot(out_len: *mut usize) -> *mut u8;
-
-    // Raw input injection (for game/engine testing via Bloom FFI)
-    // These are weak symbols — if the app links bloom, they resolve; otherwise they're no-ops.
-    fn bloom_inject_key_down(key: f64);
-    fn bloom_inject_key_up(key: f64);
-    fn bloom_is_any_input_pressed() -> f64;
 }
 
 // Callback kind constants (must match perry-runtime/src/geisterhand_registry.rs)
@@ -280,43 +274,6 @@ pub fn run_server(port: u16) {
                 } else {
                     error_json(500, "screenshot capture failed or timed out")
                 }
-            }
-
-            // ============================================================
-            // Raw input injection (for Bloom engine games)
-            // ============================================================
-
-            // POST /input/key/down — inject key down event
-            (Method::Post, "/input/key/down") => {
-                let body = read_body(&mut request);
-                match serde_json::from_str::<serde_json::Value>(&body) {
-                    Ok(v) => {
-                        let key = v.get("key").and_then(|k| k.as_f64()).unwrap_or(0.0);
-                        unsafe { bloom_inject_key_down(key); }
-                        ok_json(r#"{"ok":true}"#)
-                    }
-                    Err(_) => error_json(400, "expected JSON with 'key' field"),
-                }
-            }
-
-            // POST /input/key/up — inject key up event
-            (Method::Post, "/input/key/up") => {
-                let body = read_body(&mut request);
-                match serde_json::from_str::<serde_json::Value>(&body) {
-                    Ok(v) => {
-                        let key = v.get("key").and_then(|k| k.as_f64()).unwrap_or(0.0);
-                        unsafe { bloom_inject_key_up(key); }
-                        ok_json(r#"{"ok":true}"#)
-                    }
-                    Err(_) => error_json(400, "expected JSON with 'key' field"),
-                }
-            }
-
-            // GET /input/status — check if any input is pressed
-            (Method::Get, "/input/status") => {
-                let any = unsafe { bloom_is_any_input_pressed() };
-                let json = format!(r#"{{"any_pressed":{}}}"#, if any != 0.0 { "true" } else { "false" });
-                ok_json(&json)
             }
 
             _ => error_json(404, "not found"),
