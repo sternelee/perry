@@ -100,7 +100,10 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
     let mut child_sizes: Vec<i32> = Vec::new();
 
     for &child in &visible_children {
-        let ci = widgets::get_widget_info(child).unwrap();
+        let ci = match widgets::get_widget_info(child) {
+            Some(ci) => ci,
+            None => { child_sizes.push(0); continue; }
+        };
         if matches!(ci.kind, WidgetKind::Spacer) || ci.fills_remaining {
             child_sizes.push(0); // placeholder, will be computed below
         } else if !vertical && ci.fixed_width.is_some() {
