@@ -136,6 +136,7 @@ impl Compiler {
         flag_builder.set("is_pic", "true").unwrap();
         // Enable maximum optimization
         flag_builder.set("opt_level", "speed").unwrap();
+        // Enable register allocation checker to detect regalloc bugs
 
         let isa = match target {
             Some("ios-simulator") | Some("ios") => {

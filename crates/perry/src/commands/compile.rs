@@ -3901,12 +3901,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         c
     } else if is_windows {
         // Windows target — use MSVC link.exe (native) or lld-link (cross)
-        let linker = find_msvc_link_exe().unwrap_or_else(|| {
-            if is_cross_windows {
-                eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
-            }
-            PathBuf::from("link.exe")
-        });
+        // Check for PERRY_LLD_LINK override to use lld-link instead of MSVC link.exe.
+        // lld-link may handle large COFF objects differently than MSVC's linker.
+        let linker = if let Ok(lld) = std::env::var("PERRY_LLD_LINK") {
+            PathBuf::from(lld)
+        } else {
+            find_msvc_link_exe().unwrap_or_else(|| {
+                if is_cross_windows {
+                    eprintln!("Warning: lld-link not found for cross-compilation. Install: rustup component add llvm-tools");
+                }
+                PathBuf::from("link.exe")
+            })
+        };
         let mut c = Command::new(linker);
         c.arg("/SUBSYSTEM:WINDOWS")
          .arg("/ENTRY:mainCRTStartup")
