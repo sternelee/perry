@@ -712,12 +712,7 @@ impl crate::codegen::Compiler {
                 // For large functions on Windows, emit checkpoint calls after each
                 // statement to help diagnose crashes at specific statement indices.
                 // Emit checkpoints for renderWorkbench AND any function it calls
-                // Emit checkpoints for large functions + crash-path functions on Windows
-                let emit_checkpoints = self.compile_target == 3
-                    && (func.body.len() > 100
-                        || func.name == "startTypeScriptServer"
-                        || func.name == "tryStartServer"
-                        || func.name == "initLspBridge");
+                let emit_checkpoints = false;
                 let checkpoint_func_ref = if emit_checkpoints {
                     self.extern_funcs.get("js_checkpoint").map(|&fid| {
                         self.module.declare_func_in_func(fid, builder.func)

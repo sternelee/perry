@@ -1276,3 +1276,10 @@ pub extern "C" fn hone_lsp_send(_handle: i64, _msg: i64) {}
 
 #[no_mangle]
 pub extern "C" fn hone_lsp_stop(_handle: i64) {}
+
+// Override setjmp with a no-op stub that always returns 0.
+// Perry's try/catch uses setjmp/longjmp but since we make readFileSync
+// return empty string instead of throwing, longjmp is never called.
+// The MSVC CRT setjmp may corrupt the stack on x64.
+#[no_mangle]
+pub extern "C" fn setjmp(_env: *mut i32) -> i32 { 0 }
