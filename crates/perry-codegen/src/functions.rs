@@ -217,7 +217,7 @@ impl crate::codegen::Compiler {
     /// Maximum top-level statements before a function is split.
     /// Cranelift generates incorrect machine code for very large functions
     /// (>3MB compiled code) on Windows.
-    const LARGE_FUNC_THRESHOLD: usize = 40;
+    const LARGE_FUNC_THRESHOLD: usize = 25;
 
     pub(crate) fn compile_function(&mut self, func: &Function) -> Result<()> {
         // Track current function for self-recursive call optimization
@@ -426,10 +426,30 @@ impl crate::codegen::Compiler {
                 }
             }
 
+            // On Windows, pre-compute which LocalIds are referenced in the function body
+            // so we only load referenced module vars at entry (not all 128+).
+            // This dramatically reduces function size, keeping it under Cranelift's
+            // safe codegen threshold.
+            let func_body_refs: HashSet<perry_types::LocalId> = if self.compile_target == 3 {
+                let mut refs = Vec::new();
+                let mut visited = HashSet::new();
+                for s in &func.body {
+                    collect_local_refs_stmt(s, &mut refs, &mut visited);
+                }
+                refs.into_iter().collect()
+            } else {
+                HashSet::new()
+            };
+
             // Load module-level variables from their global slots
             for (local_id, data_id) in &self.module_var_data_ids {
                 // Skip if this LocalId is already a function parameter
                 if locals.contains_key(local_id) {
+                    continue;
+                }
+                // On Windows, only load module vars that are actually referenced
+                // in the function body. Unreferenced vars waste code space.
+                if self.compile_target == 3 && !func_body_refs.contains(local_id) {
                     continue;
                 }
                 let (var_type, local_info_template) = if let Some(info) = self.module_level_locals.get(local_id) {
@@ -749,19 +769,6 @@ impl crate::codegen::Compiler {
                     })
                 } else {
                     None
-                };
-
-                // On Windows, pre-compute which LocalIds are referenced in the function body
-                // so the module-var reload only reloads referenced vars (not all 128+).
-                let func_body_refs: HashSet<perry_types::LocalId> = if self.compile_target == 3 {
-                    let mut refs = Vec::new();
-                    let mut visited = HashSet::new();
-                    for s in &func.body {
-                        collect_local_refs_stmt(s, &mut refs, &mut visited);
-                    }
-                    refs.into_iter().collect()
-                } else {
-                    HashSet::new()
                 };
 
                 for (stmt_idx, stmt) in func.body.iter().enumerate() {
