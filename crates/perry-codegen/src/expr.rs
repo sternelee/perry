@@ -474,7 +474,7 @@ pub(crate) fn compile_expr(
             builder.seal_block(not_found_block);
             // Use the proper TAG_UNDEFINED value: 0x7FFC_0000_0000_0001
             let undefined_val = builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001_u64));
-            builder.ins().jump(merge_block, &[undefined_val]);
+            builder.ins().jump(merge_block, &[undefined_val.into()]);
 
             // Found block: NaN-box the string pointer
             builder.switch_to_block(found_block);
@@ -484,7 +484,7 @@ pub(crate) fn compile_expr(
             let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
             let call = builder.ins().call(nanbox_ref, &[result_ptr]);
             let nanboxed_val = builder.inst_results(call)[0];
-            builder.ins().jump(merge_block, &[nanboxed_val]);
+            builder.ins().jump(merge_block, &[nanboxed_val.into()]);
 
             // Merge block: return the result
             builder.switch_to_block(merge_block);
@@ -528,7 +528,7 @@ pub(crate) fn compile_expr(
             builder.switch_to_block(not_found_block);
             builder.seal_block(not_found_block);
             let undefined_val = builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001_u64));
-            builder.ins().jump(merge_block, &[undefined_val]);
+            builder.ins().jump(merge_block, &[undefined_val.into()]);
 
             // Found block: NaN-box the string pointer
             builder.switch_to_block(found_block);
@@ -538,7 +538,7 @@ pub(crate) fn compile_expr(
             let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
             let call = builder.ins().call(nanbox_ref, &[result_ptr]);
             let nanboxed_val = builder.inst_results(call)[0];
-            builder.ins().jump(merge_block, &[nanboxed_val]);
+            builder.ins().jump(merge_block, &[nanboxed_val.into()]);
 
             // Merge block: return the result
             builder.switch_to_block(merge_block);
@@ -4267,7 +4267,7 @@ pub(crate) fn compile_expr(
                                 builder.seal_block(str_extract_block);
                                 let ptr_mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFFu64 as i64);
                                 let extracted_str_ptr = builder.ins().band(rhs_i64, ptr_mask);
-                                builder.ins().jump(rhs_merge_block, &[extracted_str_ptr]);
+                                builder.ins().jump(rhs_merge_block, &[extracted_str_ptr.into()]);
 
                                 // Number path: convert number to string
                                 builder.switch_to_block(num_convert_block);
@@ -4277,7 +4277,7 @@ pub(crate) fn compile_expr(
                                 let n2s_ref = module.declare_func_in_func(*num_to_str_func, builder.func);
                                 let n2s_call = builder.ins().call(n2s_ref, &[rhs_val]);
                                 let num_str_ptr = builder.inst_results(n2s_call)[0];
-                                builder.ins().jump(rhs_merge_block, &[num_str_ptr]);
+                                builder.ins().jump(rhs_merge_block, &[num_str_ptr.into()]);
 
                                 // Merge: rhs_ptr is the string pointer from either path
                                 builder.switch_to_block(rhs_merge_block);
@@ -5916,7 +5916,7 @@ pub(crate) fn compile_expr(
                     } else {
                         ensure_f64(builder, lhs)
                     };
-                    builder.ins().brif(lhs_bool, rhs_block, &[], merge_block, &[lhs_for_merge]);
+                    builder.ins().brif(lhs_bool, rhs_block, &[], merge_block, &[lhs_for_merge.into()]);
 
                     builder.switch_to_block(rhs_block);
                     builder.seal_block(rhs_block);
@@ -5941,7 +5941,7 @@ pub(crate) fn compile_expr(
                     } else {
                         rhs
                     };
-                    builder.ins().jump(merge_block, &[rhs_converted]);
+                    builder.ins().jump(merge_block, &[rhs_converted.into()]);
 
                     builder.switch_to_block(merge_block);
                     builder.seal_block(merge_block);
@@ -5973,7 +5973,7 @@ pub(crate) fn compile_expr(
                     let merge_block = builder.create_block();
                     builder.append_block_param(merge_block, lhs_type);
 
-                    builder.ins().brif(lhs_bool, merge_block, &[lhs], rhs_block, &[]);
+                    builder.ins().brif(lhs_bool, merge_block, &[lhs.into()], rhs_block, &[]);
 
                     builder.switch_to_block(rhs_block);
                     builder.seal_block(rhs_block);
@@ -5998,7 +5998,7 @@ pub(crate) fn compile_expr(
                     } else {
                         rhs
                     };
-                    builder.ins().jump(merge_block, &[rhs_converted]);
+                    builder.ins().jump(merge_block, &[rhs_converted.into()]);
 
                     builder.switch_to_block(merge_block);
                     builder.seal_block(merge_block);
@@ -6040,7 +6040,7 @@ pub(crate) fn compile_expr(
                     let merge_block = builder.create_block();
                     builder.append_block_param(merge_block, lhs_type);
 
-                    builder.ins().brif(is_null, rhs_block, &[], merge_block, &[lhs]);
+                    builder.ins().brif(is_null, rhs_block, &[], merge_block, &[lhs.into()]);
 
                     builder.switch_to_block(rhs_block);
                     builder.seal_block(rhs_block);
@@ -6064,7 +6064,7 @@ pub(crate) fn compile_expr(
                     } else {
                         rhs
                     };
-                    builder.ins().jump(merge_block, &[rhs_converted]);
+                    builder.ins().jump(merge_block, &[rhs_converted.into()]);
 
                     builder.switch_to_block(merge_block);
                     builder.seal_block(merge_block);
@@ -11816,7 +11816,7 @@ pub(crate) fn compile_expr(
             } else {
                 ensure_f64(builder, then_val)
             };
-            builder.ins().jump(merge_block, &[then_val_f64]);
+            builder.ins().jump(merge_block, &[then_val_f64.into()]);
 
             builder.switch_to_block(else_block);
             builder.seal_block(else_block);
@@ -11832,7 +11832,7 @@ pub(crate) fn compile_expr(
             } else {
                 ensure_f64(builder, else_val)
             };
-            builder.ins().jump(merge_block, &[else_val_f64]);
+            builder.ins().jump(merge_block, &[else_val_f64.into()]);
 
             builder.switch_to_block(merge_block);
             builder.seal_block(merge_block);
@@ -14709,7 +14709,7 @@ pub(crate) fn compile_expr(
                         let handle_get_ref = module.declare_func_in_func(*handle_get_func, builder.func);
                         let handle_call = builder.ins().call(handle_get_ref, &[arr_f64_for_handle, idx_i32]);
                         let handle_result = builder.inst_results(handle_call)[0];
-                        builder.ins().jump(merge_block, &[handle_result]);
+                        builder.ins().jump(merge_block, &[handle_result.into()]);
 
                         // Native block: normal array access
                         builder.switch_to_block(native_block);
@@ -14739,7 +14739,7 @@ pub(crate) fn compile_expr(
                             let element_ptr = builder.ins().iadd(data_ptr, byte_offset);
                             builder.ins().load(types::F64, MemFlags::new(), element_ptr, 0)
                         };
-                        builder.ins().jump(merge_block, &[native_result]);
+                        builder.ins().jump(merge_block, &[native_result.into()]);
 
                         // Merge block
                         builder.switch_to_block(merge_block);
@@ -14955,7 +14955,7 @@ pub(crate) fn compile_expr(
                         let call = builder.ins().call(func_ref, &[obj_ptr, key_ptr]);
                         builder.inst_results(call)[0]
                     };
-                    builder.ins().jump(merge_block, &[str_result]);
+                    builder.ins().jump(merge_block, &[str_result.into()]);
 
                     // Integer key path: convert to i32, do array/dynamic access
                     builder.switch_to_block(integer_key_block);
@@ -14968,7 +14968,7 @@ pub(crate) fn compile_expr(
                         let call = builder.ins().call(func_ref, &[obj_f64, idx_i32]);
                         builder.inst_results(call)[0]
                     };
-                    builder.ins().jump(merge_block, &[int_result]);
+                    builder.ins().jump(merge_block, &[int_result.into()]);
 
                     builder.switch_to_block(merge_block);
                     builder.seal_block(merge_block);
@@ -15626,7 +15626,7 @@ pub(crate) fn compile_expr(
             builder.append_block_param(done_block, types::I64);
 
             // Jump to check_block with the promise pointer
-            builder.ins().jump(check_block, &[promise_ptr]);
+            builder.ins().jump(check_block, &[promise_ptr.into()]);
 
             // === check_block: check if promise is still pending ===
             builder.switch_to_block(check_block);
@@ -15644,7 +15644,7 @@ pub(crate) fn compile_expr(
             let is_pending = builder.ins().icmp(IntCC::Equal, state, zero);
 
             // If pending, go to wait_block; otherwise go to settled_block
-            builder.ins().brif(is_pending, wait_block, &[], settled_block, &[check_promise_ptr]);
+            builder.ins().brif(is_pending, wait_block, &[], settled_block, &[check_promise_ptr.into()]);
 
             // === wait_block: run microtasks, sleep briefly, and loop back ===
             builder.switch_to_block(wait_block);
@@ -15670,7 +15670,7 @@ pub(crate) fn compile_expr(
             builder.ins().call(sleep_ref, &[one_ms]);
 
             // Jump back to check_block
-            builder.ins().jump(check_block, &[check_promise_ptr]);
+            builder.ins().jump(check_block, &[check_promise_ptr.into()]);
 
             // Now seal check_block since both predecessors (entry and wait_block) are done
             builder.seal_block(check_block);
@@ -15689,7 +15689,7 @@ pub(crate) fn compile_expr(
             let is_rejected = builder.ins().icmp(IntCC::Equal, settled_state, two);
 
             // If rejected, go to reject_block; otherwise go to done_block
-            builder.ins().brif(is_rejected, reject_block, &[settled_promise_ptr], done_block, &[settled_promise_ptr]);
+            builder.ins().brif(is_rejected, reject_block, &[settled_promise_ptr.into()], done_block, &[settled_promise_ptr.into()]);
 
             // === reject_block: get reason and throw ===
             builder.switch_to_block(reject_block);

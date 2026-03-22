@@ -272,7 +272,7 @@ pub(crate) fn inline_truthiness_check(
     let call = builder.ins().call(is_zero_ref, &[ptr]);
     let is_zero_result = builder.inst_results(call)[0]; // i32: 1=zero, 0=non-zero
     let is_bigint_falsy = builder.ins().ireduce(types::I8, is_zero_result);
-    builder.ins().jump(merge_block, &[is_bigint_falsy]);
+    builder.ins().jump(merge_block, &[is_bigint_falsy.into()]);
 
     // Non-BigInt block: use existing tag/float checks + NaN + empty string
     builder.switch_to_block(non_bigint_block);
@@ -307,18 +307,18 @@ pub(crate) fn inline_truthiness_check(
     let str_len = builder.inst_results(call)[0]; // u32
     let zero_u32 = builder.ins().iconst(types::I32, 0);
     let is_empty_string = builder.ins().icmp(IntCC::Equal, str_len, zero_u32); // i8
-    builder.ins().jump(string_merge_block, &[is_empty_string]);
+    builder.ins().jump(string_merge_block, &[is_empty_string.into()]);
 
     // Non-string block: use NaN + tag + float checks
     builder.switch_to_block(non_string_block);
     builder.seal_block(non_string_block);
-    builder.ins().jump(string_merge_block, &[is_falsy_with_nan]);
+    builder.ins().jump(string_merge_block, &[is_falsy_with_nan.into()]);
 
     // String merge block
     builder.switch_to_block(string_merge_block);
     builder.seal_block(string_merge_block);
     let is_falsy_final = builder.block_params(string_merge_block)[0];
-    builder.ins().jump(merge_block, &[is_falsy_final]);
+    builder.ins().jump(merge_block, &[is_falsy_final.into()]);
 
     // Merge block
     builder.switch_to_block(merge_block);

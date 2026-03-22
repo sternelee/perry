@@ -17,7 +17,7 @@ cranelift-module.workspace = true
 cranelift-native.workspace = true
 cranelift-object.workspace = true
 
-target-lexicon = "0.12"
+target-lexicon = "0.13"
 
 thiserror.workspace = true
 anyhow.workspace = true
