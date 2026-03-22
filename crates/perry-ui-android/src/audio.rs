@@ -63,17 +63,17 @@ fn a_weight_filter(sample: f64, state: &mut AWeightState) -> f64 {
 
 extern "C" {
     fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64;
-    fn js_array_create() -> i64;
-    fn js_array_push_f64(array_ptr: i64, value: f64);
 }
+
+static PERMISSION_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn start() -> i64 {
     if RUNNING.load(Ordering::Relaxed) {
         return 1;
     }
 
-    // Request RECORD_AUDIO permission via PerryBridge
-    {
+    // Request RECORD_AUDIO permission once via PerryBridge (shows system dialog)
+    if !PERMISSION_REQUESTED.swap(true, Ordering::Relaxed) {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(8);
         let bridge_class = jni_bridge::with_cache(|c| {
@@ -82,6 +82,29 @@ pub fn start() -> i64 {
         let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
         let _ = env.call_static_method(bridge_cls, "requestAudioPermission", "()V", &[]);
         unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+        // Return 0 — permission dialog is showing, caller should retry later
+        return 0;
+    }
+
+    // Check if permission was granted (may still be pending)
+    {
+        let mut env = jni_bridge::get_env();
+        let _ = env.push_local_frame(8);
+        let activity = crate::widgets::get_activity(&mut env);
+        let perm_str = env.new_string("android.permission.RECORD_AUDIO").unwrap();
+        let result = env.call_static_method(
+            "androidx/core/content/ContextCompat",
+            "checkSelfPermission",
+            "(Landroid/content/Context;Ljava/lang/String;)I",
+            &[JValue::Object(&activity), JValue::Object(&perm_str.into())],
+        );
+        unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+
+        // PackageManager.PERMISSION_GRANTED = 0
+        let granted = result.map(|v| v.i().unwrap_or(-1)).unwrap_or(-1) == 0;
+        if !granted {
+            return 0; // Still waiting for user to grant permission
+        }
     }
 
     // Spawn a background thread that creates AudioRecord via JNI and reads data.
@@ -251,17 +274,10 @@ pub fn get_peak() -> f64 {
     f64::from_bits(CURRENT_PEAK.load(Ordering::Relaxed))
 }
 
-pub fn get_waveform(count: f64) -> f64 {
-    let n = (count as usize).min(WAVEFORM_SIZE);
-    let write_idx = WAVEFORM_WRITE_INDEX.load(Ordering::Relaxed) as usize;
-    unsafe {
-        let array = js_array_create();
-        for i in 0..n {
-            let idx = (write_idx + WAVEFORM_SIZE - n + i) % WAVEFORM_SIZE;
-            js_array_push_f64(array, WAVEFORM_BUFFER[idx]);
-        }
-        f64::from_bits(array as u64)
-    }
+pub fn get_waveform(_count: f64) -> f64 {
+    // Waveform array creation not available on Android yet (js_array_create missing).
+    // Return 0.0 (callers handle this gracefully).
+    0.0
 }
 
 pub fn get_device_model() -> i64 {

@@ -92,14 +92,29 @@ pub fn set_font_size(handle: i64, size: f64) {
 pub fn set_font_weight(handle: i64, _size: f64, weight: f64) {
     if let Some(view_ref) = super::get_widget(handle) {
         let mut env = jni_bridge::get_env();
-        let _ = env.push_local_frame(8);
-        let style = if weight >= 1.0 { 1i32 } else { 0i32 }; // Typeface.BOLD=1, NORMAL=0
-        let _ = env.call_method(
-            view_ref.as_obj(),
-            "setTypeface",
-            "(Landroid/graphics/Typeface;I)V",
-            &[JValue::Object(&JObject::null()), JValue::Int(style)],
+        let _ = env.push_local_frame(16);
+        let style = if weight >= 0.5 { 1i32 } else { 0i32 }; // Typeface.BOLD=1, NORMAL=0
+
+        // Create a Typeface with the default font family and desired style.
+        // Passing null Typeface to setTypeface corrupts the text content,
+        // so we must create a valid Typeface via Typeface.defaultFromStyle().
+        let typeface = env.call_static_method(
+            "android/graphics/Typeface",
+            "defaultFromStyle",
+            "(I)Landroid/graphics/Typeface;",
+            &[JValue::Int(style)],
         );
+        if let Ok(tf_val) = typeface {
+            if let Ok(tf) = tf_val.l() {
+                let _ = env.call_method(
+                    view_ref.as_obj(),
+                    "setTypeface",
+                    "(Landroid/graphics/Typeface;)V",
+                    &[JValue::Object(&tf)],
+                );
+            }
+        }
+
         unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
     }
 }

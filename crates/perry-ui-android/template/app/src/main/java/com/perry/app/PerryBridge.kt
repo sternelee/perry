@@ -352,6 +352,15 @@ object PerryBridge {
 
     @JvmStatic
     fun requestAudioPermission() {
+        // Must run on UI thread — requestPermissions shows a system dialog
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            requestAudioPermissionImpl()
+        } else {
+            uiHandler.post { requestAudioPermissionImpl() }
+        }
+    }
+
+    private fun requestAudioPermissionImpl() {
         if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO)
             == PackageManager.PERMISSION_GRANTED) {
             audioPermissionGranted = true
