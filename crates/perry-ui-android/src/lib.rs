@@ -1312,6 +1312,12 @@ pub extern "C" fn perry_system_audio_get_waveform(count: f64) -> f64 { audio::ge
 #[no_mangle]
 pub extern "C" fn perry_system_get_device_model() -> i64 { audio::get_device_model() }
 
+// Geisterhand screenshot stub (not implemented on Android)
+#[no_mangle]
+pub extern "C" fn perry_ui_screenshot_capture(_out_len: *mut usize) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
 #[no_mangle]
 pub extern "C" fn perry_on_layout_change(_callback: f64) {}
 
