@@ -147,7 +147,8 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
 
         #[cfg(target_os = "windows")]
         {
-            if let Some(child_hwnd) = widgets::get_hwnd(child) {
+            // Use Mutex-based HWND lookup (reentrancy-safe)
+            if let Some(child_hwnd) = widgets::get_hwnd_safe(child) {
                 let (x, y, w, h) = if vertical {
                     (inset_left, pos, available_cross, size)
                 } else {
@@ -175,7 +176,7 @@ fn layout_scrollview(handle: i64, width: i32, height: i32) {
     if let Some(&child) = info.children.first() {
         #[cfg(target_os = "windows")]
         {
-            if let Some(child_hwnd) = widgets::get_hwnd(child) {
+            if let Some(child_hwnd) = widgets::get_hwnd_safe(child) {
                 // Content gets full width, but its own natural height
                 let child_info = widgets::get_widget_info(child);
                 let content_height = if let Some(ci) = &child_info {
@@ -214,7 +215,7 @@ fn layout_zstack(handle: i64, width: i32, height: i32) {
             }
             #[cfg(target_os = "windows")]
             {
-                if let Some(child_hwnd) = widgets::get_hwnd(child) {
+                if let Some(child_hwnd) = widgets::get_hwnd_safe(child) {
                     unsafe {
                         let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
                     }
@@ -239,7 +240,7 @@ fn layout_navstack(handle: i64, width: i32, height: i32) {
             }
             #[cfg(target_os = "windows")]
             {
-                if let Some(child_hwnd) = widgets::get_hwnd(child) {
+                if let Some(child_hwnd) = widgets::get_hwnd_safe(child) {
                     unsafe {
                         let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
                     }
@@ -268,7 +269,7 @@ fn measure_intrinsic(handle: i64, kind: &WidgetKind, vertical: bool, cross_size:
         WidgetKind::Text => {
             #[cfg(target_os = "windows")]
             {
-                if let Some(hwnd) = widgets::get_hwnd(handle) {
+                if let Some(hwnd) = widgets::get_hwnd_safe(handle) {
                     return measure_text_height(hwnd, cross_size, vertical);
                 }
             }
@@ -426,7 +427,7 @@ fn measure_text_height(hwnd: HWND, width: i32, vertical: bool) -> i32 {
 pub fn force_paint_backgrounds(handle: i64) {
     #[cfg(target_os = "windows")]
     {
-        if let Some(hwnd) = widgets::get_hwnd(handle) {
+        if let Some(hwnd) = widgets::get_hwnd_safe(handle) {
             if widgets::get_bg_brush(handle).is_some() {
                 unsafe {
                     let _ = InvalidateRect(hwnd, None, true);
