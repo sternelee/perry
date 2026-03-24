@@ -109,6 +109,11 @@ pub struct PublishArgs {
     #[arg(long, default_value = "https://verify.perryts.com")]
     pub verify_url: String,
 
+    /// Create a notarized DMG instead of uploading to App Store Connect (macOS only).
+    /// Overrides the `distribute` setting in perry.toml.
+    #[arg(long)]
+    pub notarize: bool,
+
 }
 
 // --- Config types matching perry.toml ---
@@ -651,8 +656,13 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         }
     }
 
-    // Extract macos distribute early — needed for build_number auto-increment decision
-    let macos_distribute = config.macos.as_ref().and_then(|m| m.distribute.clone());
+    // Extract macos distribute early — needed for build_number auto-increment decision.
+    // --notarize flag overrides to "notarize" (DMG only, no App Store upload).
+    let macos_distribute = if args.notarize {
+        Some("notarize".to_string())
+    } else {
+        config.macos.as_ref().and_then(|m| m.distribute.clone())
+    };
 
     // Auto-increment build_number for targets that need monotonic build numbers
     let is_windows = target_name == "windows";
