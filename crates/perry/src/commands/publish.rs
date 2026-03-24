@@ -1592,7 +1592,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
             if config.windows.as_ref().and_then(|w| w.gcloud_kms_key.as_ref()).is_some() {
                 println!("  Signing:   Google Cloud KMS (EV code signing)");
             }
-        } else if (is_ios || is_macos) {
+        } else if is_ios || is_macos {
             if let Some(ref id) = apple_identity {
                 println!("  Signing:   {id}");
             }
