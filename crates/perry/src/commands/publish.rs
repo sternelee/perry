@@ -1588,7 +1588,11 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         println!("  Bundle ID: {bundle_id}");
         println!("  Target:    {target_display}");
         println!("  Server:    {server_url}");
-        if let Some(ref id) = apple_identity {
+        if is_windows {
+            if config.windows.as_ref().and_then(|w| w.gcloud_kms_key.as_ref()).is_some() {
+                println!("  Signing:   Google Cloud KMS (EV code signing)");
+            }
+        } else if let Some(ref id) = apple_identity {
             println!("  Signing:   {id}");
         }
         if is_android && android_distribute.as_deref() == Some("playstore") {
