@@ -4185,6 +4185,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         {
             c.arg("-target").arg("x86_64-unknown-linux-gnu");
         }
+        // Allow unresolved symbols — native libs and UI libs may not implement
+        // all functions on Linux. Matches /FORCE:UNRESOLVED on Windows.
+        c.arg("-Wl,--warn-unresolved-symbols");
         c
     } else if is_windows {
         // Windows target — use MSVC link.exe (native) or lld-link (cross)
