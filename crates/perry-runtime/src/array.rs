@@ -1400,4 +1400,125 @@ mod tests {
         assert!(js_array_get_f64_unchecked(std::ptr::null(), 0).is_nan());
         assert_eq!(js_array_length(std::ptr::null()), 0);
     }
+
+    #[test]
+    fn test_array_splice_delete_middle() {
+        // [1,2,3,4,5].splice(1, 2) -> deleted=[2,3], arr=[1,4,5]
+        let arr = js_array_alloc(8);
+        let arr = js_array_push_f64(arr, 1.0);
+        let arr = js_array_push_f64(arr, 2.0);
+        let arr = js_array_push_f64(arr, 3.0);
+        let arr = js_array_push_f64(arr, 4.0);
+        let arr = js_array_push_f64(arr, 5.0);
+        let mut out_arr: *mut ArrayHeader = std::ptr::null_mut();
+        let deleted = js_array_splice(arr, 1, 2, std::ptr::null(), 0, &mut out_arr);
+
+        assert_eq!(js_array_length(out_arr), 3);
+        assert_eq!(js_array_get_f64(out_arr, 0), 1.0);
+        assert_eq!(js_array_get_f64(out_arr, 1), 4.0);
+        assert_eq!(js_array_get_f64(out_arr, 2), 5.0);
+
+        assert_eq!(js_array_length(deleted), 2);
+        assert_eq!(js_array_get_f64(deleted, 0), 2.0);
+        assert_eq!(js_array_get_f64(deleted, 1), 3.0);
+    }
+
+    #[test]
+    fn test_array_splice_insert() {
+        // [1,2,5].splice(2, 0, 3, 4) -> deleted=[], arr=[1,2,3,4,5]
+        let arr = js_array_alloc(8);
+        let arr = js_array_push_f64(arr, 1.0);
+        let arr = js_array_push_f64(arr, 2.0);
+        let arr = js_array_push_f64(arr, 5.0);
+        let items = [3.0_f64, 4.0];
+        let mut out_arr: *mut ArrayHeader = std::ptr::null_mut();
+        let deleted = js_array_splice(arr, 2, 0, items.as_ptr(), 2, &mut out_arr);
+
+        assert_eq!(js_array_length(deleted), 0);
+        assert_eq!(js_array_length(out_arr), 5);
+        assert_eq!(js_array_get_f64(out_arr, 0), 1.0);
+        assert_eq!(js_array_get_f64(out_arr, 1), 2.0);
+        assert_eq!(js_array_get_f64(out_arr, 2), 3.0);
+        assert_eq!(js_array_get_f64(out_arr, 3), 4.0);
+        assert_eq!(js_array_get_f64(out_arr, 4), 5.0);
+    }
+
+    #[test]
+    fn test_array_splice_replace() {
+        // [1,2,3].splice(1, 1, 99) -> deleted=[2], arr=[1,99,3]
+        let arr = js_array_alloc(4);
+        let arr = js_array_push_f64(arr, 1.0);
+        let arr = js_array_push_f64(arr, 2.0);
+        let arr = js_array_push_f64(arr, 3.0);
+        let items = [99.0_f64];
+        let mut out_arr: *mut ArrayHeader = std::ptr::null_mut();
+        let deleted = js_array_splice(arr, 1, 1, items.as_ptr(), 1, &mut out_arr);
+
+        assert_eq!(js_array_length(deleted), 1);
+        assert_eq!(js_array_get_f64(deleted, 0), 2.0);
+        assert_eq!(js_array_length(out_arr), 3);
+        assert_eq!(js_array_get_f64(out_arr, 0), 1.0);
+        assert_eq!(js_array_get_f64(out_arr, 1), 99.0);
+        assert_eq!(js_array_get_f64(out_arr, 2), 3.0);
+    }
+
+    #[test]
+    fn test_array_splice_delete_to_end() {
+        // [1,2,3,4].splice(2) -> deleted=[3,4], arr=[1,2]
+        let arr = js_array_alloc(8);
+        let arr = js_array_push_f64(arr, 1.0);
+        let arr = js_array_push_f64(arr, 2.0);
+        let arr = js_array_push_f64(arr, 3.0);
+        let arr = js_array_push_f64(arr, 4.0);
+        let mut out_arr: *mut ArrayHeader = std::ptr::null_mut();
+        let deleted = js_array_splice(arr, 2, i32::MAX, std::ptr::null(), 0, &mut out_arr);
+
+        assert_eq!(js_array_length(out_arr), 2);
+        assert_eq!(js_array_get_f64(out_arr, 0), 1.0);
+        assert_eq!(js_array_get_f64(out_arr, 1), 2.0);
+        assert_eq!(js_array_length(deleted), 2);
+        assert_eq!(js_array_get_f64(deleted, 0), 3.0);
+        assert_eq!(js_array_get_f64(deleted, 1), 4.0);
+    }
+
+    #[test]
+    fn test_array_splice_negative_start() {
+        // [1,2,3,4].splice(-2, 1) -> deleted=[3], arr=[1,2,4]
+        let arr = js_array_alloc(8);
+        let arr = js_array_push_f64(arr, 1.0);
+        let arr = js_array_push_f64(arr, 2.0);
+        let arr = js_array_push_f64(arr, 3.0);
+        let arr = js_array_push_f64(arr, 4.0);
+        let mut out_arr: *mut ArrayHeader = std::ptr::null_mut();
+        let deleted = js_array_splice(arr, -2, 1, std::ptr::null(), 0, &mut out_arr);
+
+        assert_eq!(js_array_length(deleted), 1);
+        assert_eq!(js_array_get_f64(deleted, 0), 3.0);
+        assert_eq!(js_array_length(out_arr), 3);
+        assert_eq!(js_array_get_f64(out_arr, 0), 1.0);
+        assert_eq!(js_array_get_f64(out_arr, 1), 2.0);
+        assert_eq!(js_array_get_f64(out_arr, 2), 4.0);
+    }
+
+    #[test]
+    fn test_array_splice_grow_realloc() {
+        // Start with capacity 4, splice in 10 items to force reallocation
+        let arr = js_array_alloc(4);
+        let arr = js_array_push_f64(arr, 1.0);
+        let arr = js_array_push_f64(arr, 2.0);
+        let items = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0_f64];
+        let mut out_arr: *mut ArrayHeader = std::ptr::null_mut();
+        let deleted = js_array_splice(arr, 1, 0, items.as_ptr(), 10, &mut out_arr);
+
+        assert_eq!(js_array_length(deleted), 0);
+        assert_eq!(js_array_length(out_arr), 12);
+        assert_eq!(js_array_get_f64(out_arr, 0), 1.0);
+        for i in 0..10 {
+            assert_eq!(js_array_get_f64(out_arr, (i + 1) as u32), items[i],
+                "mismatch at index {}", i + 1);
+        }
+        assert_eq!(js_array_get_f64(out_arr, 11), 2.0);
+        // out_arr should differ from original arr due to reallocation
+        assert_ne!(out_arr, arr, "expected reallocation for capacity growth");
+    }
 }

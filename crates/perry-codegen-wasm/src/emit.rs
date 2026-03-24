@@ -3653,6 +3653,20 @@ impl<'a> FuncEmitCtx<'a> {
                     BinaryOp::Shl => { self.emit_bitwise_binary(func, left, right, Instruction::I32Shl); }
                     BinaryOp::Shr => { self.emit_bitwise_binary(func, left, right, Instruction::I32ShrS); }
                     BinaryOp::UShr => { self.emit_bitwise_binary(func, left, right, Instruction::I32ShrU); }
+                    // Mod and Pow go through JS bridge (no native WASM instruction)
+                    // — use emit_store_arg to keep values as i64, like Add
+                    BinaryOp::Mod => {
+                        self.emit_frame_begin(func, 2);
+                        self.emit_store_arg(func, 0, left);
+                        self.emit_store_arg(func, 1, right);
+                        self.emit_memcall(func, "js_mod", 2);
+                    }
+                    BinaryOp::Pow => {
+                        self.emit_frame_begin(func, 2);
+                        self.emit_store_arg(func, 0, left);
+                        self.emit_store_arg(func, 1, right);
+                        self.emit_memcall(func, "math_pow", 2);
+                    }
                     _ => {
                         // Pure numeric operations - convert i64 to f64, operate, convert back
                         self.emit_expr(func, left);
@@ -3663,30 +3677,6 @@ impl<'a> FuncEmitCtx<'a> {
                             BinaryOp::Sub => { func.instruction(&Instruction::F64Sub); }
                             BinaryOp::Mul => { func.instruction(&Instruction::F64Mul); }
                             BinaryOp::Div => { func.instruction(&Instruction::F64Div); }
-                            BinaryOp::Mod => {
-                                self.emit_frame_begin(func, 2);
-                                func.instruction(&Instruction::LocalSet(self.temp_local));
-                                self.emit_slot_addr(func, 1);
-                                func.instruction(&Instruction::LocalGet(self.temp_local));
-                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                                func.instruction(&Instruction::LocalSet(self.temp_local));
-                                self.emit_slot_addr(func, 0);
-                                func.instruction(&Instruction::LocalGet(self.temp_local));
-                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                                self.emit_memcall(func, "js_mod", 2);
-                            }
-                            BinaryOp::Pow => {
-                                self.emit_frame_begin(func, 2);
-                                func.instruction(&Instruction::LocalSet(self.temp_local));
-                                self.emit_slot_addr(func, 1);
-                                func.instruction(&Instruction::LocalGet(self.temp_local));
-                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                                func.instruction(&Instruction::LocalSet(self.temp_local));
-                                self.emit_slot_addr(func, 0);
-                                func.instruction(&Instruction::LocalGet(self.temp_local));
-                                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                                self.emit_memcall(func, "math_pow", 2);
-                            }
                             _ => { func.instruction(&Instruction::F64Add); }
                         };
                         func.instruction(&Instruction::I64ReinterpretF64);
