@@ -70,6 +70,10 @@ codegen-units = 16
 strip = false
 codegen-units = 16
 
+[profile.release.package.perry-ui-windows]
+strip = false
+codegen-units = 16
+
 [profile.release.package.perry-ui-geisterhand]
 strip = false
 codegen-units = 16
@@ -81,7 +85,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.4.14"
+version = "0.4.15"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"

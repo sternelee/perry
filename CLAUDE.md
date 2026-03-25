@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.14
+**Current Version:** 0.4.15
 
 ## Workflow Requirements
 
@@ -139,6 +139,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.15
+- fix: Windows non-UI programs no longer fail with 216 unresolved `perry_ui_*` symbols — UI/system/plugin/screen FFI declarations guarded behind `needs_ui` flag (GH-9)
+- feat: release packages now include platform UI libraries — `libperry_ui_macos.a` (macOS), `libperry_ui_gtk4.a` (Linux), `perry_ui_windows.lib` (Windows)
 
 ### v0.4.14
 - fix: Linux linker no longer requires PulseAudio for non-UI programs — `-lpulse-simple -lpulse` moved behind `needs_ui` guard (GH-8)

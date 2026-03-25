@@ -40,6 +40,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install GTK4 development libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
+
       - name: Build perry
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -48,18 +52,29 @@ jobs:
           cargo build --release --target ${{ matrix.target }} -p perry-runtime
           cargo build --release --target ${{ matrix.target }} -p perry-stdlib
 
+      - name: Build UI library (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --target ${{ matrix.target }} -p perry-ui-macos
+
+      - name: Build UI library (Linux)
+        if: runner.os == 'Linux'
+        run: cargo build --release --target ${{ matrix.target }} -p perry-ui-gtk4
+
+      - name: Build UI library (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --target ${{ matrix.target }} -p perry-ui-windows
+
       - name: Package release archive (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p staging
           cp target/${{ matrix.target }}/release/perry staging/
-          # Include static libraries for linking
-          if [ -f target/${{ matrix.target }}/release/libperry_runtime.a ]; then
-            cp target/${{ matrix.target }}/release/libperry_runtime.a staging/
-          fi
-          if [ -f target/${{ matrix.target }}/release/libperry_stdlib.a ]; then
-            cp target/${{ matrix.target }}/release/libperry_stdlib.a staging/
-          fi
+          # Include static libraries for linking (runtime, stdlib, UI)
+          for lib in libperry_runtime.a libperry_stdlib.a libperry_ui_macos.a libperry_ui_gtk4.a; do
+            if [ -f "target/${{ matrix.target }}/release/$lib" ]; then
+              cp "target/${{ matrix.target }}/release/$lib" staging/
+            fi
+          done
           cd staging
           tar czf ../${{ matrix.artifact }}.tar.gz *
 
@@ -69,8 +84,8 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path staging
           Copy-Item "target/${{ matrix.target }}/release/perry.exe" staging/
-          # Include static libraries for linking
-          $libs = @("perry_runtime.lib", "perry_stdlib.lib")
+          # Include static libraries for linking (runtime, stdlib, UI)
+          $libs = @("perry_runtime.lib", "perry_stdlib.lib", "perry_ui_windows.lib")
           foreach ($lib in $libs) {
             $path = "target/${{ matrix.target }}/release/$lib"
             if (Test-Path $path) {
@@ -264,12 +279,11 @@ jobs:
           cp staging/perry "${PKG}/usr/bin/"
           chmod 755 "${PKG}/usr/bin/perry"
 
-          if [ -f staging/libperry_runtime.a ]; then
-            cp staging/libperry_runtime.a "${PKG}/usr/lib/perry/"
-          fi
-          if [ -f staging/libperry_stdlib.a ]; then
-            cp staging/libperry_stdlib.a "${PKG}/usr/lib/perry/"
-          fi
+          for lib in libperry_runtime.a libperry_stdlib.a libperry_ui_gtk4.a; do
+            if [ -f "staging/$lib" ]; then
+              cp "staging/$lib" "${PKG}/usr/lib/perry/"
+            fi
+          done
 
           # Add library path config so perry can find its libs
           mkdir -p "${PKG}/etc/perry"

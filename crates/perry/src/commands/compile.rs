@@ -3618,6 +3618,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             }
 
             compiler.set_needs_stdlib(ctx.needs_stdlib);
+            compiler.set_needs_ui(ctx.needs_ui);
             compiler.set_needs_geisterhand(ctx.needs_geisterhand);
             compiler.set_geisterhand_port(ctx.geisterhand_port);
 

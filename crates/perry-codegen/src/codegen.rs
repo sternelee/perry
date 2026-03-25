@@ -66,6 +66,8 @@ pub struct Compiler {
     pub(crate) needs_js_runtime: bool,
     /// Whether perry-stdlib is needed (controls stdlib function declarations)
     pub(crate) needs_stdlib: bool,
+    /// Whether perry/ui is needed (controls UI/system/plugin function declarations)
+    pub(crate) needs_ui: bool,
     /// Whether dotenv/config was imported (needs auto-init call)
     pub(crate) needs_dotenv_init: bool,
     /// Whether this is the entry module (should generate main)
@@ -258,6 +260,7 @@ impl Compiler {
             func_union_params: HashMap::new(),
             needs_js_runtime: false,
             needs_stdlib: true,  // Default to true for backwards compatibility
+            needs_ui: false,
             needs_dotenv_init: false,
             is_entry_module: true,  // Default to true for single-module compilation
             native_module_inits: Vec::new(),
@@ -293,6 +296,11 @@ impl Compiler {
     /// Set whether perry-stdlib is needed
     pub fn set_needs_stdlib(&mut self, needs: bool) {
         self.needs_stdlib = needs;
+    }
+
+    /// Set whether perry/ui is needed (controls UI/system/plugin/screen function declarations)
+    pub fn set_needs_ui(&mut self, needs: bool) {
+        self.needs_ui = needs;
     }
 
     /// Set whether this is the entry module (generates main function)

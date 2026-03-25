@@ -8040,6 +8040,7 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_fastify_ctx_redirect"), func_id);
         }
 
+        if self.needs_ui {
         // ============================================
         // Perry UI FFI functions
         // ============================================
@@ -10184,6 +10185,7 @@ impl Compiler {
             let func_id = self.module.declare_function("perry_plugin_list_tools", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("perry_plugin_list_tools"), func_id);
         }
+        } // end if self.needs_ui (UI/system/audio/plugin sections)
 
         // ============================================
         // V8 JavaScript Runtime FFI functions
@@ -10412,6 +10414,7 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("perry_resolve_static_plugin"), func_id);
         }
 
+        if self.needs_ui {
         // ============================================
         // Platform screen detection functions
         // ============================================
@@ -10450,6 +10453,7 @@ impl Compiler {
             let func_id = self.module.declare_function("perry_get_device_idiom", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("perry_get_device_idiom"), func_id);
         }
+        } // end if self.needs_ui
 
         // ============================================
         // External native library FFI functions
