@@ -143,6 +143,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ### v0.4.14
 - fix: Linux linker no longer requires PulseAudio for non-UI programs — `-lpulse-simple -lpulse` moved behind `needs_ui` guard (GH-8)
 - fix: `perry run .` now works — positional args parsed flexibly so non-platform values are treated as input path instead of erroring
+- perf: native `fcmp` for numeric comparisons — known-numeric operands emit Cranelift `fcmp` instead of `js_jsvalue_compare` runtime call; mandelbrot 30% faster
+- perf: `compile_condition_to_bool` fast path — numeric `Compare` in loop/if conditions produces I8 boolean directly, skipping NaN-box round-trip
+- perf: in-place string append with capacity tracking — `js_string_append` reuses allocation when refcount=1 and capacity allows; string_concat 125x faster
+- perf: deferred module-var write-back in loops — skip global stores inside simple loops, flush at exit
+- perf: short-circuit `&&`/`||` in `compile_condition_to_bool` — proper branching instead of always-evaluate-both with `band`/`bor`
+- chore: rerun all benchmarks with Node v25 + Bun 1.3, add Bun to all entries, full README with context for wins AND losses
 
 ### v0.4.13
 - fix: VStack/HStack use GravityAreas distribution + top/leading gravity — children pack from top-left instead of stretching or centering

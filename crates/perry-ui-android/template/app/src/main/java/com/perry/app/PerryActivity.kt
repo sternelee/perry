@@ -32,8 +32,21 @@ class PerryActivity : Activity() {
         // Switch from splash theme to normal theme before inflating layout
         setTheme(android.R.style.Theme_Material_Light_NoActionBar)
 
+        // Go edge-to-edge (content under status/nav bars, matching iOS behavior)
+        window.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+        )
+
         rootLayout = FrameLayout(this)
         setContentView(rootLayout)
+
+        // Store device locale in SharedPreferences so preferencesGet("AppleLanguages") works
+        // cross-platform (matches iOS NSUserDefaults key)
+        val locale = java.util.Locale.getDefault().language
+        getSharedPreferences("perry_prefs", 0).edit()
+            .putString("AppleLanguages", locale)
+            .apply()
 
         // Initialize the bridge with this Activity
         PerryBridge.init(this, rootLayout)

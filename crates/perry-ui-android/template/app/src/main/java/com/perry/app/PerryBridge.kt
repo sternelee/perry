@@ -14,6 +14,7 @@ import android.hardware.camera2.*
 import android.location.LocationManager
 import android.media.ImageReader
 import android.net.Uri
+import android.view.PixelCopy
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -69,6 +70,39 @@ object PerryBridge {
     private var cameraTextureView: TextureView? = null
     private var cameraFrozen = false
     @Volatile private var latestBitmap: Bitmap? = null
+    @Volatile private var latestYuvFrame: YuvFrame? = null
+    private var debugBitmapSaved = false
+
+    data class YuvFrame(
+        val width: Int, val height: Int,
+        val yData: ByteArray, val uData: ByteArray, val vData: ByteArray,
+        val yRowStride: Int, val uvRowStride: Int, val uvPixelStride: Int
+    ) {
+        fun sampleRgb(normX: Double, normY: Double): Triple<Int, Int, Int> {
+            val px = (normX.coerceIn(0.0, 1.0) * (width - 1)).toInt().coerceIn(0, width - 1)
+            val py = (normY.coerceIn(0.0, 1.0) * (height - 1)).toInt().coerceIn(0, height - 1)
+
+            // Average 5x5 region
+            val half = 2
+            var rSum = 0L; var gSum = 0L; var bSum = 0L; var count = 0L
+            for (sy in (py - half).coerceAtLeast(0)..(py + half).coerceAtMost(height - 1)) {
+                for (sx in (px - half).coerceAtLeast(0)..(px + half).coerceAtMost(width - 1)) {
+                    val yVal = (yData[sy * yRowStride + sx].toInt() and 0xFF)
+                    val uvRow = sy / 2
+                    val uvCol = sx / 2
+                    val uIdx = uvRow * uvRowStride + uvCol * uvPixelStride
+                    val vIdx = uIdx
+                    val uVal = if (uIdx < uData.size) (uData[uIdx].toInt() and 0xFF) - 128 else 0
+                    val vVal = if (vIdx < vData.size) (vData[vIdx].toInt() and 0xFF) - 128 else 0
+                    rSum += (yVal + 1.370705 * vVal).toInt().coerceIn(0, 255)
+                    gSum += (yVal - 0.337633 * uVal - 0.698001 * vVal).toInt().coerceIn(0, 255)
+                    bSum += (yVal + 1.732446 * uVal).toInt().coerceIn(0, 255)
+                    count++
+                }
+            }
+            return Triple((rSum / count).toInt(), (gSum / count).toInt(), (bSum / count).toInt())
+        }
+    }
     private val TAG = "PerryCamera"
 
     fun init(activity: Activity, rootLayout: FrameLayout) {
@@ -421,9 +455,24 @@ object PerryBridge {
                 override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = true
                 override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
                     if (!cameraFrozen) {
-                        // Capture bitmap from TextureView for color sampling
+                        // Capture bitmap from TextureView using PixelCopy for reliable content
                         try {
-                            latestBitmap = textureView.bitmap
+                            val w = textureView.width
+                            val h = textureView.height
+                            if (w > 0 && h > 0) {
+                                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                                val handler = cameraHandler
+                                if (handler != null) {
+                                    PixelCopy.request(
+                                        textureView.surfaceTexture?.let { Surface(it) } ?: return,
+                                        bmp,
+                                        PixelCopy.OnPixelCopyFinishedListener { result ->
+                                            if (result == PixelCopy.SUCCESS) {
+                                                latestBitmap = bmp
+                                            }
+                                        }, handler)
+                                }
+                            }
                         } catch (_: Exception) {}
                     }
                 }
@@ -486,8 +535,39 @@ object PerryBridge {
             // Configure preview surface from TextureView
             val previewSurface = Surface(surfaceTexture)
 
+            // Create ImageReader for color sampling (small resolution is enough)
+            val reader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 2)
+            imageReader = reader
+            reader.setOnImageAvailableListener({ ir ->
+                val image = ir.acquireLatestImage() ?: return@setOnImageAvailableListener
+                try {
+                    if (!cameraFrozen) {
+                        // Store YUV data for on-demand sampling (avoid full-frame conversion)
+                        val w = image.width
+                        val h = image.height
+                        val yPlane = image.planes[0]
+                        val uPlane = image.planes[1]
+                        val vPlane = image.planes[2]
+
+                        // Copy plane data (image is recycled after close)
+                        val yBuf = yPlane.buffer
+                        val uBuf = uPlane.buffer
+                        val vBuf = vPlane.buffer
+                        val yBytes = ByteArray(yBuf.remaining()); yBuf.get(yBytes)
+                        val uBytes = ByteArray(uBuf.remaining()); uBuf.get(uBytes)
+                        val vBytes = ByteArray(vBuf.remaining()); vBuf.get(vBytes)
+
+                        latestYuvFrame = YuvFrame(w, h, yBytes, uBytes, vBytes,
+                            yPlane.rowStride, uPlane.rowStride, uPlane.pixelStride)
+                    }
+                } finally {
+                    image.close()
+                }
+            }, cameraHandler)
+
             val captureRequestBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             captureRequestBuilder.addTarget(previewSurface)
+            captureRequestBuilder.addTarget(reader.surface)
 
             // Auto-focus
             captureRequestBuilder.set(
@@ -496,7 +576,7 @@ object PerryBridge {
             )
 
             camera.createCaptureSession(
-                listOf(previewSurface),
+                listOf(previewSurface, reader.surface),
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
@@ -577,31 +657,23 @@ object PerryBridge {
      */
     @JvmStatic
     fun cameraSampleColor(x: Double, y: Double): Double {
-        val bitmap = latestBitmap ?: return -1.0
-        val w = bitmap.width
-        val h = bitmap.height
+        val frame = latestYuvFrame ?: return -1.0
+        val w = frame.width
+        val h = frame.height
         if (w == 0 || h == 0) return -1.0
 
-        val px = (x.coerceIn(0.0, 1.0) * (w - 1)).toInt().coerceIn(0, w - 1)
-        val py = (y.coerceIn(0.0, 1.0) * (h - 1)).toInt().coerceIn(0, h - 1)
-
-        // Average a 5x5 region for noise reduction
-        val half = 2
-        var rSum = 0L; var gSum = 0L; var bSum = 0L; var count = 0L
-        for (sy in (py - half).coerceAtLeast(0)..(py + half).coerceAtMost(h - 1)) {
-            for (sx in (px - half).coerceAtLeast(0)..(px + half).coerceAtMost(w - 1)) {
-                val pixel = bitmap.getPixel(sx, sy)
-                rSum += (pixel shr 16) and 0xFF
-                gSum += (pixel shr 8) and 0xFF
-                bSum += pixel and 0xFF
-                count++
-            }
+        // YUV frame is landscape (from sensor). Remap portrait screen coords.
+        val normX: Double
+        val normY: Double
+        if (w > h) {
+            normX = (1.0 - y).coerceIn(0.0, 1.0)
+            normY = x.coerceIn(0.0, 1.0)
+        } else {
+            normX = x.coerceIn(0.0, 1.0)
+            normY = y.coerceIn(0.0, 1.0)
         }
-        if (count == 0L) return -1.0
 
-        val r = (rSum / count).toDouble()
-        val g = (gSum / count).toDouble()
-        val b = (bSum / count).toDouble()
+        val (r, g, b) = frame.sampleRgb(normX, normY)
         return r * 65536.0 + g * 256.0 + b
     }
 

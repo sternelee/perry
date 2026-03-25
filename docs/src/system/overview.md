@@ -24,6 +24,7 @@ import { openURL, isDarkMode, preferencesSet, preferencesGet, getAppIcon } from 
 | `audioGetLevel()` | Current dB(A) sound level | All |
 | `audioGetPeak()` | Current peak amplitude (0–1) | All |
 | `audioGetWaveformSamples(n)` | Recent dB samples for visualization | All |
+| `getLocale()` | Device language code (e.g. `"de"`, `"en"`) | All |
 | `getDeviceModel()` | Device model identifier | All |
 | `getAppIcon(path)` | Get app/file icon as Image widget | macOS, Linux |
 

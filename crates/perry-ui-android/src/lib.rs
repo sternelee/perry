@@ -963,6 +963,25 @@ pub extern "C" fn perry_system_request_location(callback: f64) {
     location::request_location(callback);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_system_get_locale() -> i64 {
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(8);
+    let locale_class = env.find_class("java/util/Locale").expect("Locale class");
+    let default_locale = env.call_static_method(
+        locale_class, "getDefault", "()Ljava/util/Locale;", &[]
+    ).expect("getDefault").l().expect("locale obj");
+    let lang = env.call_method(
+        &default_locale, "getLanguage", "()Ljava/lang/String;", &[]
+    ).expect("getLanguage").l().expect("lang string");
+    let jstr: jni::objects::JString = lang.into();
+    let s: String = env.get_string(&jstr).expect("get string").into();
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+    let bytes = s.as_bytes();
+    extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8; }
+    unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) as i64 }
+}
+
 // =============================================================================
 // TabBar
 // =============================================================================

@@ -131,9 +131,24 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
         );
 
         // Match iOS UIStackView fill alignment: adjust child LayoutParams
-        // based on parent LinearLayout orientation
+        // based on parent type
         if result.is_ok() {
-            if env.is_instance_of(parent_ref.as_obj(), "android/widget/LinearLayout").unwrap_or(false) {
+            if env.is_instance_of(parent_ref.as_obj(), "android/widget/FrameLayout").unwrap_or(false)
+                && !env.is_instance_of(parent_ref.as_obj(), "android/widget/LinearLayout").unwrap_or(false)
+            {
+                // FrameLayout (ZStack): children fill parent by default (match iOS ZStack behavior)
+                if let Ok(lp) = env.call_method(child_ref.as_obj(), "getLayoutParams",
+                    "()Landroid/view/ViewGroup$LayoutParams;", &[]) {
+                    if let Ok(lp_obj) = lp.l() {
+                        if !lp_obj.is_null() {
+                            let _ = env.set_field(&lp_obj, "width", "I", JValue::Int(-1)); // MATCH_PARENT
+                            let _ = env.set_field(&lp_obj, "height", "I", JValue::Int(-1)); // MATCH_PARENT
+                            let _ = env.call_method(child_ref.as_obj(), "setLayoutParams",
+                                "(Landroid/view/ViewGroup$LayoutParams;)V", &[JValue::Object(&lp_obj)]);
+                        }
+                    }
+                }
+            } else if env.is_instance_of(parent_ref.as_obj(), "android/widget/LinearLayout").unwrap_or(false) {
                 let orientation = env.call_method(parent_ref.as_obj(), "getOrientation", "()I", &[])
                     .map(|v| v.i().unwrap_or(-1)).unwrap_or(-1);
                 if let Ok(lp) = env.call_method(child_ref.as_obj(), "getLayoutParams",

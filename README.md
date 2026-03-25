@@ -4,7 +4,7 @@
 
 Perry is a native TypeScript compiler written in Rust. It takes your TypeScript and compiles it straight to native executables — no Node.js, no Electron, no browser engine. Just fast, small binaries that run anywhere.
 
-**Current Version:** 0.4.8 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
+**Current Version:** 0.4.14 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
 
 ```bash
 perry compile src/main.ts -o myapp
@@ -33,23 +33,40 @@ People are building real apps with Perry today. Here are some highlights:
 
 ## Performance
 
-*Median of 5 runs on macOS ARM64 (Apple Silicon)*
+*Median of 3 runs on macOS ARM64 (Apple Silicon). Node.js v25, Bun 1.3.*
 
-| Benchmark | Perry | Node.js v24 | Bun 1.3 | Perry vs Node | Perry vs Bun |
-|-----------|-------|-------------|---------|---------------|--------------|
-| fibonacci | 4,848ms | 10,077ms | 5,188ms | **2.1x** | **1.1x** |
-| string_ops | 31ms | 56ms | 38ms | **1.8x** | **1.2x** |
-| array_read | 4ms | 12ms | — | **3.0x** | — |
-| math_intensive | 22ms | 66ms | — | **3.0x** | — |
-| object_create | 2ms | 7ms | — | **3.5x** | — |
-| closure | 14ms | 63ms | — | **4.5x** | — |
-| binary_trees | 3ms | 8ms | — | **2.7x** | — |
+**Perry wins — function calls, recursion, array access:**
 
-Perry compiles to native machine code via Cranelift — no JIT warmup, no interpreter overhead. Performance is competitive with Bun and significantly faster than Node.js on compute-heavy workloads.
+| Benchmark | Perry | Node.js | Bun | vs Node | vs Bun | What it tests |
+|-----------|-------|---------|-----|---------|--------|---------------|
+| fibonacci(40) | 505ms | 1,025ms | 538ms | **2.0x** | **1.1x** | Recursive function calls |
+| array_read | 4ms | 14ms | 18ms | **3.5x** | **4.5x** | Sequential memory access (10M elements) |
+| object_create | 5ms | 9ms | 7ms | **1.8x** | **1.4x** | Object allocation + field access (1M objects) |
 
-> **Note:** Perry is under active development, so benchmarks are subject to change — but they usually only get better. We're continuously optimizing the codegen pipeline, and each release tends to improve performance across the board.
+Perry compiles to native machine code — no JIT warmup, no interpreter overhead. Function calls, recursion, and sequential memory access patterns are direct native instructions.
 
-Run benchmarks yourself: `cd benchmarks && ./run_benchmarks.sh` (requires node, bun, cargo)
+**Competitive — within 2x of JIT runtimes:**
+
+| Benchmark | Perry | Node.js | Bun | vs Node | vs Bun | What it tests |
+|-----------|-------|---------|-----|---------|--------|---------------|
+| method_calls | 16ms | 11ms | 9ms | 0.7x | 0.6x | Class method dispatch (10M calls) |
+| prime_sieve | 11ms | 8ms | 7ms | 0.7x | 0.6x | Sieve of Eratosthenes (boolean array + branches) |
+| string_concat | 7ms | 2ms | 1ms | 0.3x | 0.1x | 100K string appends (in-place with capacity) |
+
+Method dispatch uses direct function calls (no vtable). String concatenation uses amortized O(1) in-place appending. V8/JSC have inline caches and rope strings that push these faster.
+
+**V8/Bun lead — f64 math, SIMD-vectorizable loops:**
+
+| Benchmark | Perry | Node.js | Bun | vs Node | vs Bun | Why they're faster |
+|-----------|-------|---------|-----|---------|--------|-------------------|
+| mandelbrot | 71ms | 25ms | 31ms | 0.3x | 0.4x | V8 TurboFan schedules f64 ops across 2 FPUs more aggressively than Cranelift |
+| matrix_multiply | 61ms | 36ms | 36ms | 0.6x | 0.6x | V8 auto-vectorizes nested loops with SIMD (NEON on ARM) |
+| math_intensive | 370ms | 52ms | 53ms | 0.1x | 0.1x | Harmonic series: V8 vectorizes `result += 1.0/i` across SIMD lanes |
+| nested_loops | 32ms | 18ms | 20ms | 0.6x | 0.6x | V8's loop optimization + SIMD for array access in nested loops |
+
+V8's TurboFan JIT has decades of optimization for tight f64 loops — SIMD auto-vectorization (NEON/SSE), speculative type specialization, and aggressive instruction scheduling. Perry's Cranelift backend generates correct scalar code but doesn't yet vectorize. This is the main performance frontier for Perry's codegen.
+
+Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, bun, cargo)
 
 ## Binary Size
 

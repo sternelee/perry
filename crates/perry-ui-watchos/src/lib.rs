@@ -649,6 +649,12 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_system_keychain_get(_key: i64) -> f64 { f64::from_bits(0x7FFC_0000_0000_0001) }
 #[no_mangle] pub extern "C" fn perry_system_keychain_delete(_key: i64) {}
 #[no_mangle] pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+#[no_mangle]
+pub extern "C" fn perry_system_get_locale() -> i64 {
+    extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64; }
+    let fallback = b"en";
+    unsafe { js_string_from_bytes(fallback.as_ptr(), 2) }
+}
 #[no_mangle] pub extern "C" fn perry_get_screen_width() -> f64 { 198.0 }  // Apple Watch Ultra width
 #[no_mangle] pub extern "C" fn perry_get_screen_height() -> f64 { 242.0 }
 #[no_mangle] pub extern "C" fn perry_get_scale_factor() -> f64 { 2.0 }

@@ -154,7 +154,8 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
             let stack: &UIStackView = unsafe { &*(Retained::as_ptr(&parent) as *const UIStackView) };
             stack.addArrangedSubview(&child);
         } else {
-            parent.addSubview(&child);
+            // Non-stack parent (e.g. ZStack/plain UIView): pin child to fill parent
+            zstack::add_child(parent_handle, child_handle);
         }
     }
 }

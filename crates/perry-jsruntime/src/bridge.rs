@@ -272,11 +272,12 @@ unsafe fn native_string_to_rust(ptr: *const u8) -> String {
         return String::new();
     }
 
-    // StringHeader layout: { length: u32, capacity: u32, data: [u8] }
+    // StringHeader layout: { length: u32, capacity: u32, refcount: u32, data: [u8] }
     #[repr(C)]
     struct StringHeader {
         length: u32,
         _capacity: u32,
+        _refcount: u32,
     }
 
     let header = ptr as *const StringHeader;

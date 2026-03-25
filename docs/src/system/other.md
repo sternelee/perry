@@ -50,6 +50,30 @@ clipboardSet("Copied text!");
 const text = clipboardGet();
 ```
 
+## Locale Detection
+
+Get the device's language as a 2-letter ISO 639-1 code:
+
+```typescript
+import { getLocale } from "perry/system";
+
+const lang = getLocale(); // "de", "en", "fr", "es", etc.
+
+if (lang === "de") {
+  // Use German translations
+}
+```
+
+| Platform | Implementation |
+|----------|---------------|
+| macOS | `[NSLocale preferredLanguages]` |
+| iOS | `[NSLocale preferredLanguages]` |
+| Android | `Locale.getDefault().getLanguage()` |
+| Windows | `LANG` / `LC_ALL` environment variable |
+| Linux | `LANG` / `LC_ALL` environment variable |
+| tvOS | `[NSLocale preferredLanguages]` |
+| watchOS | Stub (`"en"`) |
+
 ## App Icon Extraction
 
 Get the icon for an application or file as a native Image widget. Useful for building app launchers, file browsers, and search UIs:

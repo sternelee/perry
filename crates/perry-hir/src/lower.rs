@@ -4937,6 +4937,18 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             }
                         }
                     }
+                    // Check for `new NativeClass(...)` assignment: `instance = new Database('mango.db')`
+                    if let ast::Expr::New(new_expr) = inner_rhs {
+                        if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                            let class_name_str = class_ident.sym.as_ref();
+                            let native_info = ctx.lookup_native_module(class_name_str)
+                                .map(|(m, _)| m.to_string());
+                            if let Some(module_name) = native_info {
+                                ctx.register_native_instance(var_name.clone(), module_name.clone(), class_name_str.to_string());
+                                ctx.module_native_instances.push((var_name.clone(), module_name, class_name_str.to_string()));
+                            }
+                        }
+                    }
                     // Check for variable-to-variable assignment: `x = y` where y is a known native instance.
                     // e.g., `mongoClient = client` where client was tracked from MongoClient.connect().
                     if let ast::Expr::Ident(rhs_ident) = inner_rhs {

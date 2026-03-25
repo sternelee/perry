@@ -1555,6 +1555,20 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_string_append"), func_id);
         }
 
+        // js_string_addref(s: *mut StringHeader) -> void
+        // Mark a string as shared so js_string_append won't mutate it in-place.
+        // Called when a string pointer is copied to another variable.
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // string pointer
+            let func_id = self.module.declare_function(
+                "js_string_addref",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_addref"), func_id);
+        }
+
         // js_number_to_string(value: f64) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();
@@ -9938,6 +9952,14 @@ impl Compiler {
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = self.module.declare_function("perry_system_get_device_model", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("perry_system_get_device_model"), func_id);
+        }
+
+        // perry_system_get_locale() -> i64 (NaN-boxed string, e.g. "de", "en", "fr")
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_system_get_locale", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_system_get_locale"), func_id);
         }
 
         // ============================================

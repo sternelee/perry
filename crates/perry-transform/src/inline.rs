@@ -55,15 +55,19 @@ pub fn inline_functions(module: &mut Module) {
         .map(|c| (c.name.clone(), c.name.clone()))
         .collect();
 
-    // Phase 4: Inline calls in init statements — DISABLED
-    // Inlining in init statements is unsafe because module-level variables are cached
-    // in Cranelift local variables during compile_init. If an inlined function reads a
-    // module variable that was modified by a prior function call, it reads the stale
-    // cached value instead of the updated global slot value. Init runs once so the
-    // performance cost of not inlining is negligible.
-    // let mut next_local_id = find_max_local_id(&module.init) + 1;
-    // let mut local_types: HashMap<LocalId, String> = HashMap::new();
-    // inline_calls_in_stmts(&mut module.init, &func_candidates, &method_candidates, &class_names, &mut local_types, &mut next_local_id);
+    // Phase 4: Inline METHOD calls in init statements
+    // Only method calls are inlined here (not standalone functions), because method
+    // bodies access `this.field` via pointer indirection and never reference module-level
+    // variables. Standalone function inlining is still unsafe in init context because
+    // module-level variables are cached in Cranelift locals during compile_init — an
+    // inlined function that reads a module variable modified by a prior call would see
+    // the stale cached value instead of the updated global slot.
+    {
+        let empty_func_candidates: HashMap<FuncId, Function> = HashMap::new();
+        let mut next_local_id = find_max_local_id(&module.init) + 1;
+        let mut local_types: HashMap<LocalId, String> = HashMap::new();
+        inline_calls_in_stmts(&mut module.init, &empty_func_candidates, &method_candidates, &class_names, &mut local_types, &mut next_local_id);
+    }
 
     // Phase 5: Inline calls in function bodies
     for func in &mut module.functions {
@@ -1307,6 +1311,53 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
         }
         Expr::Yield { value, .. } => {
             if let Some(v) = value { substitute_this(v, obj_id); }
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                substitute_this(arg, obj_id);
+            }
+        }
+        Expr::NewDynamic { callee, args } => {
+            substitute_this(callee, obj_id);
+            for arg in args {
+                substitute_this(arg, obj_id);
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, v) in fields {
+                substitute_this(v, obj_id);
+            }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, v) in parts {
+                substitute_this(v, obj_id);
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(obj) = object {
+                substitute_this(obj, obj_id);
+            }
+            for arg in args {
+                substitute_this(arg, obj_id);
+            }
+        }
+        // Math operations
+        Expr::MathFloor(inner) | Expr::MathCeil(inner) | Expr::MathRound(inner) |
+        Expr::MathAbs(inner) | Expr::MathSqrt(inner) |
+        Expr::MathLog(inner) | Expr::MathLog2(inner) | Expr::MathLog10(inner) => {
+            substitute_this(inner, obj_id);
+        }
+        Expr::MathPow(base, exp) | Expr::MathImul(base, exp) => {
+            substitute_this(base, obj_id);
+            substitute_this(exp, obj_id);
+        }
+        Expr::MathMin(exprs) | Expr::MathMax(exprs) => {
+            for e in exprs {
+                substitute_this(e, obj_id);
+            }
+        }
+        Expr::MathMinSpread(inner) | Expr::MathMaxSpread(inner) => {
+            substitute_this(inner, obj_id);
         }
         _ => {}
     }

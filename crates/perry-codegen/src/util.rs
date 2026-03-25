@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use perry_hir::{BinaryOp, Expr, Stmt, UnaryOp, LogicalOp};
+use perry_hir::{BinaryOp, CompareOp, Expr, Stmt, UnaryOp, LogicalOp};
 use perry_types::LocalId;
 
 use crate::types::{ClassMeta, EnumMemberValue, LocalInfo, ThisContext};
@@ -51,6 +51,9 @@ thread_local! {
     pub(crate) static I18N_TABLE: RefCell<I18nCodegenTable> = RefCell::new(I18nCodegenTable::empty());
     /// i18n locale codes (e.g., ["en", "de", "fr"]) — set from compile.rs, read by module_init.rs.
     pub(crate) static I18N_LOCALE_CODES: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    /// Module-scoped variables whose global write-back is deferred inside a simple loop
+    /// (no function calls that could observe the global). The write-back is flushed after loop exit.
+    pub(crate) static DEFERRED_MODULE_WRITEBACK_VARS: RefCell<HashSet<LocalId>> = RefCell::new(HashSet::new());
 }
 
 /// Lightweight i18n table data for codegen thread-local access.
@@ -529,19 +532,91 @@ pub(crate) fn compile_condition_to_bool(
         // (which has full string/bigint/bool comparison logic) + inline_truthiness_check.
         // Using simple fcmp here would break NaN-boxed string comparisons (NaN != NaN).
         Expr::Logical { op: LogicalOp::And, left, right } => {
+            // Short-circuit AND: if left is false, skip right evaluation
             let l = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+            let right_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, types::I8);
+            let false_val = builder.ins().iconst(types::I8, 0);
+            builder.ins().brif(l, right_block, &[], merge_block, &[false_val.into()]);
+            builder.switch_to_block(right_block);
+            builder.seal_block(right_block);
             let r = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
-            Ok(builder.ins().band(l, r))
+            builder.ins().jump(merge_block, &[r.into()]);
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            Ok(builder.block_params(merge_block)[0])
         }
         Expr::Logical { op: LogicalOp::Or, left, right } => {
+            // Short-circuit OR: if left is true, skip right evaluation
             let l = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+            let right_block = builder.create_block();
+            let merge_block = builder.create_block();
+            builder.append_block_param(merge_block, types::I8);
+            let true_val = builder.ins().iconst(types::I8, 1);
+            builder.ins().brif(l, merge_block, &[true_val.into()], right_block, &[]);
+            builder.switch_to_block(right_block);
+            builder.seal_block(right_block);
             let r = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
-            Ok(builder.ins().bor(l, r))
+            builder.ins().jump(merge_block, &[r.into()]);
+            builder.switch_to_block(merge_block);
+            builder.seal_block(merge_block);
+            Ok(builder.block_params(merge_block)[0])
         }
         Expr::Unary { op: UnaryOp::Not, operand } => {
             let inner = compile_condition_to_bool(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, operand, this_ctx)?;
             let one_i8 = builder.ins().iconst(types::I8, 1);
             Ok(builder.ins().bxor(inner, one_i8))
+        }
+        // Fast path: numeric comparisons directly to I8 boolean (no NaN-box round-trip)
+        Expr::Compare { op, left, right } => {
+            fn is_known_numeric(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::Number(_) | Expr::Integer(_) => true,
+                    Expr::Update { .. } => true,
+                    Expr::LocalGet(id) => {
+                        locals.get(id).map(|info| {
+                            !info.is_string && !info.is_bigint && !info.is_pointer
+                            && !info.is_union && !info.is_boolean && !info.is_array
+                            && !info.is_map && !info.is_set && !info.is_buffer
+                            && !info.is_event_emitter && !info.is_closure
+                            && info.class_name.is_none()
+                        }).unwrap_or(false)
+                    }
+                    Expr::Binary { op, left, right } => {
+                        matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                            | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow
+                            | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+                            | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr)
+                        && is_known_numeric(left, locals)
+                        && is_known_numeric(right, locals)
+                    }
+                    Expr::Unary { op, operand } => {
+                        matches!(op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
+                        && is_known_numeric(operand, locals)
+                    }
+                    _ => false,
+                }
+            }
+            if is_known_numeric(left, locals) && is_known_numeric(right, locals) {
+                let lhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, left, this_ctx)?;
+                let rhs = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, right, this_ctx)?;
+                let lhs_f64 = ensure_f64(builder, lhs);
+                let rhs_f64 = ensure_f64(builder, rhs);
+                let float_cc = match op {
+                    CompareOp::Eq => FloatCC::Equal,
+                    CompareOp::Ne => FloatCC::NotEqual,
+                    CompareOp::Lt => FloatCC::LessThan,
+                    CompareOp::Le => FloatCC::LessThanOrEqual,
+                    CompareOp::Gt => FloatCC::GreaterThan,
+                    CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                };
+                Ok(builder.ins().fcmp(float_cc, lhs_f64, rhs_f64))
+            } else {
+                // Fall through to generic path for non-numeric comparisons
+                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, expr, this_ctx)?;
+                Ok(inline_truthiness_check(builder, module, extern_funcs, val))
+            }
         }
         _ => {
             // For string locals, check string length directly (raw i64 pointers lack STRING_TAG)
@@ -659,5 +734,224 @@ pub(crate) fn is_known_plain_array_expr(expr: &Expr, locals: &HashMap<LocalId, L
         Expr::ObjectEntries(_) |
         Expr::ProcessArgv => true,
         _ => false,
+    }
+}
+
+/// Check if a list of HIR statements contains any function calls (Call, MethodCall,
+/// NativeMethodCall, CallSpread, New, NewDynamic, Await, Yield).
+/// Used to determine if module-level variable write-backs can be safely deferred in loops.
+pub(crate) fn loop_body_has_calls(stmts: &[Stmt]) -> bool {
+    for s in stmts {
+        if loop_stmt_has_calls(s) {
+            return true;
+        }
+    }
+    false
+}
+
+fn loop_stmt_has_calls(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => loop_expr_has_calls(e),
+        Stmt::Return(None) | Stmt::Break | Stmt::Continue => false,
+        Stmt::Let { init: Some(e), .. } => loop_expr_has_calls(e),
+        Stmt::Let { init: None, .. } => false,
+        Stmt::If { condition, then_branch, else_branch } => {
+            loop_expr_has_calls(condition)
+                || loop_body_has_calls(then_branch)
+                || else_branch.as_ref().map_or(false, |eb| loop_body_has_calls(eb))
+        }
+        Stmt::For { init, condition, update, body } => {
+            init.as_ref().map_or(false, |s| loop_stmt_has_calls(s))
+                || condition.as_ref().map_or(false, |e| loop_expr_has_calls(e))
+                || update.as_ref().map_or(false, |e| loop_expr_has_calls(e))
+                || loop_body_has_calls(body)
+        }
+        Stmt::While { condition, body } => {
+            loop_expr_has_calls(condition) || loop_body_has_calls(body)
+        }
+        Stmt::Try { body, catch, finally } => {
+            loop_body_has_calls(body)
+                || catch.as_ref().map_or(false, |c| loop_body_has_calls(&c.body))
+                || finally.as_ref().map_or(false, |f| loop_body_has_calls(f))
+        }
+        Stmt::Switch { discriminant, cases } => {
+            loop_expr_has_calls(discriminant)
+                || cases.iter().any(|c| {
+                    c.test.as_ref().map_or(false, |t| loop_expr_has_calls(t))
+                        || loop_body_has_calls(&c.body)
+                })
+        }
+    }
+}
+
+pub(crate) fn loop_expr_has_calls(expr: &Expr) -> bool {
+    match expr {
+        // These are function calls — any of these means we can't defer write-backs
+        Expr::Call { .. } | Expr::CallSpread { .. } | Expr::NativeMethodCall { .. }
+        | Expr::New { .. } | Expr::NewDynamic { .. } | Expr::Await(..) | Expr::Yield { .. } => true,
+
+        // Recurse through sub-expressions
+        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            loop_expr_has_calls(left) || loop_expr_has_calls(right)
+        }
+        Expr::Unary { operand, .. } | Expr::TypeOf(operand) | Expr::Void(operand) => {
+            loop_expr_has_calls(operand)
+        }
+        Expr::LocalSet(_, val) => loop_expr_has_calls(val),
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            loop_expr_has_calls(condition)
+                || loop_expr_has_calls(then_expr)
+                || loop_expr_has_calls(else_expr)
+        }
+        Expr::PropertyGet { object, .. } => loop_expr_has_calls(object),
+        Expr::PropertySet { object, value, .. } => {
+            loop_expr_has_calls(object) || loop_expr_has_calls(value)
+        }
+        Expr::PropertyUpdate { object, .. } => loop_expr_has_calls(object),
+        Expr::IndexGet { object, index } => {
+            loop_expr_has_calls(object) || loop_expr_has_calls(index)
+        }
+        Expr::IndexSet { object, index, value } => {
+            loop_expr_has_calls(object) || loop_expr_has_calls(index) || loop_expr_has_calls(value)
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            loop_expr_has_calls(object) || loop_expr_has_calls(index)
+        }
+        Expr::Object(fields) => fields.iter().any(|(_, e)| loop_expr_has_calls(e)),
+        Expr::ObjectSpread { parts } => parts.iter().any(|(_, e)| loop_expr_has_calls(e)),
+        Expr::Array(elems) => elems.iter().any(|e| loop_expr_has_calls(e)),
+        Expr::ArraySpread(elems) => elems.iter().any(|e| match e {
+            perry_hir::ArrayElement::Expr(ex) | perry_hir::ArrayElement::Spread(ex) => loop_expr_has_calls(ex),
+        }),
+        Expr::InstanceOf { expr, .. } => loop_expr_has_calls(expr),
+        Expr::In { property, object } => {
+            loop_expr_has_calls(property) || loop_expr_has_calls(object)
+        }
+        Expr::Update { .. } => false,
+        Expr::StaticFieldSet { value, .. } => loop_expr_has_calls(value),
+        Expr::GlobalSet(_, val) => loop_expr_has_calls(val),
+        // Leaves — no sub-expressions, no calls
+        _ => false,
+    }
+}
+
+/// Collect LocalIds of module-scoped variables that are assigned (LocalSet or Update) in the given stmts.
+/// Only includes variables that have a `module_var_data_id` set.
+pub(crate) fn collect_module_var_writes_in_loop(
+    stmts: &[Stmt],
+    locals: &HashMap<LocalId, LocalInfo>,
+) -> HashSet<LocalId> {
+    let mut result = HashSet::new();
+    collect_module_var_writes_stmts(stmts, locals, &mut result);
+    result
+}
+
+fn collect_module_var_writes_stmts(stmts: &[Stmt], locals: &HashMap<LocalId, LocalInfo>, out: &mut HashSet<LocalId>) {
+    for s in stmts {
+        collect_module_var_writes_stmt(s, locals, out);
+    }
+}
+
+fn collect_module_var_writes_stmt(stmt: &Stmt, locals: &HashMap<LocalId, LocalInfo>, out: &mut HashSet<LocalId>) {
+    match stmt {
+        Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::Throw(e) => collect_module_var_writes_expr(e, locals, out),
+        Stmt::Let { init: Some(e), .. } => collect_module_var_writes_expr(e, locals, out),
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_module_var_writes_expr(condition, locals, out);
+            collect_module_var_writes_stmts(then_branch, locals, out);
+            if let Some(eb) = else_branch { collect_module_var_writes_stmts(eb, locals, out); }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(s) = init { collect_module_var_writes_stmt(s, locals, out); }
+            if let Some(e) = condition { collect_module_var_writes_expr(e, locals, out); }
+            if let Some(e) = update { collect_module_var_writes_expr(e, locals, out); }
+            collect_module_var_writes_stmts(body, locals, out);
+        }
+        Stmt::While { condition, body } => {
+            collect_module_var_writes_expr(condition, locals, out);
+            collect_module_var_writes_stmts(body, locals, out);
+        }
+        Stmt::Try { body, catch, finally } => {
+            collect_module_var_writes_stmts(body, locals, out);
+            if let Some(c) = catch { collect_module_var_writes_stmts(&c.body, locals, out); }
+            if let Some(f) = finally { collect_module_var_writes_stmts(f, locals, out); }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_module_var_writes_expr(discriminant, locals, out);
+            for c in cases {
+                if let Some(t) = &c.test { collect_module_var_writes_expr(t, locals, out); }
+                collect_module_var_writes_stmts(&c.body, locals, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_module_var_writes_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, out: &mut HashSet<LocalId>) {
+    match expr {
+        Expr::LocalSet(id, val) => {
+            if let Some(info) = locals.get(id) {
+                if !info.is_boxed && info.module_var_data_id.is_some() {
+                    out.insert(*id);
+                }
+            }
+            collect_module_var_writes_expr(val, locals, out);
+        }
+        Expr::Update { id, .. } => {
+            if let Some(info) = locals.get(id) {
+                if info.module_var_data_id.is_some() {
+                    out.insert(*id);
+                }
+            }
+        }
+        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            collect_module_var_writes_expr(left, locals, out);
+            collect_module_var_writes_expr(right, locals, out);
+        }
+        Expr::Unary { operand, .. } | Expr::TypeOf(operand) | Expr::Void(operand) => {
+            collect_module_var_writes_expr(operand, locals, out);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_module_var_writes_expr(condition, locals, out);
+            collect_module_var_writes_expr(then_expr, locals, out);
+            collect_module_var_writes_expr(else_expr, locals, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_module_var_writes_expr(callee, locals, out);
+            for a in args { collect_module_var_writes_expr(a, locals, out); }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            collect_module_var_writes_expr(callee, locals, out);
+            for a in args {
+                match a {
+                    perry_hir::CallArg::Expr(e) | perry_hir::CallArg::Spread(e) => {
+                        collect_module_var_writes_expr(e, locals, out);
+                    }
+                }
+            }
+        }
+        Expr::PropertyGet { object, .. } => collect_module_var_writes_expr(object, locals, out),
+        Expr::PropertySet { object, value, .. } => {
+            collect_module_var_writes_expr(object, locals, out);
+            collect_module_var_writes_expr(value, locals, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_module_var_writes_expr(object, locals, out);
+            collect_module_var_writes_expr(index, locals, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_module_var_writes_expr(object, locals, out);
+            collect_module_var_writes_expr(index, locals, out);
+            collect_module_var_writes_expr(value, locals, out);
+        }
+        Expr::Object(fields) => {
+            for (_, e) in fields { collect_module_var_writes_expr(e, locals, out); }
+        }
+        Expr::Array(elems) => {
+            for e in elems { collect_module_var_writes_expr(e, locals, out); }
+        }
+        _ => {}
     }
 }

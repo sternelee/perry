@@ -7,4 +7,6 @@ pub struct StringHeader {
     pub length: u32,
     /// Capacity (allocated space for data)
     pub capacity: u32,
+    /// Reference hint for in-place append optimization (0=shared, 1=unique)
+    pub refcount: u32,
 }

@@ -1339,6 +1339,26 @@ pub extern "C" fn perry_system_get_app_icon(path_ptr: i64) -> i64 {
     app::get_app_icon(path_ptr as *const u8)
 }
 
+#[no_mangle]
+pub extern "C" fn perry_system_get_locale() -> i64 {
+    extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64; }
+    unsafe {
+        let locale: *mut objc2::runtime::AnyObject = objc2::msg_send![
+            objc2::runtime::AnyClass::get(c"NSLocale").unwrap(),
+            preferredLanguages
+        ];
+        let first: *mut objc2::runtime::AnyObject = objc2::msg_send![locale, firstObject];
+        if first.is_null() {
+            let fallback = b"en";
+            return js_string_from_bytes(fallback.as_ptr(), 2);
+        }
+        let utf8: *const u8 = objc2::msg_send![first, UTF8String];
+        let len = libc::strlen(utf8 as *const i8);
+        let code_len = if len >= 2 { 2 } else { len };
+        js_string_from_bytes(utf8, code_len as i32)
+    }
+}
+
 // =============================================================================
 // Multi-Window
 // =============================================================================

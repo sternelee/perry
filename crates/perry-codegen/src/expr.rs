@@ -4382,8 +4382,8 @@ pub(crate) fn compile_expr(
                                             let rhs = builder.use_var(right_info.var);
                                             let new_val = builder.ins().iadd(current, rhs);
                                             builder.def_var(info.var, new_val);
-                                            // Write back to module global slot
-                                            if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } }
+                                            // Write back to module global slot (skip if deferred in loop)
+                                            if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let is_deferred = DEFERRED_MODULE_WRITEBACK_VARS.with(|d| d.borrow().contains(id)); if !is_deferred { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } } }
                                             return Ok(builder.ins().fcvt_from_sint(types::F64, new_val));
                                         } else if !right_info.is_boxed && !right_info.is_string && !right_info.is_bigint {
                                             // y is f64: convert to i32 and use iadd (faster than f64 arithmetic)
@@ -4393,8 +4393,8 @@ pub(crate) fn compile_expr(
                                             let rhs_i32 = builder.ins().fcvt_to_sint_sat(types::I32, rhs_f64);
                                             let new_val = builder.ins().iadd(current, rhs_i32);
                                             builder.def_var(info.var, new_val);
-                                            // Write back to module global slot
-                                            if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } }
+                                            // Write back to module global slot (skip if deferred in loop)
+                                            if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let is_deferred = DEFERRED_MODULE_WRITEBACK_VARS.with(|d| d.borrow().contains(id)); if !is_deferred { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } } }
                                             return Ok(builder.ins().fcvt_from_sint(types::F64, new_val));
                                         }
                                     }
@@ -4408,8 +4408,8 @@ pub(crate) fn compile_expr(
                                 let current = builder.use_var(info.var);
                                 let new_val = builder.ins().iadd_imm(current, delta);
                                 builder.def_var(info.var, new_val);
-                                // Write back to module global slot
-                                if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } }
+                                // Write back to module global slot (skip if deferred in loop)
+                                if !info.is_boxed { if let Some(data_id) = info.module_var_data_id { let is_deferred = DEFERRED_MODULE_WRITEBACK_VARS.with(|d| d.borrow().contains(id)); if !is_deferred { let wb = builder.ins().fcvt_from_sint(types::F64, new_val); let gv = module.declare_data_in_func(data_id, builder.func); let p = builder.ins().global_value(types::I64, gv); builder.ins().store(MemFlags::new(), wb, p, 0); } } }
                                 // Return f64 for expression value
                                 return Ok(builder.ins().fcvt_from_sint(types::F64, new_val));
                             }
@@ -4581,6 +4581,25 @@ pub(crate) fn compile_expr(
 
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
+            // String aliasing: when assigning `x = y` where y is a string variable,
+            // mark y's string as shared so js_string_append won't mutate it in-place.
+            if let Expr::LocalGet(src_id) = value.as_ref() {
+                if let Some(src_info) = locals.get(src_id) {
+                    if src_info.is_string {
+                        let val_type = builder.func.dfg.value_type(val);
+                        let raw_ptr = if val_type == types::I64 {
+                            val
+                        } else {
+                            inline_get_string_pointer(builder, val)
+                        };
+                        if let Some(addref_func) = extern_funcs.get("js_string_addref") {
+                            let addref_ref = module.declare_func_in_func(*addref_func, builder.func);
+                            builder.ins().call(addref_ref, &[raw_ptr]);
+                        }
+                    }
+                }
+            }
+
             let result = if info.is_boxed {
                 // For boxed variables (mutable captures), call js_box_set to update the value
                 let box_ptr = builder.use_var(info.var);
@@ -4702,19 +4721,28 @@ pub(crate) fn compile_expr(
             // subsequent function calls would load the stale value from the global slot.
             // Boxed variables are excluded because their box pointer IS the global slot
             // (see closure capture code that uses module_var_data_id as box address).
+            //
+            // OPTIMIZATION: Skip write-back inside simple loops (no function calls) —
+            // the value is flushed to the global slot after the loop exits.
             if !info.is_boxed {
                 if let Some(data_id) = info.module_var_data_id {
-                    let current = builder.use_var(info.var);
-                    let val_type = builder.func.dfg.value_type(current);
-                    let store_val = if val_type == types::I32 {
-                        // Convert i32 to f64 for 8-byte global slot storage
-                        builder.ins().fcvt_from_sint(types::F64, current)
-                    } else {
-                        current
-                    };
-                    let global_val = module.declare_data_in_func(data_id, builder.func);
-                    let ptr = builder.ins().global_value(types::I64, global_val);
-                    builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                    let is_deferred = DEFERRED_MODULE_WRITEBACK_VARS.with(|d| d.borrow().contains(id));
+                    if is_deferred {
+
+                    }
+                    if !is_deferred {
+                        let current = builder.use_var(info.var);
+                        let val_type = builder.func.dfg.value_type(current);
+                        let store_val = if val_type == types::I32 {
+                            // Convert i32 to f64 for 8-byte global slot storage
+                            builder.ins().fcvt_from_sint(types::F64, current)
+                        } else {
+                            current
+                        };
+                        let global_val = module.declare_data_in_func(data_id, builder.func);
+                        let ptr = builder.ins().global_value(types::I64, global_val);
+                        builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                    }
                 }
             }
 
@@ -4840,10 +4868,14 @@ pub(crate) fn compile_expr(
                 builder.def_var(info.var, store_val);
 
                 // Write back to module-level global slot for ++/-- on module variables
+                // OPTIMIZATION: Skip write-back inside simple loops (deferred until loop exit)
                 if let Some(data_id) = info.module_var_data_id {
-                    let global_val = module.declare_data_in_func(data_id, builder.func);
-                    let ptr = builder.ins().global_value(types::I64, global_val);
-                    builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                    let is_deferred = DEFERRED_MODULE_WRITEBACK_VARS.with(|d| d.borrow().contains(id));
+                    if !is_deferred {
+                        let global_val = module.declare_data_in_func(data_id, builder.func);
+                        let ptr = builder.ins().global_value(types::I64, global_val);
+                        builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                    }
                 }
 
                 // OPTIMIZATION: Update i32 shadow for integer variables (common for loop counters)
@@ -5218,18 +5250,32 @@ pub(crate) fn compile_expr(
             // Check for union-typed arithmetic: dispatch to BigInt or float at runtime.
             // When a local has is_union=true (Type::Any parameter), it may hold a BigInt
             // at runtime (BIGINT_TAG). Use js_dynamic_* functions that check NaN-box tags.
-            fn is_union_arith_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+            fn is_union_arith_operand(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>, classes: &HashMap<String, ClassMeta>) -> bool {
                 match expr {
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_union && !i.is_bigint).unwrap_or(false),
                     Expr::Binary { left, right, .. } => {
-                        is_union_arith_operand(left, locals) || is_union_arith_operand(right, locals)
+                        is_union_arith_operand(left, locals, classes) || is_union_arith_operand(right, locals, classes)
                     }
                     // PropertyGet on objects may return BigInt at runtime (NaN-boxed BIGINT_TAG).
                     // Use dynamic dispatch to check tag and route to BigInt or f64 arithmetic.
-                    Expr::PropertyGet { object, .. } => {
+                    // BUT: skip for known class fields with numeric type — these can't be BigInt.
+                    Expr::PropertyGet { object, property } => {
                         if let Expr::LocalGet(id) = object.as_ref() {
-                            // Only for pointer/object locals whose properties might be BigInt
-                            locals.get(id).map(|i| i.is_pointer && !i.is_bigint && !i.is_string && !i.is_array).unwrap_or(false)
+                            if let Some(info) = locals.get(id) {
+                                // Skip if the object has a known class with typed fields
+                                if let Some(ref class_name) = info.class_name {
+                                    if let Some(class_meta) = classes.get(class_name) {
+                                        // If the field type is known and is Number, no BigInt possible
+                                        if let Some(field_type) = class_meta.field_types.get(property) {
+                                            return matches!(field_type, perry_types::Type::Any | perry_types::Type::Union(_));
+                                        }
+                                    }
+                                }
+                                // Fallback: pointer/object locals whose properties might be BigInt
+                                info.is_pointer && !info.is_bigint && !info.is_string && !info.is_array
+                            } else {
+                                false
+                            }
                         } else {
                             false
                         }
@@ -5237,8 +5283,8 @@ pub(crate) fn compile_expr(
                     _ => false,
                 }
             }
-            let is_union_arith_left = is_union_arith_operand(left, locals);
-            let is_union_arith_right = is_union_arith_operand(right, locals);
+            let is_union_arith_left = is_union_arith_operand(left, locals, classes);
+            let is_union_arith_right = is_union_arith_operand(right, locals, classes);
 
             if (is_union_arith_left || is_union_arith_right) && matches!(op,
                 BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod |
@@ -6051,6 +6097,56 @@ pub(crate) fn compile_expr(
                         let cmp = builder.ins().icmp(icc, lhs_i64, rhs_i64);
                         Ok(builder.ins().select(cmp, one, zero))
                     } else {
+                        // Fast path: if both operands are known f64 numbers, use native
+                        // fcmp instead of runtime calls. This avoids function call overhead
+                        // in tight numeric loops (mandelbrot, math, matrix multiply, etc.).
+                        fn is_known_numeric_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                            match expr {
+                                Expr::Number(_) | Expr::Integer(_) => true,
+                                Expr::Update { .. } => true,
+                                Expr::LocalGet(id) => {
+                                    locals.get(id).map(|info| {
+                                        !info.is_string && !info.is_bigint && !info.is_pointer
+                                        && !info.is_union && !info.is_boolean && !info.is_array
+                                        && !info.is_map && !info.is_set && !info.is_buffer
+                                        && !info.is_event_emitter && !info.is_closure
+                                        && info.class_name.is_none()
+                                    }).unwrap_or(false)
+                                }
+                                Expr::Binary { op, left, right } => {
+                                    matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
+                                        | BinaryOp::Div | BinaryOp::Mod | BinaryOp::Pow
+                                        | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+                                        | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr)
+                                    && is_known_numeric_expr(left, locals)
+                                    && is_known_numeric_expr(right, locals)
+                                }
+                                Expr::Unary { op, operand } => {
+                                    matches!(op, UnaryOp::Neg | UnaryOp::Pos | UnaryOp::BitNot)
+                                    && is_known_numeric_expr(operand, locals)
+                                }
+                                _ => false,
+                            }
+                        }
+
+                        if is_known_numeric_expr(left, locals) && is_known_numeric_expr(right, locals) {
+                            // Both operands are known f64 — use native fcmp (1 instruction)
+                            // instead of js_jsvalue_compare/js_jsvalue_equals (function call).
+                            // IEEE 754 semantics match JS: NaN !== NaN, -0 === 0.
+                            let lhs_f64 = ensure_f64(builder, lhs);
+                            let rhs_f64 = ensure_f64(builder, rhs);
+                            let float_cc = match op {
+                                CompareOp::Eq => FloatCC::Equal,
+                                CompareOp::Ne => FloatCC::NotEqual,
+                                CompareOp::Lt => FloatCC::LessThan,
+                                CompareOp::Le => FloatCC::LessThanOrEqual,
+                                CompareOp::Gt => FloatCC::GreaterThan,
+                                CompareOp::Ge => FloatCC::GreaterThanOrEqual,
+                            };
+                            let cmp = builder.ins().fcmp(float_cc, lhs_f64, rhs_f64);
+                            Ok(builder.ins().select(cmp, one, zero))
+                        } else {
+
                         // Check if either operand is union-typed (Type::Any/Unknown parameter).
                         // Union-typed values may hold BigInts or strings at runtime, so we must
                         // use js_jsvalue_equals for Eq/Ne instead of fcmp (which compares bit
@@ -6127,6 +6223,7 @@ pub(crate) fn compile_expr(
                             let result_bool = builder.ins().band(raw_cmp, is_comparable);
                             Ok(builder.ins().select(result_bool, one, zero))
                         }
+                    }
                     }
                 }
             }
@@ -13219,10 +13316,38 @@ pub(crate) fn compile_expr(
                                 return Ok(val);
                             }
 
-                            // Skip index-based field store for non-this variables:
-                            // Plain objects (MySQL rows, JSON.parse results) may have different
-                            // field ordering than the class definition. Fall through to name-based
-                            // access which works for all object types.
+                            // Direct inline field store for known class instances.
+                            // Since PropertyGet already uses offset-based access for non-this
+                            // locals with known class_name, PropertySet must be consistent.
+                            // This is safe because class_name is only set when the variable
+                            // was initialized from `new ClassName()` (not JSON.parse etc.).
+                            if let Some(&field_idx) = class_meta.field_indices.get(property) {
+                                let obj_val = builder.use_var(info.var);
+                                let obj_ptr = ensure_i64(builder, obj_val);
+                                let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+
+                                let field_offset = 24 + (field_idx as i32) * 8;
+
+                                let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                                    let is_string_field = class_meta.field_types.get(property)
+                                        .map(|t| matches!(t, perry_types::Type::String))
+                                        .unwrap_or(false);
+                                    if is_string_field {
+                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let call = builder.ins().call(nanbox_ref, &[val]);
+                                        builder.inst_results(call)[0]
+                                    } else {
+                                        inline_nanbox_pointer(builder, val)
+                                    }
+                                } else {
+                                    ensure_f64(builder, val)
+                                };
+                                builder.ins().store(MemFlags::new(), val_f64, obj_ptr, field_offset);
+
+                                return Ok(val);
+                            }
                         }
                     }
                 }
@@ -18768,6 +18893,7 @@ pub(crate) fn compile_expr(
                 ("perry/system", false, "audioGetPeak") => "perry_system_audio_get_peak",
                 ("perry/system", false, "audioGetWaveformSamples") => "perry_system_audio_get_waveform",
                 ("perry/system", false, "getDeviceModel") => "perry_system_get_device_model",
+                ("perry/system", false, "getLocale") => "perry_system_get_locale",
 
                 // ========================================================================
                 // Perry Plugin System

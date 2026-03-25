@@ -1107,6 +1107,26 @@ pub(crate) fn compile_stmt(
                     // Compile the expression and assign directly - typed expressions now return correct types
                     let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, init_expr, this_ctx)?;
 
+                    // String aliasing: when `let y = x` copies a string pointer, mark the
+                    // source string as shared so js_string_append won't mutate it in-place.
+                    // This prevents `let y = x; x = x + "z"` from corrupting y.
+                    if let Expr::LocalGet(src_id) = init_expr {
+                        if let Some(src_info) = locals.get(src_id) {
+                            if src_info.is_string {
+                                let val_type = builder.func.dfg.value_type(val);
+                                let raw_ptr = if val_type == types::I64 {
+                                    val
+                                } else {
+                                    inline_get_string_pointer(builder, val)
+                                };
+                                if let Some(addref_func) = extern_funcs.get("js_string_addref") {
+                                    let addref_ref = module.declare_func_in_func(*addref_func, builder.func);
+                                    builder.ins().call(addref_ref, &[raw_ptr]);
+                                }
+                            }
+                        }
+                    }
+
                     // Check if this is a string from an array IndexGet (NaN-boxed string needs un-boxing)
                     let is_string_from_array = is_string && matches!(init_expr, Expr::IndexGet { object, .. }
                         if matches!(object.as_ref(), Expr::LocalGet(id) if locals.get(id).map(|i| i.is_array).unwrap_or(false)));
@@ -1989,6 +2009,9 @@ pub(crate) fn compile_stmt(
             // WHILE LOOP UNROLLING: For loops with CSE, unroll by 8 to reduce branch overhead
             let should_unroll = false; // Disabled: while-loop unrolling bloats code beyond i-cache/LSD limits, hurting mandelbrot-style tight loops
 
+            // OPTIMIZATION: Defer module-level variable write-backs for simple while loops
+            let mut deferred_while_vars: HashSet<LocalId> = HashSet::new();
+
             if should_unroll {
                 // First iteration
                 for s in body {
@@ -2269,12 +2292,33 @@ pub(crate) fn compile_stmt(
                 }
             } else {
                 // Normal (non-unrolled) body
+
+                // Populate deferred write-back set for simple while loops
+                if !loop_body_has_calls(body) {
+                    deferred_while_vars = collect_module_var_writes_in_loop(body, locals);
+                    if !deferred_while_vars.is_empty() {
+                        DEFERRED_MODULE_WRITEBACK_VARS.with(|d| {
+                            d.borrow_mut().extend(deferred_while_vars.iter().copied());
+                        });
+                    }
+                }
+
                 for s in body {
                     compile_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, this_ctx, Some(&while_loop_ctx), boxed_vars, async_promise_var)?;
                 }
                 let current = builder.current_block().unwrap();
                 if !is_block_filled(builder, current) {
                     builder.ins().jump(header_block, &[]);
+                }
+
+                // Clear deferred set before flushing
+                if !deferred_while_vars.is_empty() {
+                    DEFERRED_MODULE_WRITEBACK_VARS.with(|d| {
+                        let mut set = d.borrow_mut();
+                        for id in &deferred_while_vars {
+                            set.remove(id);
+                        }
+                    });
                 }
             }
 
@@ -2284,6 +2328,24 @@ pub(crate) fn compile_stmt(
             // Exit
             builder.switch_to_block(exit_block);
             builder.seal_block(exit_block);
+
+            // Flush deferred module-level variable write-backs after while loop exit
+            for var_id in &deferred_while_vars {
+                if let Some(info) = locals.get(var_id) {
+                    if let Some(data_id) = info.module_var_data_id {
+                        let current_val = builder.use_var(info.var);
+                        let val_type = builder.func.dfg.value_type(current_val);
+                        let store_val = if val_type == types::I32 {
+                            builder.ins().fcvt_from_sint(types::F64, current_val)
+                        } else {
+                            current_val
+                        };
+                        let global_val = module.declare_data_in_func(data_id, builder.func);
+                        let ptr = builder.ins().global_value(types::I64, global_val);
+                        builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                    }
+                }
+            }
 
             // Restore f64 variable after loop
             if let Some((counter_id, i32_var, _)) = counter_opt {
@@ -3092,6 +3154,27 @@ pub(crate) fn compile_stmt(
                 builder.switch_to_block(main_body);
                 builder.seal_block(main_body);
 
+                // OPTIMIZATION: Defer module-level variable write-backs in unrolled loops
+                let mut deferred_unrolled_vars: HashSet<LocalId> = HashSet::new();
+                let unrolled_body_has_calls = loop_body_has_calls(body)
+                    || update.as_ref().map_or(false, |u| loop_expr_has_calls(u));
+                if !unrolled_body_has_calls {
+                    deferred_unrolled_vars = collect_module_var_writes_in_loop(body, locals);
+                    if let Some(upd) = update {
+                        let update_stmts = vec![Stmt::Expr(upd.clone())];
+                        let update_writes = collect_module_var_writes_in_loop(&update_stmts, locals);
+                        deferred_unrolled_vars.extend(update_writes);
+                    }
+                    if !deferred_unrolled_vars.is_empty() {
+
+                        DEFERRED_MODULE_WRITEBACK_VARS.with(|d| {
+                            d.borrow_mut().extend(deferred_unrolled_vars.iter().copied());
+                        });
+                    }
+                } else {
+
+                }
+
                 let mut optimized = false;
 
                 // OPTIMIZATION 1: Strength reduction for x = x + constant
@@ -3356,9 +3439,37 @@ pub(crate) fn compile_stmt(
                 builder.ins().jump(rem_header, &[]);
                 builder.seal_block(rem_header);
 
+                // Clear deferred set before exit flush (unrolled path)
+                if !deferred_unrolled_vars.is_empty() {
+                    DEFERRED_MODULE_WRITEBACK_VARS.with(|d| {
+                        let mut set = d.borrow_mut();
+                        for id in &deferred_unrolled_vars {
+                            set.remove(id);
+                        }
+                    });
+                }
+
                 // Exit
                 builder.switch_to_block(exit_block);
                 builder.seal_block(exit_block);
+
+                // Flush deferred module-level variable write-backs (unrolled path)
+                for var_id in &deferred_unrolled_vars {
+                    if let Some(info) = locals.get(var_id) {
+                        if let Some(data_id) = info.module_var_data_id {
+                            let current_val = builder.use_var(info.var);
+                            let val_type = builder.func.dfg.value_type(current_val);
+                            let store_val = if val_type == types::I32 {
+                                builder.ins().fcvt_from_sint(types::F64, current_val)
+                            } else {
+                                current_val
+                            };
+                            let global_val = module.declare_data_in_func(data_id, builder.func);
+                            let ptr = builder.ins().global_value(types::I64, global_val);
+                            builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                        }
+                    }
+                }
 
                 // Clean up after loop
                 if let Some(orig_f64_var) = original_f64_var {
@@ -3618,6 +3729,29 @@ pub(crate) fn compile_stmt(
                 builder.switch_to_block(body_block);
                 builder.seal_block(body_block);
 
+                // OPTIMIZATION: Defer module-level variable write-backs for simple loops
+                // (no function calls in body+update that could observe the global value).
+                // Collect the set of module vars assigned in the loop, and skip their
+                // global stores during body/update compilation. Flush after loop exit.
+                let mut deferred_for_vars: HashSet<LocalId> = HashSet::new();
+                let body_has_calls = loop_body_has_calls(body)
+                    || update.as_ref().map_or(false, |u| loop_expr_has_calls(u));
+                if !body_has_calls {
+                    deferred_for_vars = collect_module_var_writes_in_loop(body, locals);
+                    if let Some(upd) = update {
+                        // Also check the update expression for module var writes
+                        let mut update_stmts = vec![Stmt::Expr(upd.clone())];
+                        let update_writes = collect_module_var_writes_in_loop(&update_stmts, locals);
+                        deferred_for_vars.extend(update_writes);
+                        drop(update_stmts);
+                    }
+                    if !deferred_for_vars.is_empty() {
+                        DEFERRED_MODULE_WRITEBACK_VARS.with(|d| {
+                            d.borrow_mut().extend(deferred_for_vars.iter().copied());
+                        });
+                    }
+                }
+
                 for s in body {
                     compile_stmt(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, closure_returning_funcs, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, next_var, s, this_ctx, Some(&for_loop_ctx), boxed_vars, async_promise_var)?;
                 }
@@ -3636,8 +3770,36 @@ pub(crate) fn compile_stmt(
                 builder.ins().jump(header_block, &[]);
                 builder.seal_block(header_block);
 
+                // Clear deferred set before flushing (so the flush stores aren't skipped)
+                if !deferred_for_vars.is_empty() {
+                    DEFERRED_MODULE_WRITEBACK_VARS.with(|d| {
+                        let mut set = d.borrow_mut();
+                        for id in &deferred_for_vars {
+                            set.remove(id);
+                        }
+                    });
+                }
+
                 builder.switch_to_block(exit_block);
                 builder.seal_block(exit_block);
+
+                // Flush deferred module-level variable write-backs after loop exit
+                for var_id in &deferred_for_vars {
+                    if let Some(info) = locals.get(var_id) {
+                        if let Some(data_id) = info.module_var_data_id {
+                            let current_val = builder.use_var(info.var);
+                            let val_type = builder.func.dfg.value_type(current_val);
+                            let store_val = if val_type == types::I32 {
+                                builder.ins().fcvt_from_sint(types::F64, current_val)
+                            } else {
+                                current_val
+                            };
+                            let global_val = module.declare_data_in_func(data_id, builder.func);
+                            let ptr = builder.ins().global_value(types::I64, global_val);
+                            builder.ins().store(MemFlags::new(), store_val, ptr, 0);
+                        }
+                    }
+                }
 
                 if let (Some(idx_id), Some(orig_f64_var)) = (bce_index_var, original_f64_var) {
                     if let Some(idx_info) = locals.get_mut(&idx_id) {

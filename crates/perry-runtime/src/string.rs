@@ -10,9 +10,9 @@ use std::slice;
 use std::str;
 
 /// A static empty string that can be used as a safe fallback for null pointers.
-/// Has length=0, capacity=0. The address is valid and .length returns 0.
+/// Has length=0, capacity=0, refcount=0 (shared). The address is valid and .length returns 0.
 #[no_mangle]
-pub static PERRY_EMPTY_STRING: StringHeader = StringHeader { length: 0, capacity: 0 };
+pub static PERRY_EMPTY_STRING: StringHeader = StringHeader { length: 0, capacity: 0, refcount: 0 };
 
 /// Get a pointer to the static empty string (for codegen null guards).
 #[no_mangle]
@@ -29,12 +29,20 @@ pub fn is_valid_string_ptr(p: *const StringHeader) -> bool {
 }
 
 /// Header for heap-allocated strings
+///
+/// The `refcount` field enables in-place append optimization in `js_string_append`:
+/// - refcount=0: shared/unknown ownership — never mutated in-place (safe default)
+/// - refcount=1: unique owner — `js_string_append` can append in-place if capacity allows
+/// Only strings created by `js_string_append` get refcount=1. When a string pointer is
+/// copied to another variable, codegen calls `js_string_addref` to set refcount=0 (shared).
 #[repr(C)]
 pub struct StringHeader {
     /// Length in bytes (not chars - we store UTF-8)
     pub length: u32,
     /// Capacity (allocated space for data)
     pub capacity: u32,
+    /// Reference hint: 0=shared (never mutate in-place), 1=unique (in-place append OK)
+    pub refcount: u32,
 }
 
 /// Create a string from raw bytes
@@ -56,6 +64,7 @@ pub extern "C" fn js_string_from_bytes_with_capacity(data: *const u8, len: u32, 
     unsafe {
         (*ptr).length = len;
         (*ptr).capacity = capacity;
+        (*ptr).refcount = 0; // shared by default — caller can set to 1 if uniquely owned
 
         // Copy string data after header
         if len > 0 && !data.is_null() {
@@ -107,10 +116,20 @@ pub extern "C" fn js_string_append(dest: *mut StringHeader, src: *const StringHe
 
         let new_len = dest_len + src_len;
 
-        // ALWAYS allocate fresh — never modify in-place.
+        // In-place append optimization: if dest is uniquely owned (refcount==1)
+        // and has enough capacity, append directly without allocation.
+        // This turns O(n^2) string building loops into amortized O(n).
+        if (*dest).refcount == 1 && new_len <= (*dest).capacity {
+            let dest_data = (dest as *mut u8).add(std::mem::size_of::<StringHeader>());
+            let src_data_ptr = string_data(src);
+            ptr::copy_nonoverlapping(src_data_ptr, dest_data.add(dest_len as usize), src_len as usize);
+            (*dest).length = new_len;
+            return dest; // Same pointer, no allocation!
+        }
+
+        // Allocate fresh with 2x capacity for future in-place appends.
         // Perry aliases strings through `let x = y` (pointer copy), so in-place
-        // mutation would corrupt all other references to the same string.
-        // JavaScript strings are immutable; `+=` must produce a new string.
+        // mutation of shared strings would corrupt other references.
         // We do NOT use gc_realloc here because the conservative GC scanner
         // may have already swept the dest string (pointer in a caller-saved
         // register that setjmp/stack-walk didn't capture). Fresh allocation
@@ -128,6 +147,10 @@ pub extern "C" fn js_string_append(dest: *mut StringHeader, src: *const StringHe
         ptr::copy_nonoverlapping(src_data_ptr, new_data.add(dest_len as usize), src_len as usize);
         (*new_ptr).length = new_len;
 
+        // Mark as uniquely owned — the caller (codegen) is about to assign
+        // this pointer to a single variable, so in-place append is safe next time.
+        (*new_ptr).refcount = 1;
+
         new_ptr
     }
 }
@@ -136,6 +159,19 @@ pub extern "C" fn js_string_append(dest: *mut StringHeader, src: *const StringHe
 #[no_mangle]
 pub extern "C" fn js_string_builder_new(initial_capacity: u32) -> *mut StringHeader {
     js_string_from_bytes_with_capacity(ptr::null(), 0, initial_capacity.max(16))
+}
+
+/// Mark a string as shared (refcount=0) so `js_string_append` won't mutate it in-place.
+/// Called by codegen when a string pointer is copied to another variable (`let y = x`),
+/// passed as a function argument, or stored into an array/object.
+/// This is a NaN-boxed f64 input — extract the raw pointer first.
+#[no_mangle]
+pub extern "C" fn js_string_addref(s: *mut StringHeader) {
+    if is_valid_string_ptr(s as *const StringHeader) {
+        unsafe {
+            (*s).refcount = 0; // Mark as shared — prevent in-place mutation
+        }
+    }
 }
 
 /// Internal helper: Create a StringHeader from a Rust &str
@@ -187,6 +223,7 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
     unsafe {
         (*ptr).length = total_len;
         (*ptr).capacity = total_len;
+        (*ptr).refcount = 0; // shared by default
 
         let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
 
@@ -805,5 +842,69 @@ mod tests {
             assert_eq!(string_as_str(ptr1), "b");
             assert_eq!(string_as_str(ptr2), "c");
         }
+    }
+
+    #[test]
+    fn test_string_append_inplace() {
+        // First append: creates new string with 2x capacity and refcount=1
+        let a = js_string_from_bytes(b"hello".as_ptr(), 5);
+        let b = js_string_from_bytes(b" world".as_ptr(), 6);
+        let result = js_string_append(a, b);
+        assert_eq!(string_as_str(result), "hello world");
+        assert_eq!(unsafe { (*result).refcount }, 1); // uniquely owned
+        assert!(unsafe { (*result).capacity } >= 22); // 2x capacity
+
+        // Second append: should reuse same allocation (in-place)
+        let c = js_string_from_bytes(b"!".as_ptr(), 1);
+        let result2 = js_string_append(result, c);
+        assert_eq!(result2, result); // Same pointer — in-place append!
+        assert_eq!(string_as_str(result2), "hello world!");
+        assert_eq!(unsafe { (*result2).refcount }, 1); // still uniquely owned
+    }
+
+    #[test]
+    fn test_string_append_shared_no_inplace() {
+        // Create a string via append (refcount=1)
+        let a = js_string_from_bytes(b"hello".as_ptr(), 5);
+        let b = js_string_from_bytes(b" ".as_ptr(), 1);
+        let result = js_string_append(a, b);
+        assert_eq!(unsafe { (*result).refcount }, 1);
+
+        // Mark as shared (simulates `let y = x` in codegen)
+        js_string_addref(result);
+        assert_eq!(unsafe { (*result).refcount }, 0); // shared
+
+        // Append should NOT be in-place — must allocate fresh
+        let c = js_string_from_bytes(b"world".as_ptr(), 5);
+        let result2 = js_string_append(result, c);
+        assert_ne!(result2, result); // Different pointer — allocated fresh
+        assert_eq!(string_as_str(result2), "hello world");
+        assert_eq!(string_as_str(result), "hello "); // Original unchanged
+    }
+
+    #[test]
+    fn test_string_append_self() {
+        // Self-append (s += s) must always allocate fresh
+        let a = js_string_from_bytes(b"ab".as_ptr(), 2);
+        let result = js_string_append(a, a);
+        assert_eq!(string_as_str(result), "abab");
+    }
+
+    #[test]
+    fn test_string_append_loop() {
+        // Simulate the common loop pattern: result = result + "x" repeated
+        let mut result = js_string_from_bytes(b"".as_ptr(), 0);
+        let x = js_string_from_bytes(b"x".as_ptr(), 1);
+        let mut inplace_count = 0u32;
+        for _ in 0..1000 {
+            let old_ptr = result;
+            result = js_string_append(result, x);
+            if result == old_ptr {
+                inplace_count += 1;
+            }
+        }
+        assert_eq!(js_string_length(result), 1000);
+        // Most appends should be in-place (only ~10 re-allocations for 1000 appends)
+        assert!(inplace_count > 980, "Expected >980 in-place appends, got {}", inplace_count);
     }
 }

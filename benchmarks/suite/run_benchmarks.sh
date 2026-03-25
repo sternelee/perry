@@ -72,7 +72,8 @@ BENCHMARKS="02_loop_overhead.ts
 12_binary_trees.ts
 13_factorial.ts
 14_closure.ts
-15_mandelbrot.ts"
+15_mandelbrot.ts
+16_matrix_multiply.ts"
 
 # Compile all benchmarks first
 echo -e "${BOLD}Compiling benchmarks with Perry...${NC}"

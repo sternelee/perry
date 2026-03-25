@@ -1026,6 +1026,18 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_system_get_locale() -> i64 {
+    extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8; }
+    let lang = std::env::var("LANG")
+        .or_else(|_| std::env::var("LC_ALL"))
+        .or_else(|_| std::env::var("LANGUAGE"))
+        .unwrap_or_else(|_| "en".to_string());
+    // Extract language code: "de_DE.UTF-8" -> "de"
+    let code = if lang.len() >= 2 { &lang[..2] } else { "en" };
+    unsafe { js_string_from_bytes(code.as_ptr(), code.len() as i64) as i64 }
+}
+
 // =============================================================================
 // Weather App Extensions
 // =============================================================================
