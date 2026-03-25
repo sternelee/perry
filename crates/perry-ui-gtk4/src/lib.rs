@@ -808,6 +808,12 @@ pub extern "C" fn perry_ui_widget_match_parent_width(handle: i64) {
     widgets::match_parent_width(handle);
 }
 
+/// Make a widget expand to fill its parent's height.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_match_parent_height(handle: i64) {
+    widgets::match_parent_height(handle);
+}
+
 /// Set a fixed height constraint on a widget.
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_set_height(handle: i64, height: f64) {
@@ -1117,7 +1123,7 @@ pub extern "C" fn perry_ui_poll_open_file() -> i64 {
 /// Called by iOS-specific branches in platform.ts that are dead code on Linux;
 /// the symbol must exist for the linker even though it is never called at runtime.
 #[no_mangle]
-pub extern "C" fn __wrapper_perry_get_device_idiom(_closure_ptr: i64) -> f64 {
+pub extern "C" fn perry_get_device_idiom(_closure_ptr: i64) -> f64 {
     0.0  // 0 = phone-like; value is irrelevant on Linux (dead code branch)
 }
 

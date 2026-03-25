@@ -363,11 +363,24 @@ pub fn match_parent_width(handle: i64) {
     }
 }
 
-/// Set a fixed height on a widget using set_size_request.
+/// Make a widget expand to fill its parent's height.
+pub fn match_parent_height(handle: i64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_vexpand(true);
+        widget.set_valign(gtk4::Align::Fill);
+    }
+}
+
+/// Set a fixed height on a widget via CSS min/max-height + valign constraint.
 pub fn set_height(handle: i64, height: f64) {
     if let Some(widget) = get_widget(handle) {
-        let current_width = widget.size_request().0;
-        widget.set_size_request(current_width, height as i32);
+        let h = height as i32;
+        // Use CSS to enforce both min and max height
+        let css = format!("* {{ min-height: {}px; max-height: {}px; }}", h, h);
+        apply_css(&widget, &css);
+        // Prevent vertical expansion beyond the requested height
+        widget.set_vexpand(false);
+        widget.set_valign(gtk4::Align::Center);
     }
 }
 

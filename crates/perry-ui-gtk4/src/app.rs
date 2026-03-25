@@ -137,6 +137,25 @@ pub fn app_run(_app_handle: i64) {
     });
 
     app.connect_activate(move |app| {
+        // Load global CSS to tighten Adwaita button/widget padding so controls
+        // match the compact sizing of macOS/AppKit rather than the oversized
+        // GNOME defaults.  Use USER priority (800) to override Adwaita theme (200).
+        let global_css = gtk4::CssProvider::new();
+        global_css.load_from_data(
+            "button { padding: 2px 8px; min-height: 0; min-width: 0; }\n\
+             button.flat { padding: 2px 8px; min-height: 0; min-width: 0; }\n\
+             button label { padding: 0; margin: 0; }\n\
+             .perry-mini button, button.perry-mini { padding: 1px 4px; font-size: 11px; }\n\
+             .perry-small button, button.perry-small { padding: 2px 6px; font-size: 12px; }\n\
+             .perry-regular button, button.perry-regular { padding: 2px 8px; }\n\
+             .perry-large button, button.perry-large { padding: 6px 12px; font-size: 15px; }\n\
+             entry { min-height: 0; padding: 2px 6px; }\n"
+        );
+        gtk4::style_context_add_provider_for_display(
+            &gdk::Display::default().expect("display"),
+            &global_css,
+            gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        );
         // Install the menu bar model on the app BEFORE creating windows,
         // so that show_menubar(true) takes effect when the window is first presented.
         let has_menubar = crate::menu::PENDING_MENUBAR.with(|p| p.borrow().is_some());
