@@ -76,11 +76,11 @@ type PaSimple = *mut std::ffi::c_void;
 
 extern "C" {
     fn pa_simple_new(
-        server: *const i8,         // NULL for default
-        name: *const i8,           // application name
-        dir: i32,                  // PA_STREAM_RECORD
-        dev: *const i8,            // NULL for default device
-        stream_name: *const i8,
+        server: *const std::ffi::c_char,         // NULL for default
+        name: *const std::ffi::c_char,           // application name
+        dir: i32,                                // PA_STREAM_RECORD
+        dev: *const std::ffi::c_char,            // NULL for default device
+        stream_name: *const std::ffi::c_char,
         ss: *const PaSampleSpec,
         map: *const std::ffi::c_void,  // NULL for default channel map
         attr: *const std::ffi::c_void, // NULL for default buffering
@@ -240,7 +240,7 @@ pub fn get_device_model() -> i64 {
     // On Linux, use hostname as device identifier
     let mut hostname = [0u8; 256];
     let model = unsafe {
-        if libc::gethostname(hostname.as_mut_ptr() as *mut i8, hostname.len()) == 0 {
+        if libc::gethostname(hostname.as_mut_ptr() as *mut std::ffi::c_char, hostname.len()) == 0 {
             let len = hostname.iter().position(|&b| b == 0).unwrap_or(hostname.len());
             std::str::from_utf8_unchecked(&hostname[..len]).to_string()
         } else {
