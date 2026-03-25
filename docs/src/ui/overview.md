@@ -23,17 +23,35 @@ perry app.ts -o app && ./app
 Every Perry UI app starts with `App()`:
 
 ```typescript
-import { App } from "perry/ui";
+import { App, VStack, Text } from "perry/ui";
 
-App("Window Title", () => {
-  // Build and return your widget tree
-  return VStack([
-    Text("Content here"),
-  ]);
+const body = VStack(10);
+body.addChild(Text("Content here"));
+
+App({
+  title: "Window Title",
+  width: 800,
+  height: 600,
+  body: body,
 });
 ```
 
-`App(title, renderFn)` creates the native application, opens a window, and renders your widget tree. The render function is called initially and re-invoked when reactive state changes.
+`App({})` accepts a config object with the following properties:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `title` | string | Window title |
+| `width` | number | Initial window width |
+| `height` | number | Initial window height |
+| `body` | widget | Root widget |
+| `icon` | string | App icon file path (optional) |
+| `frameless` | boolean | Remove title bar (optional) |
+| `level` | string | Window z-order: `"floating"`, `"statusBar"`, `"modal"` (optional) |
+| `transparent` | boolean | Transparent background (optional) |
+| `vibrancy` | string | Native blur material, e.g. `"sidebar"` (optional) |
+| `activationPolicy` | string | `"regular"`, `"accessory"` (no dock icon), `"background"` (optional) |
+
+See [Multi-Window](multi-window.md) for full documentation on window properties.
 
 ### Lifecycle Hooks
 

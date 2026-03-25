@@ -1,37 +1,159 @@
-# Multi-Window
+# Multi-Window & Window Management
 
-Perry supports creating multiple native windows in a single application.
+Perry supports creating multiple native windows and controlling their appearance and behavior.
 
 ## Creating Windows
 
 ```typescript
 import { App, Window, Text, Button, VStack } from "perry/ui";
 
-App("Multi-Window App", () =>
-  VStack([
+const win = Window("Settings", 500, 400);
+win.setBody(VStack([
+  Text("Settings panel"),
+]));
+win.show();
+
+App({
+  title: "My App",
+  width: 800,
+  height: 600,
+  body: VStack([
     Text("Main Window"),
-    Button("Open New Window", () => {
-      Window("Second Window", () =>
-        VStack([
-          Text("This is a second window"),
-          Button("Close", () => {
-            // Close this window
-          }),
-        ])
-      );
-    }),
-  ])
-);
+    Button("Open Settings", () => win.show()),
+  ]),
+});
 ```
 
-`Window(title, renderFn)` creates a new native window with its own widget tree.
+`Window(title, width, height)` creates a new native window. Call `.setBody()` to set its content and `.show()` to display it.
+
+## Window Instance Methods
+
+```typescript
+const win = Window("My Window", 600, 400);
+
+win.setBody(widget);     // Set the root widget
+win.show();              // Show the window
+win.hide();              // Hide without destroying
+win.closeWindow();       // Close and destroy
+win.onFocusLost(() => {  // Called when window loses focus
+  win.hide();
+});
+```
+
+## App Window Properties
+
+The main `App({})` config object supports several window properties for building launcher-style, overlay, or utility apps:
+
+```typescript
+import { App, Text, VStack } from "perry/ui";
+
+App({
+  title: "QuickLaunch",
+  width: 600,
+  height: 80,
+  frameless: true,
+  level: "floating",
+  transparent: true,
+  vibrancy: "sidebar",
+  activationPolicy: "accessory",
+  body: VStack([
+    Text("Search..."),
+  ]),
+});
+```
+
+### `frameless: true`
+
+Removes the window title bar and frame, creating a borderless window.
+
+| Platform | Implementation |
+|----------|---------------|
+| macOS | `NSWindowStyleMask::Borderless` + movable by background |
+| Windows | `WS_POPUP` window style |
+| Linux | `set_decorated(false)` |
+
+### `level: "floating" | "statusBar" | "modal" | "normal"`
+
+Controls the window's z-order level relative to other windows.
+
+| Level | Description |
+|-------|-------------|
+| `"normal"` | Default window level |
+| `"floating"` | Stays above normal windows |
+| `"statusBar"` | Stays above floating windows |
+| `"modal"` | Modal panel level |
+
+| Platform | Implementation |
+|----------|---------------|
+| macOS | `NSWindow.level` (NSFloatingWindowLevel, etc.) |
+| Windows | `SetWindowPos` with `HWND_TOPMOST` |
+| Linux | `set_modal(true)` (best-effort) |
+
+### `transparent: true`
+
+Makes the window background transparent, allowing the desktop to show through non-opaque regions of your UI.
+
+| Platform | Implementation |
+|----------|---------------|
+| macOS | `isOpaque = false`, `backgroundColor = .clear` |
+| Windows | `WS_EX_LAYERED` with `SetLayeredWindowAttributes` |
+| Linux | CSS `background-color: transparent` |
+
+### `vibrancy: string`
+
+Applies a native translucent material to the window background. On macOS this uses the system vibrancy effect; on Windows it uses Mica/Acrylic.
+
+**macOS materials:** `"sidebar"`, `"titlebar"`, `"selection"`, `"menu"`, `"popover"`, `"headerView"`, `"sheet"`, `"windowBackground"`, `"hudWindow"`, `"fullScreenUI"`, `"tooltip"`, `"contentBackground"`, `"underWindowBackground"`, `"underPageBackground"`
+
+| Platform | Implementation |
+|----------|---------------|
+| macOS | `NSVisualEffectView` with the specified material |
+| Windows | `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE)` — Mica, Acrylic, or Mica Alt depending on material (Windows 11 22H2+) |
+| Linux | CSS `alpha(@window_bg_color, 0.85)` (best-effort) |
+
+### `activationPolicy: "regular" | "accessory" | "background"`
+
+Controls whether the app appears in the dock/taskbar.
+
+| Policy | Description |
+|--------|-------------|
+| `"regular"` | Normal app with dock icon and menu bar (default) |
+| `"accessory"` | No dock icon, no menu bar activation — ideal for launchers and utilities |
+| `"background"` | Fully hidden from dock and app switcher |
+
+| Platform | Implementation |
+|----------|---------------|
+| macOS | `NSApp.setActivationPolicy()` |
+| Windows | `WS_EX_TOOLWINDOW` (removes from taskbar) |
+| Linux | `set_deletable(false)` (best-effort) |
+
+## Standalone Window Functions
+
+Window management is also available as standalone functions for use with window handles:
+
+```typescript
+import { Window, windowHide, windowSetSize, onWindowFocusLost } from "perry/ui";
+
+const win = Window("Panel", 400, 300);
+
+// Hide/show
+windowHide(win);
+
+// Resize dynamically
+windowSetSize(win, 600, computedHeight);
+
+// React to focus loss
+onWindowFocusLost(win, () => {
+  windowHide(win);
+});
+```
 
 ## Platform Notes
 
 | Platform | Implementation |
 |----------|---------------|
 | macOS | NSWindow |
-| Windows | CreateWindowEx |
+| Windows | CreateWindowEx (HWND) |
 | Linux | GtkWindow |
 | Web | Floating `<div>` |
 | iOS/Android | Modal view controller / Dialog |
@@ -40,6 +162,7 @@ On mobile platforms, "windows" are presented as modal views or dialogs since mob
 
 ## Next Steps
 
+- [Events](events.md) — Global hotkeys and keyboard shortcuts
 - [Dialogs](dialogs.md) — Modal dialogs and sheets
 - [Menus](menus.md) — Menu bar and toolbar
 - [UI Overview](overview.md) — Full UI system overview

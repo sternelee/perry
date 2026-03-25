@@ -16320,13 +16320,10 @@ pub(crate) fn compile_expr(
                         let app_call = builder.ins().call(app_ref, &[title_ptr, width_f64, height_f64]);
                         let app_handle = builder.inst_results(app_call)[0];
 
-                        // Set body
-                        let set_body_func = extern_funcs.get("perry_ui_app_set_body")
-                            .ok_or_else(|| anyhow!("perry_ui_app_set_body not declared"))?;
-                        let set_body_ref = module.declare_func_in_func(*set_body_func, builder.func);
-                        builder.ins().call(set_body_ref, &[app_handle, body_i64]);
+                        // Set window properties BEFORE body so vibrancy/frameless
+                        // can configure the window before Auto Layout constraints are applied.
 
-                        // Set icon (optional)
+                        // Set icon (optional — stored as pending, applied in app_run)
                         if let Some(icon_func) = extern_funcs.get("perry_ui_app_set_icon") {
                             let icon_name_ptr = create_field_name_str(module, builder, extern_funcs, "icon")?;
                             let icon_call = builder.ins().call(get_field_ref, &[config_ptr, icon_name_ptr]);
@@ -16336,6 +16333,64 @@ pub(crate) fn compile_expr(
                             let icon_ref = module.declare_func_in_func(*icon_func, builder.func);
                             builder.ins().call(icon_ref, &[icon_ptr]);
                         }
+
+                        // Set frameless (optional boolean) — pass NaN-boxed value, runtime checks TAG_TRUE
+                        if let Some(frameless_func) = extern_funcs.get("perry_ui_app_set_frameless") {
+                            let name_ptr = create_field_name_str(module, builder, extern_funcs, "frameless")?;
+                            let val_call = builder.ins().call(get_field_ref, &[config_ptr, name_ptr]);
+                            let val_f64 = builder.inst_results(val_call)[0];
+                            let func_ref = module.declare_func_in_func(*frameless_func, builder.func);
+                            builder.ins().call(func_ref, &[app_handle, val_f64]);
+                        }
+
+                        // Set level (optional string) — extract string ptr, runtime maps to window level
+                        if let Some(level_func) = extern_funcs.get("perry_ui_app_set_level") {
+                            let name_ptr = create_field_name_str(module, builder, extern_funcs, "level")?;
+                            let val_call = builder.ins().call(get_field_ref, &[config_ptr, name_ptr]);
+                            let val_f64 = builder.inst_results(val_call)[0];
+                            let str_call = builder.ins().call(get_str_ref, &[val_f64]);
+                            let str_ptr = builder.inst_results(str_call)[0];
+                            let func_ref = module.declare_func_in_func(*level_func, builder.func);
+                            builder.ins().call(func_ref, &[app_handle, str_ptr]);
+                        }
+
+                        // Set transparent (optional boolean) — pass NaN-boxed value
+                        if let Some(transparent_func) = extern_funcs.get("perry_ui_app_set_transparent") {
+                            let name_ptr = create_field_name_str(module, builder, extern_funcs, "transparent")?;
+                            let val_call = builder.ins().call(get_field_ref, &[config_ptr, name_ptr]);
+                            let val_f64 = builder.inst_results(val_call)[0];
+                            let func_ref = module.declare_func_in_func(*transparent_func, builder.func);
+                            builder.ins().call(func_ref, &[app_handle, val_f64]);
+                        }
+
+                        // Set vibrancy (optional string) — extract string ptr
+                        if let Some(vibrancy_func) = extern_funcs.get("perry_ui_app_set_vibrancy") {
+                            let name_ptr = create_field_name_str(module, builder, extern_funcs, "vibrancy")?;
+                            let val_call = builder.ins().call(get_field_ref, &[config_ptr, name_ptr]);
+                            let val_f64 = builder.inst_results(val_call)[0];
+                            let str_call = builder.ins().call(get_str_ref, &[val_f64]);
+                            let str_ptr = builder.inst_results(str_call)[0];
+                            let func_ref = module.declare_func_in_func(*vibrancy_func, builder.func);
+                            builder.ins().call(func_ref, &[app_handle, str_ptr]);
+                        }
+
+                        // Set activation policy (optional string) — extract string ptr
+                        if let Some(policy_func) = extern_funcs.get("perry_ui_app_set_activation_policy") {
+                            let name_ptr = create_field_name_str(module, builder, extern_funcs, "activationPolicy")?;
+                            let val_call = builder.ins().call(get_field_ref, &[config_ptr, name_ptr]);
+                            let val_f64 = builder.inst_results(val_call)[0];
+                            let str_call = builder.ins().call(get_str_ref, &[val_f64]);
+                            let str_ptr = builder.inst_results(str_call)[0];
+                            let func_ref = module.declare_func_in_func(*policy_func, builder.func);
+                            builder.ins().call(func_ref, &[app_handle, str_ptr]);
+                        }
+
+                        // Set body AFTER window properties so vibrancy/frameless are configured
+                        // before Auto Layout constraints are applied
+                        let set_body_func = extern_funcs.get("perry_ui_app_set_body")
+                            .ok_or_else(|| anyhow!("perry_ui_app_set_body not declared"))?;
+                        let set_body_ref = module.declare_func_in_func(*set_body_func, builder.func);
+                        builder.ins().call(set_body_ref, &[app_handle, body_i64]);
 
                         // Run the app
                         let run_func = extern_funcs.get("perry_ui_app_run")
@@ -16979,7 +17034,7 @@ pub(crate) fn compile_expr(
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
                         return Ok(builder.ins().f64const(f64::from_bits(TAG_UNDEFINED)));
                     }
-                    "addKeyboardShortcut" => {
+                    "addKeyboardShortcut" | "registerGlobalHotkey" => {
                         // (key, modifiers, callback) — extract key string, pass modifiers and callback as f64
                         let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
                             .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
@@ -16991,8 +17046,13 @@ pub(crate) fn compile_expr(
                         let mods = ensure_f64(builder, arg_vals[1]);
                         let callback = ensure_f64(builder, arg_vals[2]);
 
-                        let func = extern_funcs.get("perry_ui_add_keyboard_shortcut")
-                            .ok_or_else(|| anyhow!("perry_ui_add_keyboard_shortcut not declared"))?;
+                        let ffi_name = if method == "registerGlobalHotkey" {
+                            "perry_ui_register_global_hotkey"
+                        } else {
+                            "perry_ui_add_keyboard_shortcut"
+                        };
+                        let func = extern_funcs.get(ffi_name)
+                            .ok_or_else(|| anyhow!("{} not declared", ffi_name))?;
                         let func_ref = module.declare_func_in_func(*func, builder.func);
                         builder.ins().call(func_ref, &[key_ptr, mods, callback]);
                         const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
@@ -18649,7 +18709,15 @@ pub(crate) fn compile_expr(
                 ("perry/ui", true, "attachToolbar") => "perry_ui_toolbar_attach",
                 ("perry/ui", true, "setBody") => "perry_ui_window_set_body",
                 ("perry/ui", true, "show") => "perry_ui_window_show",
+                ("perry/ui", true, "hide") => "perry_ui_window_hide",
                 ("perry/ui", true, "closeWindow") => "perry_ui_window_close",
+                ("perry/ui", true, "onFocusLost") => "perry_ui_window_on_focus_lost",
+                // Standalone window management functions
+                ("perry/ui", false, "windowHide") => "perry_ui_window_hide",
+                ("perry/ui", false, "windowSetSize") => "perry_ui_window_set_size",
+                ("perry/ui", false, "onWindowFocusLost") => "perry_ui_window_on_focus_lost",
+                // Global hotkey (system-wide, works when app is not focused)
+                ("perry/ui", false, "registerGlobalHotkey") => "perry_ui_register_global_hotkey",
                 ("perry/ui", true, "updateCount") => "perry_ui_lazyvstack_update",
                 ("perry/ui", true, "setColumnHeader") => "perry_ui_table_set_column_header",
                 ("perry/ui", true, "setColumnWidth") => "perry_ui_table_set_column_width",
@@ -18671,6 +18739,7 @@ pub(crate) fn compile_expr(
                 ("perry/system", false, "notificationSend") => "perry_system_notification_send",
                 ("perry/system", false, "requestLocation") => "perry_system_request_location",
                 ("perry/system", false, "getDeviceIdiom") => "perry_get_device_idiom",
+                ("perry/system", false, "getAppIcon") => "perry_system_get_app_icon",
 
                 // Perry Audio APIs
                 ("perry/system", false, "audioStart") => "perry_system_audio_start",
@@ -19610,8 +19679,14 @@ pub(crate) fn compile_expr(
                                 call_args.push(builder.inst_results(str_call)[0]);
                             }
                         }
-                        "present" | "dismiss" | "attachToolbar" | "show" | "closeWindow" => {
+                        "present" | "dismiss" | "attachToolbar" | "show" | "hide" | "closeWindow" => {
                             // No additional args beyond the handle
+                        }
+                        "onFocusLost" => {
+                            // window.onFocusLost(callback) - callback is NaN-boxed closure
+                            if !arg_vals.is_empty() {
+                                call_args.push(ensure_f64(builder, arg_vals[0]));
+                            }
                         }
                         "addToolbarItem" => {
                             // (label, icon, callback) - two strings and a closure
@@ -20625,6 +20700,19 @@ pub(crate) fn compile_expr(
                             args
                         }
                         "isDarkMode" | "getDeviceIdiom" | "audioStart" | "audioStop" | "audioGetLevel" | "audioGetPeak" | "getDeviceModel" => vec![],
+                        "getAppIcon" => {
+                            // getAppIcon(path) — path is NaN-boxed string
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let str_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[str_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
                         "audioGetWaveformSamples" => {
                             // audioGetWaveformSamples(count) - count is f64
                             let mut args = Vec::new();
@@ -20729,6 +20817,91 @@ pub(crate) fn compile_expr(
                             args
                         }
                         _ => arg_vals.clone()
+                    }
+                } else if native_module == "perry/ui" {
+                    // perry/ui standalone functions (windowHide, windowSetSize, onWindowFocusLost)
+                    // First arg is a NaN-boxed window handle — extract via js_nanbox_get_pointer
+                    match method.as_str() {
+                        "registerGlobalHotkey" => {
+                            // registerGlobalHotkey(key, modifiers, callback)
+                            // Same arg pattern as addKeyboardShortcut
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                // key string — extract raw pointer
+                                let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let str_call = builder.ins().call(get_str_ref, &[key_f64]);
+                                args.push(builder.inst_results(str_call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1])); // modifiers
+                            }
+                            if arg_vals.len() >= 3 {
+                                args.push(ensure_f64(builder, arg_vals[2])); // callback
+                            }
+                            args
+                        }
+                        "windowHide" => {
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                                args.push(builder.inst_results(ptr_call)[0]);
+                            }
+                            args
+                        }
+                        "windowSetSize" => {
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                // First arg: window handle (NaN-boxed)
+                                let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                                args.push(builder.inst_results(ptr_call)[0]);
+                            }
+                            // Width and height as f64
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1]));
+                            }
+                            if arg_vals.len() >= 3 {
+                                args.push(ensure_f64(builder, arg_vals[2]));
+                            }
+                            args
+                        }
+                        "onWindowFocusLost" => {
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                // First arg: window handle (NaN-boxed)
+                                let handle_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer")
+                                    .ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                                let ptr_call = builder.ins().call(get_ptr_ref, &[handle_f64]);
+                                args.push(builder.inst_results(ptr_call)[0]);
+                            }
+                            // Callback as NaN-boxed closure f64
+                            if arg_vals.len() >= 2 {
+                                args.push(ensure_f64(builder, arg_vals[1]));
+                            }
+                            args
+                        }
+                        _ => {
+                            // Default for perry/ui standalone: pass args as-is (f64)
+                            arg_vals.iter().map(|&val| {
+                                if builder.func.dfg.value_type(val) == types::I64 {
+                                    inline_nanbox_pointer(builder, val)
+                                } else {
+                                    val
+                                }
+                            }).collect()
+                        }
                     }
                 } else {
                     // Default: convert any i64 arguments to f64 by NaN-boxing
@@ -21000,6 +21173,10 @@ pub(crate) fn compile_expr(
                         }
                         "getDeviceModel" => {
                             // Returns i64 (NaN-boxed string) - NaN-box it
+                            Ok(inline_nanbox_pointer(builder, result))
+                        }
+                        "getAppIcon" => {
+                            // Returns i64 widget handle — NaN-box as pointer
                             Ok(inline_nanbox_pointer(builder, result))
                         }
                         _ => {

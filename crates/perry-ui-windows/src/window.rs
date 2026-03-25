@@ -149,3 +149,51 @@ pub fn close(window_handle: i64) {
     #[cfg(not(target_os = "windows"))]
     { let _ = window_handle; }
 }
+
+thread_local! {
+    pub(crate) static FOCUS_LOST_CALLBACKS: RefCell<HashMap<i64, f64>> = RefCell::new(HashMap::new());
+}
+
+/// Hide a window without destroying it.
+pub fn hide(window_handle: i64) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        WINDOWS.with(|w| {
+            if let Some(hwnd) = w.borrow().get(&window_handle) {
+                unsafe { let _ = ShowWindow(*hwnd, SW_HIDE); }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = window_handle; }
+}
+
+/// Set window size.
+pub fn set_size(window_handle: i64, width: f64, height: f64) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        WINDOWS.with(|w| {
+            if let Some(hwnd) = w.borrow().get(&window_handle) {
+                unsafe {
+                    let _ = SetWindowPos(
+                        *hwnd, None,
+                        0, 0,
+                        width as i32, height as i32,
+                        SWP_NOMOVE | SWP_NOZORDER,
+                    );
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = (window_handle, width, height); }
+}
+
+/// Register a callback for focus loss. Store it and handle in wndproc WM_ACTIVATE.
+pub fn on_focus_lost(window_handle: i64, callback: f64) {
+    FOCUS_LOST_CALLBACKS.with(|cbs| {
+        cbs.borrow_mut().insert(window_handle, callback);
+    });
+}

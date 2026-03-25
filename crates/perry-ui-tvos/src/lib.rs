@@ -297,6 +297,12 @@ pub extern "C" fn perry_ui_add_keyboard_shortcut(key_ptr: i64, modifiers: f64, c
     app::add_keyboard_shortcut(key_ptr as *const u8, modifiers, callback);
 }
 
+#[no_mangle]
+pub extern "C" fn perry_ui_register_global_hotkey(_key: i64, _mods: f64, _cb: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_get_app_icon(_path: i64) -> i64 { 0 }
+
 // =============================================================================
 // Phase A.3: Text Styling & Button Styling
 // =============================================================================
@@ -1338,6 +1344,21 @@ pub extern "C" fn perry_ui_app_on_activate(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_ui_app_set_icon(_path_ptr: i64) {}
 
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_frameless(_app_handle: i64, _value: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_level(_app_handle: i64, _value_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_transparent(_app_handle: i64, _value: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_vibrancy(_app_handle: i64, _value_ptr: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_activation_policy(_app_handle: i64, _value_ptr: i64) {}
+
 // =============================================================================
 // Toolbar
 // =============================================================================
@@ -1477,6 +1498,15 @@ pub extern "C" fn perry_ui_window_show(_window: i64) {}
 
 #[no_mangle]
 pub extern "C" fn perry_ui_window_close(_window: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_hide(_window: i64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_set_size(_window: i64, _w: f64, _h: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_window_on_focus_lost(_window: i64, _callback: f64) {}
 
 // =============================================================================
 // LazyVStack

@@ -1,9 +1,9 @@
 # System APIs Overview
 
-The `perry/system` module provides access to platform-native system features: preferences, secure storage, notifications, URL opening, and dark mode detection.
+The `perry/system` module provides access to platform-native system features: preferences, secure storage, notifications, URL opening, dark mode detection, and app introspection.
 
 ```typescript
-import { openURL, isDarkMode, preferencesSet, preferencesGet, audioStart, audioGetLevel } from "perry/system";
+import { openURL, isDarkMode, preferencesSet, preferencesGet, getAppIcon } from "perry/system";
 ```
 
 ## Available APIs
@@ -25,6 +25,7 @@ import { openURL, isDarkMode, preferencesSet, preferencesGet, audioStart, audioG
 | `audioGetPeak()` | Current peak amplitude (0–1) | All |
 | `audioGetWaveformSamples(n)` | Recent dB samples for visualization | All |
 | `getDeviceModel()` | Device model identifier | All |
+| `getAppIcon(path)` | Get app/file icon as Image widget | macOS, Linux |
 
 ## Quick Example
 

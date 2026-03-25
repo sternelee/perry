@@ -1,6 +1,7 @@
 //! App lifecycle — window creation, message pump, keyboard shortcuts (Win32)
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::*;
@@ -111,6 +112,8 @@ thread_local! {
     static TIMERS: RefCell<Vec<TimerEntry>> = RefCell::new(Vec::new());
     static ON_ACTIVATE_CALLBACK: RefCell<Option<*const u8>> = RefCell::new(None);
     static ON_TERMINATE_CALLBACK: RefCell<Option<*const u8>> = RefCell::new(None);
+    static GLOBAL_HOTKEY_CALLBACKS: RefCell<HashMap<i32, *const u8>> = RefCell::new(HashMap::new());
+    static NEXT_HOTKEY_ID: std::cell::Cell<i32> = std::cell::Cell::new(1);
 }
 
 /// Get the HWND of the first (main) app window.
@@ -302,6 +305,16 @@ pub fn app_run(app_handle: i64) {
         unsafe {
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                // WM_HOTKEY is posted to the thread message queue, not to a window
+                if msg.message == 0x0312 { // WM_HOTKEY
+                    let hotkey_id = msg.wParam.0 as i32;
+                    GLOBAL_HOTKEY_CALLBACKS.with(|cbs| {
+                        if let Some(cb_ptr) = cbs.borrow().get(&hotkey_id) {
+                            unsafe { js_closure_call0(*cb_ptr); }
+                        }
+                    });
+                    continue;
+                }
                 // Check keyboard shortcuts
                 if msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN {
                     if try_handle_shortcut(msg.wParam.0 as u16) {
@@ -439,6 +452,213 @@ pub fn set_max_size(app_handle: i64, w: f64, h: f64) {
             apps[idx].max_size = Some((w, h));
         }
     });
+}
+
+/// Set frameless window mode (no titlebar).
+/// `value` is a NaN-boxed boolean — TAG_TRUE = 0x7FFC_0000_0000_0004.
+pub fn app_set_frameless(app_handle: i64, value: f64) {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    if value.to_bits() != TAG_TRUE {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            let idx = (app_handle - 1) as usize;
+            if idx < apps.len() {
+                let hwnd = apps[idx].hwnd;
+                unsafe {
+                    // Change from WS_OVERLAPPEDWINDOW to WS_POPUP for a borderless window
+                    SetWindowLongW(
+                        hwnd,
+                        GWL_STYLE,
+                        (WS_POPUP.0 | WS_CLIPCHILDREN.0 | WS_VISIBLE.0) as i32,
+                    );
+                    // Force redraw after style change
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        0, 0, 0, 0,
+                        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+                    );
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app_handle, value);
+    }
+}
+
+/// Set window level: "floating", "statusBar", "modal", or "normal".
+pub fn app_set_level(app_handle: i64, value_ptr: *const u8) {
+    let level_str = str_from_header(value_ptr);
+    if level_str.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            let idx = (app_handle - 1) as usize;
+            if idx < apps.len() {
+                let hwnd = apps[idx].hwnd;
+                unsafe {
+                    let insert_after = match level_str {
+                        "floating" | "statusBar" => HWND_TOPMOST,
+                        "modal" => HWND_TOPMOST,
+                        _ => HWND_NOTOPMOST,
+                    };
+                    let _ = SetWindowPos(
+                        hwnd,
+                        insert_after,
+                        0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE,
+                    );
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app_handle, value_ptr);
+    }
+}
+
+/// Set window transparency (transparent background).
+/// `value` is a NaN-boxed boolean.
+pub fn app_set_transparent(app_handle: i64, value: f64) {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    if value.to_bits() != TAG_TRUE {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            let idx = (app_handle - 1) as usize;
+            if idx < apps.len() {
+                let hwnd = apps[idx].hwnd;
+                unsafe {
+                    // Add WS_EX_LAYERED for per-pixel alpha
+                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                    SetWindowLongW(
+                        hwnd,
+                        GWL_EXSTYLE,
+                        (ex_style | WS_EX_LAYERED.0) as i32,
+                    );
+                    // SetLayeredWindowAttributes for basic transparency
+                    // 230 = ~90% opacity as a reasonable default
+                    SetLayeredWindowAttributes(hwnd, COLORREF(0), 230, LWA_ALPHA);
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app_handle, value);
+    }
+}
+
+/// Set vibrancy/backdrop material.
+/// On Windows 11+: uses DwmSetWindowAttribute with DWMWA_SYSTEMBACKDROP_TYPE.
+pub fn app_set_vibrancy(app_handle: i64, value_ptr: *const u8) {
+    let material_str = str_from_header(value_ptr);
+    if material_str.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        APPS.with(|apps| {
+            let apps = apps.borrow();
+            let idx = (app_handle - 1) as usize;
+            if idx < apps.len() {
+                let hwnd = apps[idx].hwnd;
+                unsafe {
+                    // DWMWA_SYSTEMBACKDROP_TYPE = 38 (Windows 11 22H2+)
+                    // Values: 0=Auto, 1=None, 2=Mica, 3=Acrylic, 4=MicaAlt
+                    let backdrop_type: i32 = match material_str {
+                        "sidebar" | "underWindowBackground" | "behindWindow" => 2, // Mica
+                        "menu" | "popover" | "tooltip" | "hudWindow" => 3,         // Acrylic
+                        "titlebar" | "headerView" => 4,                            // Mica Alt
+                        _ => 3,                                                     // Acrylic default
+                    };
+
+                    // DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof)
+                    extern "system" {
+                        fn DwmSetWindowAttribute(
+                            hwnd: isize,
+                            attr: u32,
+                            value: *const i32,
+                            size: u32,
+                        ) -> i32;
+                    }
+                    let _ = DwmSetWindowAttribute(
+                        hwnd.0 as isize,
+                        38, // DWMWA_SYSTEMBACKDROP_TYPE
+                        &backdrop_type,
+                        std::mem::size_of::<i32>() as u32,
+                    );
+
+                    // Also enable dark mode title bar for better blending
+                    let use_dark: i32 = 1;
+                    let _ = DwmSetWindowAttribute(
+                        hwnd.0 as isize,
+                        20, // DWMWA_USE_IMMERSIVE_DARK_MODE
+                        &use_dark,
+                        std::mem::size_of::<i32>() as u32,
+                    );
+
+                    // Extend client area into frame for borderless mica/acrylic
+                    extern "system" {
+                        fn DwmExtendFrameIntoClientArea(
+                            hwnd: isize,
+                            margins: *const [i32; 4],
+                        ) -> i32;
+                    }
+                    let margins: [i32; 4] = [-1, -1, -1, -1]; // MARGINS { -1, -1, -1, -1 }
+                    let _ = DwmExtendFrameIntoClientArea(hwnd.0 as isize, &margins);
+                }
+            }
+        });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app_handle, value_ptr);
+    }
+}
+
+/// Set activation policy: "regular", "accessory", or "background".
+/// On Windows: "accessory" uses WS_EX_TOOLWINDOW (no taskbar entry).
+pub fn app_set_activation_policy(app_handle: i64, value_ptr: *const u8) {
+    let policy_str = str_from_header(value_ptr);
+    if policy_str.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if policy_str == "accessory" || policy_str == "background" {
+            APPS.with(|apps| {
+                let apps = apps.borrow();
+                let idx = (app_handle - 1) as usize;
+                if idx < apps.len() {
+                    let hwnd = apps[idx].hwnd;
+                    unsafe {
+                        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                        // Remove WS_EX_APPWINDOW, add WS_EX_TOOLWINDOW to hide from taskbar
+                        let new_style = (ex_style & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0;
+                        SetWindowLongW(hwnd, GWL_EXSTYLE, new_style as i32);
+                    }
+                }
+            });
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app_handle, value_ptr);
+    }
 }
 
 /// Set a repeating timer.
@@ -744,4 +964,51 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+/// Register a system-wide global hotkey. Uses Win32 `RegisterHotKey` API.
+/// `key_ptr` is a StringHeader pointer to the key (e.g., "s").
+/// `modifiers` is a bitfield: 1=Cmd(->Ctrl), 2=Shift, 4=Option(->Alt), 8=Control(->Ctrl).
+/// `callback` is a NaN-boxed closure pointer.
+pub fn register_global_hotkey(key_ptr: *const u8, modifiers: f64, callback: f64) {
+    let key_str = str_from_header(key_ptr);
+    if key_str.is_empty() { return; }
+
+    let mod_bits = modifiers as u32;
+    // Perry: 1=Cmd(->Ctrl on Win), 2=Shift, 4=Option(->Alt), 8=Control(->Ctrl)
+    let mut win_mods: u32 = 0;
+    if mod_bits & 1 != 0 || mod_bits & 8 != 0 { win_mods |= 0x0002; } // MOD_CONTROL
+    if mod_bits & 2 != 0 { win_mods |= 0x0004; } // MOD_SHIFT
+    if mod_bits & 4 != 0 { win_mods |= 0x0001; } // MOD_ALT
+    win_mods |= 0x4000; // MOD_NOREPEAT
+
+    let vk = key_to_vk(key_str);
+    let callback_ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;
+
+    let id = NEXT_HOTKEY_ID.with(|c| {
+        let id = c.get();
+        c.set(id + 1);
+        id
+    });
+
+    GLOBAL_HOTKEY_CALLBACKS.with(|cbs| {
+        cbs.borrow_mut().insert(id, callback_ptr);
+    });
+
+    #[cfg(target_os = "windows")]
+    {
+        unsafe {
+            extern "system" {
+                fn RegisterHotKey(hwnd: isize, id: i32, modifiers: u32, vk: u32) -> i32;
+            }
+            RegisterHotKey(0, id, win_mods, vk as u32);
+        }
+    }
+}
+
+/// Get the icon for an application at the given path.
+/// Returns 0 (stub) — full implementation requires GDI bitmap conversion.
+pub fn get_app_icon(_path_ptr: *const u8) -> i64 {
+    // TODO: Full implementation with SHGetFileInfo + HICON -> bitmap conversion
+    0
 }

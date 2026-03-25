@@ -50,6 +50,36 @@ clipboardSet("Copied text!");
 const text = clipboardGet();
 ```
 
+## App Icon Extraction
+
+Get the icon for an application or file as a native Image widget. Useful for building app launchers, file browsers, and search UIs:
+
+```typescript
+import { getAppIcon } from "perry/system";
+import { VStack, HStack, Text, Image } from "perry/ui";
+
+// macOS: pass .app bundle path
+const finderIcon = getAppIcon("/System/Applications/Finder.app");
+const safariIcon = getAppIcon("/Applications/Safari.app");
+
+// Linux: pass .desktop file path
+const firefoxIcon = getAppIcon("/usr/share/applications/firefox.desktop");
+
+// Use icons in your UI
+HStack([
+  finderIcon,
+  Text("Finder"),
+]);
+```
+
+Returns an Image widget handle (32x32 by default). Returns `0` if the icon cannot be loaded.
+
+| Platform | Implementation |
+|----------|---------------|
+| macOS | `NSWorkspace.shared.icon(forFile:)` — works for any file path, .app bundle, or folder |
+| Linux | Parses `.desktop` files for `Icon=` field, looks up via GTK icon theme, falls back to direct image file loading |
+| Windows | Not yet implemented (returns 0) |
+
 ## Next Steps
 
 - [Overview](overview.md) — All system APIs

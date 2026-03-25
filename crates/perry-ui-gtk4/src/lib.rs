@@ -40,6 +40,36 @@ pub extern "C" fn perry_ui_app_run(app_handle: i64) {
     app::app_run(app_handle);
 }
 
+/// Set frameless window mode (no decorations). value = NaN-boxed boolean.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_frameless(app_handle: i64, value: f64) {
+    app::app_set_frameless(app_handle, value);
+}
+
+/// Set window level. value_ptr = string pointer ("floating", "statusBar", etc.).
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_level(app_handle: i64, value_ptr: i64) {
+    app::app_set_level(app_handle, value_ptr as *const u8);
+}
+
+/// Set window transparency. value = NaN-boxed boolean.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_transparent(app_handle: i64, value: f64) {
+    app::app_set_transparent(app_handle, value);
+}
+
+/// Set vibrancy material. value_ptr = string pointer.
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_vibrancy(app_handle: i64, value_ptr: i64) {
+    app::app_set_vibrancy(app_handle, value_ptr as *const u8);
+}
+
+/// Set activation policy. value_ptr = string pointer ("regular", "accessory", "background").
+#[no_mangle]
+pub extern "C" fn perry_ui_app_set_activation_policy(app_handle: i64, value_ptr: i64) {
+    app::app_set_activation_policy(app_handle, value_ptr as *const u8);
+}
+
 /// Set minimum window size.
 #[no_mangle]
 pub extern "C" fn perry_ui_app_set_min_size(app_handle: i64, w: f64, h: f64) {
@@ -96,6 +126,24 @@ pub extern "C" fn perry_ui_window_show(window_handle: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_window_close(window_handle: i64) {
     window::close(window_handle);
+}
+
+/// Hide a window without destroying it.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_hide(window_handle: i64) {
+    window::hide(window_handle);
+}
+
+/// Set window size.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_set_size(window_handle: i64, width: f64, height: f64) {
+    window::set_size(window_handle, width, height);
+}
+
+/// Register a callback for when the window loses focus.
+#[no_mangle]
+pub extern "C" fn perry_ui_window_on_focus_lost(window_handle: i64, callback: f64) {
+    window::on_focus_lost(window_handle, callback);
 }
 
 // =============================================================================
@@ -652,6 +700,18 @@ pub extern "C" fn perry_ui_alert(title_ptr: i64, message_ptr: i64, buttons_ptr: 
 #[no_mangle]
 pub extern "C" fn perry_ui_add_keyboard_shortcut(key_ptr: i64, modifiers: f64, callback: f64) {
     app::add_keyboard_shortcut(key_ptr as *const u8, modifiers, callback);
+}
+
+/// Register a system-wide global hotkey (not yet supported on Linux).
+#[no_mangle]
+pub extern "C" fn perry_ui_register_global_hotkey(key_ptr: i64, modifiers: f64, callback: f64) {
+    app::register_global_hotkey(key_ptr as *const u8, modifiers, callback);
+}
+
+/// Get the icon for an application at the given path. Returns a widget handle or 0.
+#[no_mangle]
+pub extern "C" fn perry_system_get_app_icon(path_ptr: i64) -> i64 {
+    app::get_app_icon(path_ptr as *const u8)
 }
 
 // =============================================================================

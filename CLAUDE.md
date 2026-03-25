@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.8
+**Current Version:** 0.4.11
 
 ## Workflow Requirements
 
@@ -139,6 +139,16 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.11
+- feat: `registerGlobalHotkey` — system-wide hotkey via NSEvent global/local monitors (macOS), Win32 RegisterHotKey+WM_HOTKEY (Windows), stub with warning (Linux)
+- feat: `getAppIcon` — app/file icon as Image widget via NSWorkspace.iconForFile (macOS), .desktop Icon= parsing + theme lookup (Linux), stub (Windows)
+
+### v0.4.10
+- feat: `window_hide`, `window_set_size`, `window_on_focus_lost` — multi-window management APIs across macOS, Windows, GTK4, with no-op stubs on iOS/tvOS/watchOS/Android
+
+### v0.4.9
+- feat: Window config properties for launcher-style apps — `frameless`, `level`, `transparent`, `vibrancy`, `activationPolicy` on `App({})` config object (macOS/Windows/Linux)
 
 ### v0.4.8
 - feat: Android camera support — `CameraView` widget using Camera2 API via JNI, with live preview, color sampling, freeze/unfreeze, and tap handler (parity with iOS)

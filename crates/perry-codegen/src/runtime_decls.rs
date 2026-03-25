@@ -8066,6 +8066,51 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_icon"), func_id);
         }
 
+        // perry_ui_app_set_frameless(app_handle: i64, value: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed boolean
+            let func_id = self.module.declare_function("perry_ui_app_set_frameless", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_frameless"), func_id);
+        }
+
+        // perry_ui_app_set_level(app_handle: i64, value_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::I64)); // string ptr
+            let func_id = self.module.declare_function("perry_ui_app_set_level", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_level"), func_id);
+        }
+
+        // perry_ui_app_set_transparent(app_handle: i64, value: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed boolean
+            let func_id = self.module.declare_function("perry_ui_app_set_transparent", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_transparent"), func_id);
+        }
+
+        // perry_ui_app_set_vibrancy(app_handle: i64, value_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::I64)); // string ptr
+            let func_id = self.module.declare_function("perry_ui_app_set_vibrancy", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_vibrancy"), func_id);
+        }
+
+        // perry_ui_app_set_activation_policy(app_handle: i64, value_ptr: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // app handle
+            sig.params.push(AbiParam::new(types::I64)); // string ptr
+            let func_id = self.module.declare_function("perry_ui_app_set_activation_policy", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_app_set_activation_policy"), func_id);
+        }
+
         // perry_ui_poll_open_file() -> i64 (returns NaN-boxed string)
         {
             let mut sig = self.module.make_signature();
@@ -8510,6 +8555,25 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
             let func_id = self.module.declare_function("perry_ui_add_keyboard_shortcut", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("perry_ui_add_keyboard_shortcut"), func_id);
+        }
+
+        // perry_ui_register_global_hotkey(key_ptr: i64, modifiers: f64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // key string ptr
+            sig.params.push(AbiParam::new(types::F64)); // modifiers bitfield
+            sig.params.push(AbiParam::new(types::F64)); // callback closure (NaN-boxed)
+            let func_id = self.module.declare_function("perry_ui_register_global_hotkey", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_register_global_hotkey"), func_id);
+        }
+
+        // perry_system_get_app_icon(path_ptr: i64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // path string ptr
+            sig.returns.push(AbiParam::new(types::I64)); // widget handle
+            let func_id = self.module.declare_function("perry_system_get_app_icon", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_system_get_app_icon"), func_id);
         }
 
         // perry_ui_text_set_color(handle: i64, r: f64, g: f64, b: f64, a: f64)
@@ -9623,6 +9687,33 @@ impl Compiler {
             sig.params.push(AbiParam::new(types::I64));
             let func_id = self.module.declare_function("perry_ui_window_close", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("perry_ui_window_close"), func_id);
+        }
+
+        // perry_ui_window_hide(window: i64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("perry_ui_window_hide", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_window_hide"), func_id);
+        }
+
+        // perry_ui_window_set_size(window: i64, width: f64, height: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // window handle
+            sig.params.push(AbiParam::new(types::F64)); // width
+            sig.params.push(AbiParam::new(types::F64)); // height
+            let func_id = self.module.declare_function("perry_ui_window_set_size", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_window_set_size"), func_id);
+        }
+
+        // perry_ui_window_on_focus_lost(window: i64, callback: f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // window handle
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed closure
+            let func_id = self.module.declare_function("perry_ui_window_on_focus_lost", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("perry_ui_window_on_focus_lost"), func_id);
         }
 
         // perry_ui_lazyvstack_create(count: f64, render: f64) -> i64

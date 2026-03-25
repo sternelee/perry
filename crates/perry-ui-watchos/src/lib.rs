@@ -536,6 +536,8 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_clipboard_read() -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn perry_ui_clipboard_write(_text: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_add_keyboard_shortcut(_key: i64, _mods: f64, _cb: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_register_global_hotkey(_key: i64, _mods: f64, _cb: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_get_app_icon(_path: i64) -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_widget_set_hugging(_handle: i64, _priority: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_widget_match_parent_width(_handle: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_widget_match_parent_height(_handle: i64) {}
@@ -603,6 +605,11 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_app_on_terminate(_cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_on_activate(_cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_app_set_icon(_path: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_app_set_frameless(_app: i64, _val: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_app_set_level(_app: i64, _ptr: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_app_set_transparent(_app: i64, _val: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_app_set_vibrancy(_app: i64, _ptr: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_app_set_activation_policy(_app: i64, _ptr: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_toolbar_create() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_ui_toolbar_add_item(_tb: i64, _label: i64, _icon: i64, _cb: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_toolbar_attach(_tb: i64) {}
@@ -610,6 +617,9 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_ui_window_set_body(_window: i64, _widget: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_window_show(_window: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_window_close(_window: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_window_hide(_window: i64) {}
+#[no_mangle] pub extern "C" fn perry_ui_window_set_size(_window: i64, _w: f64, _h: f64) {}
+#[no_mangle] pub extern "C" fn perry_ui_window_on_focus_lost(_window: i64, _callback: f64) {}
 #[no_mangle] pub extern "C" fn perry_ui_lazyvstack_create(_count: i64, _render: f64) -> i64 { perry_ui_vstack_create(0.0) }
 #[no_mangle] pub extern "C" fn perry_ui_lazyvstack_update(_handle: i64, _count: i64) {}
 #[no_mangle] pub extern "C" fn perry_ui_table_create(_rows: f64, _cols: f64, _render: f64) -> i64 { 0 }

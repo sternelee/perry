@@ -55,6 +55,11 @@ struct AppEntry {
     root_handle: Option<i64>,
     min_size: Option<(f64, f64)>,
     max_size: Option<(f64, f64)>,
+    frameless: bool,
+    level: Option<String>,
+    transparent: bool,
+    vibrancy: Option<String>,
+    activation_policy: Option<String>,
 }
 
 extern "C" {
@@ -99,6 +104,11 @@ pub fn app_create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
             root_handle: None,
             min_size: None,
             max_size: None,
+            frameless: false,
+            level: None,
+            transparent: false,
+            vibrancy: None,
+            activation_policy: None,
         });
         apps.len() as i64 // 1-based handle
     })
@@ -146,6 +156,7 @@ pub fn app_run(_app_handle: i64) {
                     .title(&entry.title)
                     .default_width(entry.width as i32)
                     .default_height(entry.height as i32)
+                    .decorated(!entry.frameless)
                     .build();
 
                 // Store the window for screenshot capture (first window wins).
@@ -163,6 +174,53 @@ pub fn app_run(_app_handle: i64) {
                 // Note: GTK4 doesn't have a direct max-size API. Apps typically
                 // use set_resizable(false) or handle size constraints differently.
                 // We store it but GTK4 relies on window manager for max size.
+
+                // Apply window level (always on top).
+                // GTK4 removed set_keep_above; best-effort via focus-on-map
+                // and modal behavior which most compositors keep above.
+                if let Some(ref level) = entry.level {
+                    match level.as_str() {
+                        "floating" | "statusBar" | "modal" => {
+                            window.set_modal(true);
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Apply transparency via CSS
+                if entry.transparent {
+                    let css_provider = gtk4::CssProvider::new();
+                    css_provider.load_from_data(
+                        "window { background-color: transparent; }"
+                    );
+                    gtk4::style_context_add_provider_for_display(
+                        &gdk::Display::default().expect("display"),
+                        &css_provider,
+                        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                    );
+                }
+
+                // Apply vibrancy (best-effort: semi-transparent background via CSS)
+                if let Some(ref _vibrancy) = entry.vibrancy {
+                    let css_provider = gtk4::CssProvider::new();
+                    css_provider.load_from_data(
+                        "window { background-color: alpha(@window_bg_color, 0.85); }"
+                    );
+                    gtk4::style_context_add_provider_for_display(
+                        &gdk::Display::default().expect("display"),
+                        &css_provider,
+                        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                    );
+                }
+
+                // Apply activation policy (skip taskbar for accessory/background).
+                // GTK4 doesn't have skip_taskbar_hint; best-effort via deletable=false
+                // which some compositors interpret as a utility window.
+                if let Some(ref policy) = entry.activation_policy {
+                    if policy == "accessory" || policy == "background" {
+                        window.set_deletable(false);
+                    }
+                }
 
                 if let Some(root_handle) = entry.root_handle {
                     if let Some(widget) = widgets::get_widget(root_handle) {
@@ -274,6 +332,85 @@ pub fn set_max_size(app_handle: i64, w: f64, h: f64) {
     });
 }
 
+/// Set frameless window mode (no titlebar/decorations).
+/// `value` is a NaN-boxed boolean — TAG_TRUE = 0x7FFC_0000_0000_0004.
+pub fn app_set_frameless(app_handle: i64, value: f64) {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    if value.to_bits() != TAG_TRUE {
+        return;
+    }
+    APPS.with(|a| {
+        let mut apps = a.borrow_mut();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].frameless = true;
+        }
+    });
+}
+
+/// Set window level: "floating", "statusBar", "modal", or "normal".
+pub fn app_set_level(app_handle: i64, value_ptr: *const u8) {
+    let level_str = str_from_header(value_ptr);
+    if level_str.is_empty() {
+        return;
+    }
+    APPS.with(|a| {
+        let mut apps = a.borrow_mut();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].level = Some(level_str.to_string());
+        }
+    });
+}
+
+/// Set window transparency.
+/// `value` is a NaN-boxed boolean.
+pub fn app_set_transparent(app_handle: i64, value: f64) {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    if value.to_bits() != TAG_TRUE {
+        return;
+    }
+    APPS.with(|a| {
+        let mut apps = a.borrow_mut();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].transparent = true;
+        }
+    });
+}
+
+/// Set vibrancy material. On GTK4 this is a best-effort CSS opacity effect
+/// since true vibrancy depends on the compositor.
+pub fn app_set_vibrancy(app_handle: i64, value_ptr: *const u8) {
+    let material_str = str_from_header(value_ptr);
+    if material_str.is_empty() {
+        return;
+    }
+    APPS.with(|a| {
+        let mut apps = a.borrow_mut();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].vibrancy = Some(material_str.to_string());
+        }
+    });
+}
+
+/// Set activation policy: "regular", "accessory", or "background".
+/// On Linux: "accessory"/"background" skips the taskbar.
+pub fn app_set_activation_policy(app_handle: i64, value_ptr: *const u8) {
+    let policy_str = str_from_header(value_ptr);
+    if policy_str.is_empty() {
+        return;
+    }
+    APPS.with(|a| {
+        let mut apps = a.borrow_mut();
+        let idx = (app_handle - 1) as usize;
+        if idx < apps.len() {
+            apps[idx].activation_policy = Some(policy_str.to_string());
+        }
+    });
+}
+
 /// Install keyboard shortcuts on a window using EventControllerKey.
 fn install_shortcuts_on_window(window: &ApplicationWindow) {
     let controller = EventControllerKey::new();
@@ -358,4 +495,54 @@ pub fn on_terminate(callback: f64) {
     ON_TERMINATE_CALLBACK.with(|cb| {
         *cb.borrow_mut() = Some(callback);
     });
+}
+
+/// Register a system-wide global hotkey.
+/// On Linux this is not yet supported (requires X11-specific code or Wayland portals).
+pub fn register_global_hotkey(key_ptr: *const u8, _modifiers: f64, _callback: f64) {
+    let key_str = str_from_header(key_ptr);
+    eprintln!("[perry/ui] registerGlobalHotkey('{}') is not yet supported on Linux (requires X11/Wayland portal)", key_str);
+}
+
+/// Get the icon for an application at the given path.
+/// Supports .desktop files (Icon= field lookup via GTK icon theme) and direct image paths.
+pub fn get_app_icon(path_ptr: *const u8) -> i64 {
+    let path = str_from_header(path_ptr);
+    if path.is_empty() { return 0; }
+
+    // .desktop file: parse for Icon= field
+    if path.ends_with(".desktop") {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for line in content.lines() {
+                if let Some(icon_name) = line.strip_prefix("Icon=") {
+                    let icon_name = icon_name.trim();
+                    // Try icon theme lookup
+                    let display = gtk4::gdk::Display::default();
+                    if let Some(display) = display {
+                        let theme = gtk4::IconTheme::for_display(&display);
+                        if theme.has_icon(icon_name) {
+                            let image = gtk4::Image::from_icon_name(icon_name);
+                            image.set_pixel_size(32);
+                            return widgets::register_widget(image.upcast());
+                        }
+                    }
+                    // Fallback: try as absolute path
+                    if std::path::Path::new(icon_name).exists() {
+                        let image = gtk4::Image::from_file(icon_name);
+                        image.set_pixel_size(32);
+                        return widgets::register_widget(image.upcast());
+                    }
+                }
+            }
+        }
+    }
+
+    // Direct file path — try loading as image
+    if std::path::Path::new(path).exists() {
+        let image = gtk4::Image::from_file(path);
+        image.set_pixel_size(32);
+        return widgets::register_widget(image.upcast());
+    }
+
+    0
 }
