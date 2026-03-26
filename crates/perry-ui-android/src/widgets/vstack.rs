@@ -34,11 +34,12 @@ pub fn create(spacing: f64) -> i64 {
 
     // No default padding — matches macOS/iOS behavior (VStack has zero insets)
 
-    // LayoutParams: MATCH_PARENT width, WRAP_CONTENT height
+    // LayoutParams: MATCH_PARENT width, MATCH_PARENT height
+    // MATCH_PARENT height is needed for Spacer weight=1 to expand correctly
     let params = env.new_object(
         "android/widget/LinearLayout$LayoutParams",
         "(II)V",
-        &[JValue::Int(-1), JValue::Int(-2)], // MATCH_PARENT=-1, WRAP_CONTENT=-2
+        &[JValue::Int(-1), JValue::Int(-1)], // MATCH_PARENT=-1
     ).expect("Failed to create LayoutParams");
     let _ = env.call_method(
         &layout,

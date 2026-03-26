@@ -407,7 +407,57 @@ pub fn start(_handle: i64) {
         PREVIEW_LAYER.with(|p| { *p.borrow_mut() = Some(preview); });
         DELEGATE_INSTANCE.with(|d| { *d.borrow_mut() = Some(delegate); });
 
+        // Update video orientation to match current device orientation
+        update_video_orientation();
+
+        // Register for orientation change notifications so preview stays correct on iPad rotation
+        let nc: *mut AnyObject = msg_send![AnyClass::get(c"NSNotificationCenter").unwrap(), defaultCenter];
+        let device_cls = AnyClass::get(c"UIDevice").unwrap();
+        let current_device: *mut AnyObject = msg_send![device_cls, currentDevice];
+        let _: () = msg_send![current_device, beginGeneratingDeviceOrientationNotifications];
+
+        // Use a block-based observer for orientation changes
+        let name = objc2_foundation::NSString::from_str("UIDeviceOrientationDidChangeNotification");
+        let observer_block = block2::RcBlock::new(move |_notif: *mut AnyObject| {
+            update_video_orientation();
+        });
+        let _: *mut AnyObject = msg_send![nc,
+            addObserverForName: &*name,
+            object: std::ptr::null::<AnyObject>(),
+            queue: std::ptr::null::<AnyObject>(),  // nil = deliver on posting queue
+            usingBlock: &*observer_block
+        ];
+
         crate::ws_log!("[camera] session started");
+    }
+}
+
+/// Update the preview layer's connection videoOrientation to match current device orientation.
+fn update_video_orientation() {
+    unsafe {
+        PREVIEW_LAYER.with(|p| {
+            if let Some(preview) = p.borrow().as_ref() {
+                let connection: *mut AnyObject = msg_send![&**preview, connection];
+                if connection.is_null() { return; }
+
+                let device_cls = AnyClass::get(c"UIDevice").unwrap();
+                let current_device: *mut AnyObject = msg_send![device_cls, currentDevice];
+                let device_orientation: i64 = msg_send![current_device, orientation];
+
+                // Map UIDeviceOrientation to AVCaptureVideoOrientation
+                // UIDeviceOrientation: 1=portrait, 2=portraitUpsideDown, 3=landscapeLeft, 4=landscapeRight
+                // AVCaptureVideoOrientation: 1=portrait, 2=portraitUpsideDown, 3=landscapeRight, 4=landscapeLeft
+                let video_orientation: i64 = match device_orientation {
+                    1 => 1, // Portrait
+                    2 => 2, // PortraitUpsideDown
+                    3 => 4, // LandscapeLeft device → LandscapeLeft video (AVCapture swaps L/R)
+                    4 => 3, // LandscapeRight device → LandscapeRight video
+                    _ => return, // Unknown/faceUp/faceDown — keep current
+                };
+
+                let _: () = msg_send![connection, setVideoOrientation: video_orientation];
+            }
+        });
     }
 }
 

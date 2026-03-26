@@ -640,11 +640,19 @@ pub extern "C" fn js_closure_unbind_this(val: f64) -> f64 {
     }
 }
 
-/// Create a new instance of a class by name from a module handle.
-// All V8 interop stubs removed — real implementations are in perry-jsruntime/src/interop.rs
-// (V8 builds). For V8-free builds, compile.rs generates Cranelift-level stubs.
-// Removed: js_new_from_handle, js_call_function, js_load_module, js_new_instance,
-// js_create_callback, js_runtime_init, js_set_property, js_get_export, js_await_js_promise
+/// V8 interop no-op stubs. Real implementations are in perry-jsruntime/src/interop.rs.
+/// These stubs ensure symbols are always available even when perry-jsruntime is not linked
+/// (iOS, Android, standalone builds). When perry-jsruntime IS linked, its strong symbols
+/// override these stubs via linker symbol resolution order.
+#[no_mangle] pub extern "C" fn js_new_from_handle(_constructor: f64, _args_ptr: i64, _args_len: i64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn js_call_function(_func: f64, _args_ptr: i64, _args_len: i64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn js_load_module(_path_ptr: i64, _path_len: i64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn js_new_instance(_class_ptr: i64, _args_ptr: i64, _args_len: i64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn js_create_callback(_func_ptr: i64, _closure_env: i64, _param_count: i64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn js_set_property(_obj: f64, _key_ptr: i64, _key_len: i64, _value: f64) {}
+#[no_mangle] pub extern "C" fn js_get_export(_module: f64, _name_ptr: i64, _name_len: i64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn js_await_js_promise(_promise: f64) -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn js_runtime_init() {}
 
 // =============================================================================
 // AOT stubs for unconditionally-declared extern functions
