@@ -236,31 +236,10 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     let llvm_ar = find_llvm_tool("llvm-ar")
         .ok_or_else(|| anyhow::anyhow!("llvm-ar not found (install llvm-tools: rustup component add llvm-tools)"))?;
 
-    // Try to find the rlib alongside the staticlib
-    let rlib_name = lib_path.file_name()
-        .and_then(|f| f.to_str())
-        .map(|f| format!("lib{}", f.replace(".lib", ".rlib")))
-        .unwrap_or_default();
-    let rlib_path = lib_path.with_file_name(&rlib_name);
-
-    if !rlib_path.exists() {
-        eprintln!("Warning: rlib not found at {:?}, using staticlib as-is", rlib_path);
-        return Ok(lib_path.clone());
-    }
-
-    // Canonicalize paths so they work from any working directory
-    let abs_rlib = std::fs::canonicalize(&rlib_path)?;
+    // Canonicalize the staticlib path
     let abs_staticlib = std::fs::canonicalize(lib_path)?;
 
-    // List rlib members (skip .rmeta metadata)
-    let rlib_out = Command::new(&llvm_ar).arg("t").arg(&abs_rlib).output()?;
-    let rlib_objects: Vec<String> = String::from_utf8_lossy(&rlib_out.stdout)
-        .lines()
-        .filter(|l| l.ends_with(".o"))
-        .map(|l| l.to_string())
-        .collect();
-
-    // List staticlib members to find UI-only deps
+    // List staticlib members
     let staticlib_out = Command::new(&llvm_ar).arg("t").arg(&abs_staticlib).output()?;
     let staticlib_members: Vec<String> = String::from_utf8_lossy(&staticlib_out.stdout)
         .lines()
@@ -275,35 +254,77 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .filter(|p| p.exists())
         .or_else(|| find_stdlib_library(Some("windows")));
 
-    let stdlib_members: std::collections::HashSet<String> = if let Some(ref sp) = stdlib_path {
+    let mut exclude_members: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Some(ref sp) = stdlib_path {
         let abs_sp = std::fs::canonicalize(sp).unwrap_or(sp.clone());
-        let out = Command::new(&llvm_ar).arg("t").arg(&abs_sp).output()
-            .unwrap_or_else(|_| std::process::Command::new("true").output().unwrap());
-        String::from_utf8_lossy(&out.stdout)
+        if let Ok(out) = Command::new(&llvm_ar).arg("t").arg(&abs_sp).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                exclude_members.insert(line.to_string());
+            }
+        }
+    }
+
+    // Also find perry_runtime.lib members — the UI staticlib bundles perry_runtime
+    // but it's already linked separately. Exclude all its objects.
+    let runtime_path = lib_path.parent()
+        .map(|p| p.join("perry_runtime.lib"))
+        .filter(|p| p.exists())
+        .or_else(|| find_library("perry_runtime.lib", Some("windows")));
+
+    if let Some(ref rp) = runtime_path {
+        let abs_rp = std::fs::canonicalize(rp).unwrap_or(rp.clone());
+        if let Ok(out) = Command::new(&llvm_ar).arg("t").arg(&abs_rp).output() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                exclude_members.insert(line.to_string());
+            }
+        }
+    }
+
+    // Try to find the rlib alongside the staticlib
+    let rlib_name = lib_path.file_name()
+        .and_then(|f| f.to_str())
+        .map(|f| format!("lib{}", f.replace(".lib", ".rlib")))
+        .unwrap_or_default();
+    let rlib_path = lib_path.with_file_name(&rlib_name);
+    let has_rlib = rlib_path.exists();
+
+    let rlib_objects: Vec<String> = if has_rlib {
+        let abs_rlib = std::fs::canonicalize(&rlib_path)?;
+        let rlib_out = Command::new(&llvm_ar).arg("t").arg(&abs_rlib).output()?;
+        String::from_utf8_lossy(&rlib_out.stdout)
             .lines()
+            .filter(|l| l.ends_with(".o"))
             .map(|l| l.to_string())
             .collect()
     } else {
-        std::collections::HashSet::new()
+        Vec::new()
     };
 
-    // Determine the main crate prefix from rlib objects (e.g. "hone_editor_windows-")
-    // so we can skip alloc shim objects from the same crate in the staticlib.
-    let crate_prefix: Option<String> = rlib_objects.first()
-        .and_then(|o| o.split('.').next())
-        .and_then(|s| s.split('-').next())
-        .map(|s| format!("{}-", s));
+    // Determine the UI crate name from the staticlib filename (e.g. "perry_ui_windows")
+    // to identify its own CGU objects in the staticlib.
+    let ui_crate_name = lib_path.file_stem()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
 
-    // Keep only staticlib members that are NOT in perry-stdlib, NOT the main
-    // crate (already extracted from rlib), and not compiler_builtins.
+    // Keep only staticlib members that are NOT in perry-stdlib/perry_runtime,
+    // NOT compiler_builtins, and NOT the perry_runtime crate objects.
     let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
         if m.ends_with(".dll") { return false; }
         if m.contains("compiler_builtins") { return false; }
-        if stdlib_members.contains(m.as_str()) { return false; }
-        // Skip objects from the main crate (rlib provides these)
-        if let Some(ref prefix) = crate_prefix {
-            if m.starts_with(prefix.as_str()) { return false; }
+        if exclude_members.contains(m.as_str()) { return false; }
+        // When we have an rlib, skip main crate objects from staticlib
+        // (we'll extract them from the rlib instead to avoid alloc shims)
+        if has_rlib {
+            if let Some(prefix) = rlib_objects.first()
+                .and_then(|o| o.split('.').next())
+                .and_then(|s| s.split('-').next())
+            {
+                if m.starts_with(&format!("{}-", prefix)) { return false; }
+            }
         }
+        // Skip perry_runtime objects embedded in the UI staticlib
+        if m.contains("perry_runtime-") { return false; }
         true
     }).collect();
 
@@ -314,28 +335,29 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
 
     let mut all_objects: Vec<std::path::PathBuf> = Vec::new();
 
-    // Extract UI crate objects from rlib (use absolute paths).
-    // Skip allocator shim CGUs — these contain __rust_alloc etc. that are
-    // already provided by perry-stdlib. Shim CGUs have random hash names
-    // (not the standard "cgu.NN" pattern).
-    for member in &rlib_objects {
-        // Standard CGUs: "crate-hash.crate.hash-cgu.NN.rcgu.o"
-        // Alloc shims:   "crate-hash.RANDOMHASH.rcgu.o" (no "cgu." in name)
-        let is_alloc_shim = !member.contains(".cgu.") && !member.contains("-cgu.");
-        if is_alloc_shim {
-            continue;
-        }
-        let out = Command::new(&llvm_ar)
-            .arg("x").arg(&abs_rlib).arg(member)
-            .current_dir(&extract_dir)
-            .output()?;
-        if out.status.success() {
-            let p = extract_dir.join(member);
-            if p.exists() { all_objects.push(p); }
+    // If we have an rlib, extract UI crate objects from it (skipping alloc shims).
+    // If not, the UI crate objects are already in ui_only_deps from the staticlib.
+    if has_rlib {
+        let abs_rlib = std::fs::canonicalize(&rlib_path)?;
+        for member in &rlib_objects {
+            // Standard CGUs: "crate-hash.crate.hash-cgu.NN.rcgu.o"
+            // Alloc shims:   "crate-hash.RANDOMHASH.rcgu.o" (no "cgu." in name)
+            let is_alloc_shim = !member.contains(".cgu.") && !member.contains("-cgu.");
+            if is_alloc_shim {
+                continue;
+            }
+            let out = Command::new(&llvm_ar)
+                .arg("x").arg(&abs_rlib).arg(member)
+                .current_dir(&extract_dir)
+                .output()?;
+            if out.status.success() {
+                let p = extract_dir.join(member);
+                if p.exists() { all_objects.push(p); }
+            }
         }
     }
 
-    // Extract UI-only deps from staticlib (use absolute paths)
+    // Extract UI-only deps from staticlib
     for member in &ui_only_deps {
         let out = Command::new(&llvm_ar)
             .arg("x").arg(&abs_staticlib).arg(member.as_str())
@@ -347,8 +369,8 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         }
     }
 
-    eprintln!("Building trimmed UI lib: {} rlib + {} deps = {} objects (was {})",
-        rlib_objects.len(), ui_only_deps.len(), all_objects.len(), staticlib_members.len());
+    eprintln!("Building trimmed UI lib: {} objects (was {}, excluded {} stdlib/runtime duplicates)",
+        all_objects.len(), staticlib_members.len(), staticlib_members.len() - ui_only_deps.len());
 
     // Create new archive from just the UI-specific objects
     let mut ar_cmd = Command::new(&llvm_ar);
