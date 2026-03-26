@@ -3849,6 +3849,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let stdlib_lib_path = find_stdlib_library(target.as_deref());
         // Check if jsruntime will be used - if so, don't generate stubs for its symbols
         let use_jsruntime = ctx.needs_js_runtime || args.enable_js_runtime;
+        // Check if stdlib will be linked - if so, it provides perry_runtime symbols (no stubs needed)
+        let target_is_windows = matches!(target.as_deref(), Some("windows")) || (cfg!(target_os = "windows") && target.is_none());
+        let will_link_stdlib = (ctx.needs_stdlib || target_is_windows) && stdlib_lib_path.is_some();
         let jsruntime_lib_path = if use_jsruntime {
             find_jsruntime_library(target.as_deref())
         } else {
@@ -3910,7 +3913,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             if st == "U" {
                                 if cn.starts_with("__export_") || cn.starts_with("__wrapper_") {
                                     local_undef.insert(cn.to_string());
-                                } else if !use_jsruntime && (cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle"
+                                } else if !use_jsruntime && !will_link_stdlib && (cn == "js_call_function" || cn == "js_load_module" || cn == "js_new_from_handle"
                                     || cn == "js_new_instance" || cn == "js_create_callback" || cn == "js_runtime_init"
                                     || cn == "js_set_property" || cn == "js_get_export" || cn == "js_await_js_promise") {
                                     local_undef.insert(cn.to_string());
