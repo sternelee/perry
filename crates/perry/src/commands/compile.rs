@@ -4124,9 +4124,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         let mut c = Command::new(clang);
         c.arg("-target").arg(triple)
          .arg("-isysroot").arg(&sysroot)
-         // Allow unresolved symbols — native libs may not implement all functions
-         // on iOS. They'll be stubbed or unused at runtime.
-         .arg("-Wl,-undefined,dynamic_lookup")
          // Swift standard library .tbd stubs in the SDK (swiftCore, swift_Concurrency, etc.)
          .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
          // Swift compatibility static archives in the toolchain
