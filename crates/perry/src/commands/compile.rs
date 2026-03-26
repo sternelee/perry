@@ -233,8 +233,19 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
 /// and combine with UI-only deps (windows, serde, regex...) from the staticlib.
 /// All shared deps come from perry-stdlib. No /FORCE:MULTIPLE needed.
 fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
-    let llvm_ar = find_llvm_tool("llvm-ar")
-        .ok_or_else(|| anyhow::anyhow!("llvm-ar not found (install llvm-tools: rustup component add llvm-tools)"))?;
+    let lib_name = lib_path.file_name().and_then(|f| f.to_str()).unwrap_or("?");
+    eprintln!("[strip-dedup] Processing: {}", lib_path.display());
+
+    let llvm_ar = match find_llvm_tool("llvm-ar") {
+        Some(ar) => {
+            eprintln!("[strip-dedup] llvm-ar found: {}", ar.display());
+            ar
+        }
+        None => {
+            eprintln!("[strip-dedup] ERROR: llvm-ar not found — cannot strip duplicates from {lib_name}");
+            return Err(anyhow::anyhow!("llvm-ar not found (install llvm-tools: rustup component add llvm-tools)"));
+        }
+    };
 
     // Canonicalize the staticlib path
     let abs_staticlib = std::fs::canonicalize(lib_path)?;
@@ -245,10 +256,9 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .lines()
         .map(|l| l.to_string())
         .collect();
+    eprintln!("[strip-dedup] {lib_name}: {} total members", staticlib_members.len());
 
     // Find perry-stdlib members so we can compute the set difference.
-    // Search multiple locations: next to the lib, in target/release/, and via
-    // find_stdlib_library() which checks standard Perry search paths.
     let stdlib_path = lib_path.parent()
         .map(|p| p.join("perry_stdlib.lib"))
         .filter(|p| p.exists())
@@ -259,14 +269,20 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     if let Some(ref sp) = stdlib_path {
         let abs_sp = std::fs::canonicalize(sp).unwrap_or(sp.clone());
         if let Ok(out) = Command::new(&llvm_ar).arg("t").arg(&abs_sp).output() {
+            let count_before = exclude_members.len();
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 exclude_members.insert(line.to_string());
             }
+            eprintln!("[strip-dedup] perry_stdlib.lib found: {} — {} members loaded",
+                abs_sp.display(), exclude_members.len() - count_before);
+        } else {
+            eprintln!("[strip-dedup] WARNING: failed to list perry_stdlib.lib at {}", abs_sp.display());
         }
+    } else {
+        eprintln!("[strip-dedup] WARNING: perry_stdlib.lib not found (searched next to lib and via find_stdlib_library)");
     }
 
-    // Also find perry_runtime.lib members — the UI staticlib bundles perry_runtime
-    // but it's already linked separately. Exclude all its objects.
+    // Also find perry_runtime.lib members
     let runtime_path = lib_path.parent()
         .map(|p| p.join("perry_runtime.lib"))
         .filter(|p| p.exists())
@@ -275,11 +291,20 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     if let Some(ref rp) = runtime_path {
         let abs_rp = std::fs::canonicalize(rp).unwrap_or(rp.clone());
         if let Ok(out) = Command::new(&llvm_ar).arg("t").arg(&abs_rp).output() {
+            let count_before = exclude_members.len();
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 exclude_members.insert(line.to_string());
             }
+            eprintln!("[strip-dedup] perry_runtime.lib found: {} — {} members loaded",
+                abs_rp.display(), exclude_members.len() - count_before);
+        } else {
+            eprintln!("[strip-dedup] WARNING: failed to list perry_runtime.lib at {}", abs_rp.display());
         }
+    } else {
+        eprintln!("[strip-dedup] WARNING: perry_runtime.lib not found (searched next to lib and via find_library)");
     }
+
+    eprintln!("[strip-dedup] Total exclude set: {} members from stdlib+runtime .lib files", exclude_members.len());
 
     // Try to find the rlib alongside the staticlib
     let rlib_name = lib_path.file_name()
@@ -288,67 +313,69 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .unwrap_or_default();
     let rlib_path = lib_path.with_file_name(&rlib_name);
     let has_rlib = rlib_path.exists();
+    eprintln!("[strip-dedup] rlib {}: {}", if has_rlib { "found" } else { "NOT found" }, rlib_path.display());
 
     let rlib_objects: Vec<String> = if has_rlib {
         let abs_rlib = std::fs::canonicalize(&rlib_path)?;
         let rlib_out = Command::new(&llvm_ar).arg("t").arg(&abs_rlib).output()?;
-        String::from_utf8_lossy(&rlib_out.stdout)
+        let objs: Vec<String> = String::from_utf8_lossy(&rlib_out.stdout)
             .lines()
             .filter(|l| l.ends_with(".o"))
             .map(|l| l.to_string())
-            .collect()
+            .collect();
+        eprintln!("[strip-dedup] rlib has {} .o members", objs.len());
+        objs
     } else {
         Vec::new()
     };
 
-    // Determine the UI crate name from the staticlib filename (e.g. "perry_ui_windows")
-    // to identify its own CGU objects in the staticlib.
+    // Determine the UI crate name from the staticlib filename
     let ui_crate_name = lib_path.file_stem()
         .and_then(|f| f.to_str())
         .unwrap_or("");
 
-    // Keep only staticlib members that are NOT in perry-stdlib/perry_runtime,
-    // NOT compiler_builtins, and NOT the perry_runtime crate objects.
+    // Filter: keep only members unique to this lib
+    let mut excluded_by_set = 0usize;
+    let mut excluded_by_pattern = 0usize;
     let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
         if m.ends_with(".dll") { return false; }
-        if m.contains("compiler_builtins") { return false; }
-        if exclude_members.contains(m.as_str()) { return false; }
-        // When we have an rlib, skip main crate objects from staticlib
-        // (we'll extract them from the rlib instead to avoid alloc shims)
+        if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
+        if exclude_members.contains(m.as_str()) { excluded_by_set += 1; return false; }
         if has_rlib {
             if let Some(prefix) = rlib_objects.first()
                 .and_then(|o| o.split('.').next())
                 .and_then(|s| s.split('-').next())
             {
-                if m.starts_with(&format!("{}-", prefix)) { return false; }
+                if m.starts_with(&format!("{}-", prefix)) { excluded_by_pattern += 1; return false; }
             }
         }
-        // Skip perry_runtime and perry_stdlib objects embedded in any staticlib
-        if m.contains("perry_runtime-") { return false; }
-        if m.contains("perry_stdlib-") { return false; }
-        // Skip Rust std/core/alloc objects that are already in perry-stdlib
-        if m.contains("std-") && m.contains(".rcgu.o") { return false; }
-        if m.contains("core-") && m.contains(".rcgu.o") { return false; }
-        if m.contains("alloc-") && m.contains(".rcgu.o") && !m.contains(&ui_crate_name) { return false; }
+        if m.contains("perry_runtime-") { excluded_by_pattern += 1; return false; }
+        if m.contains("perry_stdlib-") { excluded_by_pattern += 1; return false; }
+        if m.contains("std-") && m.contains(".rcgu.o") { excluded_by_pattern += 1; return false; }
+        if m.contains("core-") && m.contains(".rcgu.o") { excluded_by_pattern += 1; return false; }
+        if m.contains("alloc-") && m.contains(".rcgu.o") && !m.contains(&ui_crate_name) { excluded_by_pattern += 1; return false; }
         true
     }).collect();
 
-    let trimmed_lib = abs_staticlib.with_file_name("_perry_ui_trimmed.lib");
-    let extract_dir = abs_staticlib.with_file_name("_perry_ui_extract");
+    eprintln!("[strip-dedup] {lib_name}: keeping {} of {} members (excluded: {} by .lib set, {} by name pattern)",
+        ui_only_deps.len(), staticlib_members.len(), excluded_by_set, excluded_by_pattern);
+
+    let trimmed_lib = abs_staticlib.with_file_name(format!("_{lib_name}_trimmed.lib"));
+    let extract_dir = abs_staticlib.with_file_name(format!("_{lib_name}_extract"));
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
 
     let mut all_objects: Vec<std::path::PathBuf> = Vec::new();
 
     // If we have an rlib, extract UI crate objects from it (skipping alloc shims).
-    // If not, the UI crate objects are already in ui_only_deps from the staticlib.
     if has_rlib {
         let abs_rlib = std::fs::canonicalize(&rlib_path)?;
+        let mut rlib_extracted = 0usize;
+        let mut rlib_skipped = 0usize;
         for member in &rlib_objects {
-            // Standard CGUs: "crate-hash.crate.hash-cgu.NN.rcgu.o"
-            // Alloc shims:   "crate-hash.RANDOMHASH.rcgu.o" (no "cgu." in name)
             let is_alloc_shim = !member.contains(".cgu.") && !member.contains("-cgu.");
             if is_alloc_shim {
+                rlib_skipped += 1;
                 continue;
             }
             let out = Command::new(&llvm_ar)
@@ -357,12 +384,15 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
                 .output()?;
             if out.status.success() {
                 let p = extract_dir.join(member);
-                if p.exists() { all_objects.push(p); }
+                if p.exists() { all_objects.push(p); rlib_extracted += 1; }
             }
         }
+        eprintln!("[strip-dedup] rlib: extracted {rlib_extracted}, skipped {rlib_skipped} alloc shims");
     }
 
     // Extract UI-only deps from staticlib
+    let mut extract_ok = 0usize;
+    let mut extract_fail = 0usize;
     for member in &ui_only_deps {
         let out = Command::new(&llvm_ar)
             .arg("x").arg(&abs_staticlib).arg(member.as_str())
@@ -370,12 +400,16 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
             .output()?;
         if out.status.success() {
             let p = extract_dir.join(member.as_str());
-            if p.exists() { all_objects.push(p); }
+            if p.exists() { all_objects.push(p); extract_ok += 1; }
+        } else {
+            extract_fail += 1;
         }
     }
+    if extract_fail > 0 {
+        eprintln!("[strip-dedup] WARNING: {extract_fail} members failed to extract from staticlib");
+    }
 
-    eprintln!("Building trimmed UI lib: {} objects (was {}, excluded {} stdlib/runtime duplicates)",
-        all_objects.len(), staticlib_members.len(), staticlib_members.len() - ui_only_deps.len());
+    eprintln!("[strip-dedup] Building trimmed {lib_name}: {} objects total", all_objects.len());
 
     // Create new archive from just the UI-specific objects
     let mut ar_cmd = Command::new(&llvm_ar);
@@ -386,11 +420,12 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
     let ar_out = ar_cmd.output()?;
     if !ar_out.status.success() {
         let stderr = String::from_utf8_lossy(&ar_out.stderr);
-        eprintln!("Warning: archive creation failed: {}", stderr);
+        eprintln!("[strip-dedup] ERROR: archive creation failed: {}", stderr);
         let _ = std::fs::remove_dir_all(&extract_dir);
-        return Ok(lib_path.clone());
+        return Err(anyhow::anyhow!("Failed to create trimmed archive for {lib_name}: {stderr}"));
     }
 
+    eprintln!("[strip-dedup] OK: {} -> {}", lib_path.display(), trimmed_lib.display());
     let _ = std::fs::remove_dir_all(&extract_dir);
     let _ = std::fs::remove_dir_all("_perry_ui_objects");
     Ok(trimmed_lib)
@@ -4512,8 +4547,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
             // UI-specific objects from the .lib and link them individually.
             let ui_lib = if is_windows {
-                strip_duplicate_objects_from_lib(&ui_lib)
-                    .unwrap_or(ui_lib)
+                match strip_duplicate_objects_from_lib(&ui_lib) {
+                    Ok(trimmed) => trimmed,
+                    Err(e) => {
+                        eprintln!("[strip-dedup] FAILED for UI lib, using original: {e}");
+                        ui_lib
+                    }
+                }
             } else {
                 ui_lib
             };
@@ -4713,8 +4753,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             // On Windows, native libs may be staticlibs that bundle
                             // std/alloc/core, causing duplicate CRT init. Dedup them
                             // the same way we dedup the UI lib.
-                            let deduped = strip_duplicate_objects_from_lib(&lib)
-                                .unwrap_or_else(|_| lib.clone());
+                            let deduped = match strip_duplicate_objects_from_lib(&lib) {
+                                Ok(trimmed) => trimmed,
+                                Err(e) => {
+                                    eprintln!("[strip-dedup] FAILED for native lib {}, using original: {e}", lib.display());
+                                    lib.clone()
+                                }
+                            };
                             cmd.arg(&deduped);
                         } else {
                             cmd.arg(&lib);
