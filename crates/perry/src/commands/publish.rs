@@ -183,6 +183,8 @@ struct MacosConfig {
     notarize_signing_identity: Option<String>,
     /// Separate .p12 for the Mac Installer Distribution cert (for .pkg signing)
     installer_certificate: Option<String>,
+    /// Provisioning profile for App Store / TestFlight distribution
+    provisioning_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -930,7 +932,13 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
     } else {
         config.macos.as_ref().and_then(|m| m.p8_key_path.clone())
     };
-    let toml_provisioning_profile = config.ios.as_ref().and_then(|i| i.provisioning_profile.clone());
+    let toml_provisioning_profile = if is_ios {
+        config.ios.as_ref().and_then(|i| i.provisioning_profile.clone())
+    } else if is_macos {
+        config.macos.as_ref().and_then(|m| m.provisioning_profile.clone())
+    } else {
+        None
+    };
 
     // Apple credentials (for macOS and iOS)
     let apple_team_id = if !is_android {
@@ -1057,8 +1065,11 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
         args.apple_issuer_id.clone()
     };
 
-    // iOS provisioning profile
-    let provisioning_profile_path = if is_ios {
+    // Provisioning profile (iOS always, macOS when distributing to App Store)
+    let macos_needs_profile = is_macos && matches!(
+        macos_distribute.as_deref(), Some("appstore") | Some("both") | Some("testflight")
+    );
+    let provisioning_profile_path = if is_ios || macos_needs_profile {
         resolve_path_credential(
             args.provisioning_profile.as_deref(),
             "PERRY_PROVISIONING_PROFILE",
