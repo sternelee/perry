@@ -351,9 +351,9 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         }
         if m.contains("perry_runtime-") { excluded_by_pattern += 1; return false; }
         if m.contains("perry_stdlib-") { excluded_by_pattern += 1; return false; }
-        if m.contains("std-") && m.contains(".rcgu.o") { excluded_by_pattern += 1; return false; }
-        if m.contains("core-") && m.contains(".rcgu.o") { excluded_by_pattern += 1; return false; }
-        if m.contains("alloc-") && m.contains(".rcgu.o") && !m.contains(&ui_crate_name) { excluded_by_pattern += 1; return false; }
+        // Note: we used to also strip std-/core-/alloc- by name pattern, but that's
+        // too aggressive — it catches windows_core, serde_core, etc. which are needed.
+        // /FORCE:MULTIPLE handles any remaining duplicates from Rust std objects.
         true
     }).collect();
 
@@ -4500,7 +4500,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("comctl32.lib")
            .arg("advapi32.lib")
            .arg("comdlg32.lib")
-           .arg("ws2_32.lib");
+           .arg("ws2_32.lib")
+           .arg("dwmapi.lib");
         // MSVC CRT (dynamic) and additional Windows API libraries needed by the Rust runtime
         cmd.arg("msvcrt.lib")
            .arg("vcruntime.lib")
