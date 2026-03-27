@@ -4557,6 +4557,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
            .arg("-framework").arg("CoreVideo") // CVPixelBuffer
            .arg("-liconv")
            .arg("-lresolv")
+           .arg("-lobjc")
            .arg("-lSystem");
     } else if is_tvos {
         // tvOS frameworks (UIKit-based, like iOS)
@@ -4628,7 +4629,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                .arg("-framework").arg("CoreFoundation")
                .arg("-framework").arg("SystemConfiguration")
                .arg("-liconv")
-               .arg("-lresolv");
+               .arg("-lresolv")
+               .arg("-lobjc");
 
             if jsruntime_lib.is_some() {
                 cmd.arg("-lc++");
