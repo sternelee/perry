@@ -795,6 +795,7 @@ fn find_ui_library(target: Option<&str>) -> Option<PathBuf> {
         Some("watchos-simulator") | Some("watchos") => "libperry_ui_watchos.a",
         Some("tvos-simulator") | Some("tvos") => "libperry_ui_tvos.a",
         Some("linux") => "libperry_ui_gtk4.a",
+        Some("macos") => "libperry_ui_macos.a",
         Some("windows") => "perry_ui_windows.lib",
         #[cfg(target_os = "windows")]
         None => "perry_ui_windows.lib",
