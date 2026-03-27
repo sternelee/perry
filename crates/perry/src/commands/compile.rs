@@ -3943,10 +3943,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             "nm".to_string()
         };
         // Symbol prefix depends on object format:
-        // Mach-O (native macOS build, no --target): nm adds `_` prefix
+        // Mach-O targets (macOS, iOS, watchOS, tvOS): nm shows `_` prefix
         // COFF (Windows targets): no prefix
         // ELF (Linux/Android targets): no prefix
-        let is_macho = !is_windows && !is_linux && !is_android && cfg!(target_os = "macos");
+        // Use TARGET (what we're compiling to), not HOST (what we're running on)
+        let is_macho = matches!(target.as_deref(),
+            Some("ios") | Some("ios-simulator") | Some("ios-widget") | Some("ios-widget-simulator") |
+            Some("macos") | Some("watchos") | Some("watchos-simulator") |
+            Some("tvos") | Some("tvos-simulator")
+        ) || (!is_windows && !is_linux && !is_android && cfg!(target_os = "macos"));
         // Scan object files in parallel for symbol resolution
         let scan_results: Vec<(HashSet<String>, HashSet<String>)> = all_scan_paths.par_iter()
             .map(|scan_path| {
