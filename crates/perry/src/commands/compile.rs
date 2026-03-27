@@ -334,15 +334,16 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .and_then(|f| f.to_str())
         .unwrap_or("");
 
-    // Filter: remove only perry_runtime/perry_stdlib objects (known to cause
-    // conflicts). All other duplicates are handled by /FORCE:MULTIPLE.
-    // We used to also exclude by .lib member set comparison, but that strips
-    // objects with identical filenames that contain different monomorphizations
-    // needed by this lib (e.g. alloc::raw_vec::grow_one with different type params).
+    // Filter: keep only objects unique to this lib.
+    // With the rlib available, we extract the crate's own CGU objects from it
+    // (skipping alloc shims), and keep only deps from the staticlib that
+    // aren't already in perry-stdlib or perry-runtime.
     let mut excluded_by_set = 0usize;
     let mut excluded_by_pattern = 0usize;
     let ui_only_deps: Vec<&String> = staticlib_members.iter().filter(|m| {
         if m.ends_with(".dll") { return false; }
+        if m.contains("compiler_builtins") { excluded_by_pattern += 1; return false; }
+        if exclude_members.contains(m.as_str()) { excluded_by_set += 1; return false; }
         if has_rlib {
             if let Some(prefix) = rlib_objects.first()
                 .and_then(|o| o.split('.').next())
@@ -4279,13 +4280,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          // per module). Large codebases (100+ modules) can overflow the
          // default 1MB stack. Reserve 8MB.
          .arg("/STACK:67108864");
-        // perry_ui and native libs are staticlibs that bundle perry_runtime.
-        // strip_duplicate_objects_from_lib removes most duplicates, but
-        // monomorphized/inlined perry_runtime symbols in the UI crate's own
-        // CGUs can't be stripped without breaking the UI code. These are
-        // identical definitions (same source), so /FORCE:MULTIPLE is safe.
-        // MSVC link.exe handles this silently; lld-link requires the flag.
-        c.arg("/FORCE:MULTIPLE");
         // Set up MSVC library search paths if LIB env isn't already configured
         if std::env::var("LIB").is_err() {
             if let Some(lib_paths) = find_msvc_lib_paths() {
@@ -4559,8 +4553,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // Rust std. When perry-stdlib is also linked (which bundles the same), the
             // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
             // UI-specific objects from the .lib and link them individually.
-            let ui_lib = if is_windows && !is_cross_windows {
-                // Native Windows: strip duplicates (no /FORCE:MULTIPLE)
+            let ui_lib = if is_windows {
                 match strip_duplicate_objects_from_lib(&ui_lib) {
                     Ok(trimmed) => trimmed,
                     Err(e) => {
@@ -4569,7 +4562,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                     }
                 }
             } else {
-                // Cross-compile: /FORCE:MULTIPLE handles duplicates, skip stripping
                 ui_lib
             };
             cmd.arg(&ui_lib);
@@ -4764,8 +4756,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                             && native_lib.module.contains("plugin");
                         if force_load {
                             cmd.arg(format!("-Wl,-force_load,{}", lib.display()));
-                        } else if is_windows && !is_cross_windows && lib.extension().map_or(false, |e| e == "lib") {
-                            // Native Windows: strip duplicates from native staticlibs
+                        } else if is_windows && lib.extension().map_or(false, |e| e == "lib") {
+                            // On Windows, native libs may be staticlibs that bundle
+                            // std/alloc/core. Strip duplicates using rlib + set exclusion.
                             let deduped = match strip_duplicate_objects_from_lib(&lib) {
                                 Ok(trimmed) => trimmed,
                                 Err(e) => {
