@@ -258,11 +258,27 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         .collect();
     eprintln!("[strip-dedup] {lib_name}: {} total members", staticlib_members.len());
 
+    // Determine library naming convention from the input lib
+    let is_win_lib = lib_name.ends_with(".lib");
+    let (stdlib_name, runtime_name) = if is_win_lib {
+        ("perry_stdlib.lib", "perry_runtime.lib")
+    } else {
+        ("libperry_stdlib.a", "libperry_runtime.a")
+    };
+    // Determine target for find_stdlib_library / find_library search
+    let search_target: Option<&str> = if is_win_lib {
+        Some("windows")
+    } else if lib_name.contains("_ios") {
+        Some("ios")
+    } else {
+        None
+    };
+
     // Find perry-stdlib members so we can compute the set difference.
     let stdlib_path = lib_path.parent()
-        .map(|p| p.join("perry_stdlib.lib"))
+        .map(|p| p.join(stdlib_name))
         .filter(|p| p.exists())
-        .or_else(|| find_stdlib_library(Some("windows")));
+        .or_else(|| find_stdlib_library(search_target));
 
     let mut exclude_members: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -273,20 +289,20 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 exclude_members.insert(line.to_string());
             }
-            eprintln!("[strip-dedup] perry_stdlib.lib found: {} — {} members loaded",
+            eprintln!("[strip-dedup] {stdlib_name} found: {} — {} members loaded",
                 abs_sp.display(), exclude_members.len() - count_before);
         } else {
-            eprintln!("[strip-dedup] WARNING: failed to list perry_stdlib.lib at {}", abs_sp.display());
+            eprintln!("[strip-dedup] WARNING: failed to list {stdlib_name} at {}", abs_sp.display());
         }
     } else {
-        eprintln!("[strip-dedup] WARNING: perry_stdlib.lib not found (searched next to lib and via find_stdlib_library)");
+        eprintln!("[strip-dedup] WARNING: {stdlib_name} not found (searched next to lib and via find_stdlib_library)");
     }
 
-    // Also find perry_runtime.lib members
+    // Also find perry_runtime members
     let runtime_path = lib_path.parent()
-        .map(|p| p.join("perry_runtime.lib"))
+        .map(|p| p.join(runtime_name))
         .filter(|p| p.exists())
-        .or_else(|| find_library("perry_runtime.lib", Some("windows")));
+        .or_else(|| find_library(runtime_name, search_target));
 
     if let Some(ref rp) = runtime_path {
         let abs_rp = std::fs::canonicalize(rp).unwrap_or(rp.clone());
@@ -295,21 +311,29 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 exclude_members.insert(line.to_string());
             }
-            eprintln!("[strip-dedup] perry_runtime.lib found: {} — {} members loaded",
+            eprintln!("[strip-dedup] {runtime_name} found: {} — {} members loaded",
                 abs_rp.display(), exclude_members.len() - count_before);
         } else {
-            eprintln!("[strip-dedup] WARNING: failed to list perry_runtime.lib at {}", abs_rp.display());
+            eprintln!("[strip-dedup] WARNING: failed to list {runtime_name} at {}", abs_rp.display());
         }
     } else {
-        eprintln!("[strip-dedup] WARNING: perry_runtime.lib not found (searched next to lib and via find_library)");
+        eprintln!("[strip-dedup] WARNING: {runtime_name} not found (searched next to lib and via find_library)");
     }
 
     eprintln!("[strip-dedup] Total exclude set: {} members from stdlib+runtime .lib files", exclude_members.len());
 
     // Try to find the rlib alongside the staticlib
+    // .lib → lib<name>.rlib, .a (already has lib prefix) → lib<name>.rlib
     let rlib_name = lib_path.file_name()
         .and_then(|f| f.to_str())
-        .map(|f| format!("lib{}", f.replace(".lib", ".rlib")))
+        .map(|f| {
+            if f.ends_with(".lib") {
+                format!("lib{}", f.replace(".lib", ".rlib"))
+            } else {
+                // .a files: libfoo.a → libfoo.rlib
+                f.replace(".a", ".rlib")
+            }
+        })
         .unwrap_or_default();
     let rlib_path = lib_path.with_file_name(&rlib_name);
     let has_rlib = rlib_path.exists();
@@ -4553,16 +4577,16 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // Rust std. When perry-stdlib is also linked (which bundles the same), the
             // duplicate Rust std CRT init causes a pre-main crash. Fix: extract only the
             // UI-specific objects from the .lib and link them individually.
-            let ui_lib = if is_windows {
-                match strip_duplicate_objects_from_lib(&ui_lib) {
-                    Ok(trimmed) => trimmed,
-                    Err(e) => {
-                        eprintln!("[strip-dedup] FAILED for UI lib, using original: {e}");
-                        ui_lib
-                    }
+            // The UI staticlib bundles perry_runtime + Rust std. When perry-stdlib
+            // is also linked (which bundles the same), duplicate symbols cause
+            // crashes (conflicting static state initialization). Strip duplicates
+            // on all platforms, not just Windows.
+            let ui_lib = match strip_duplicate_objects_from_lib(&ui_lib) {
+                Ok(trimmed) => trimmed,
+                Err(e) => {
+                    eprintln!("[strip-dedup] FAILED for UI lib, using original: {e}");
+                    ui_lib
                 }
-            } else {
-                ui_lib
             };
             cmd.arg(&ui_lib);
 
