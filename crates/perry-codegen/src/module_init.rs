@@ -570,20 +570,22 @@ impl crate::codegen::Compiler {
                                 let global_val = self.module.declare_data_in_func(data_id, builder.func);
                                 let ptr = builder.ins().global_value(types::I64, global_val);
 
-                                // For pointer types (arrays, objects), NaN-box the pointer before storing
-                                // so that importing modules can load them uniformly as f64
-                                let val_to_store = if local_info.is_pointer && !local_info.is_string {
+                                // NaN-box pointer types before storing to export globals,
+                                // so importing modules can load them uniformly as f64.
+                                let val_to_store = {
                                     let val_type = builder.func.dfg.value_type(val);
-                                    if val_type == types::I64 {
-                                        // Raw I64 pointer - NaN-box it
+                                    if local_info.is_string && val_type == types::I64 {
+                                        // String pointer: NaN-box with STRING_TAG
+                                        inline_nanbox_string(&mut builder, val)
+                                    } else if local_info.is_pointer && !local_info.is_string && val_type == types::I64 {
+                                        // Object/array pointer: NaN-box with POINTER_TAG
                                         let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
                                             .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
                                         let nanbox_ref = self.module.declare_func_in_func(*nanbox_func_id, builder.func);
                                         let call = builder.ins().call(nanbox_ref, &[val]);
                                         builder.inst_results(call)[0]
-                                    } else if local_info.is_union {
-                                        // Union-typed F64 value that's actually a pointer (bitcast from I64)
-                                        // Extract the raw pointer bits and NaN-box properly
+                                    } else if local_info.is_union && val_type == types::F64 {
+                                        // Union-typed F64 that might be a pointer
                                         let i64_val = ensure_i64(&mut builder, val);
                                         let nanbox_func_id = self.extern_funcs.get("js_nanbox_pointer")
                                             .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
@@ -591,11 +593,8 @@ impl crate::codegen::Compiler {
                                         let call = builder.ins().call(nanbox_ref, &[i64_val]);
                                         builder.inst_results(call)[0]
                                     } else {
-                                        // Already NaN-boxed F64, use as-is
                                         val
                                     }
-                                } else {
-                                    val
                                 };
                                 builder.ins().store(MemFlags::new(), val_to_store, ptr, 0);
                             }
