@@ -352,10 +352,22 @@ unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
         } else if element.is_bool() {
             ParamValue::Bool(element.as_bool())
         } else if element.is_number() {
-            ParamValue::Number(element.to_number())
+            let n = element.to_number();
+            // If the number is a whole number, send as Int for MySQL compatibility
+            // (MySQL prepared statements require integers for LIMIT, OFFSET, etc.)
+            if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                ParamValue::Int(n as i64)
+            } else {
+                ParamValue::Number(n)
+            }
         } else {
             // Unknown type - try to treat as number
-            ParamValue::Number(element.to_number())
+            let n = element.to_number();
+            if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+                ParamValue::Int(n as i64)
+            } else {
+                ParamValue::Number(n)
+            }
         };
 
         result.push(param);
