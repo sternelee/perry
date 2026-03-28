@@ -13317,14 +13317,49 @@ pub(crate) fn compile_expr(
                     }
                 }
 
-                // Found a local variable with this name - treat it as a constructor function
-                // and use js_new_from_handle to call it dynamically
+                // Found a local variable with this name - treat it as a constructor function.
+                // If it's a closure (native Perry function), call it directly via js_closure_call.
+                // This handles patterns like: export const Interface = function(...) { return {...} }
+                // where `new Interface(abi)` should call the function and use its return value.
+                // Fallback to js_new_from_handle for V8 runtime objects.
                 let info = locals.get(&local_id).unwrap();
                 let ctor_val = builder.use_var(info.var);
-                // Ensure the constructor value is f64 for js_new_from_handle
-                let ctor_f64 = ensure_f64(builder, ctor_val);
 
-                // Compile arguments
+                {
+                    // Try calling as native Perry closure/function directly.
+                    // This handles `export const X = function(...) { return {...} }` patterns
+                    // where `new X(args)` should call the function and use its return value.
+                    // Works for closures, imported constructor functions, and module-level functions.
+                    let ctor_ptr = ensure_i64(builder, ctor_val);
+                    if args.is_empty() {
+                        let call_func = extern_funcs.get("js_closure_call0")
+                            .ok_or_else(|| anyhow!("js_closure_call0 not declared"))?;
+                        let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                        let call = builder.ins().call(call_ref, &[ctor_ptr]);
+                        return Ok(builder.inst_results(call)[0]);
+                    } else if args.len() == 1 {
+                        let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                        let arg_f64 = ensure_f64(builder, arg_val);
+                        let call_func = extern_funcs.get("js_closure_call1")
+                            .ok_or_else(|| anyhow!("js_closure_call1 not declared"))?;
+                        let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                        let call = builder.ins().call(call_ref, &[ctor_ptr, arg_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    } else if args.len() == 2 {
+                        let arg0 = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                        let arg1 = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[1], this_ctx)?;
+                        let arg0_f64 = ensure_f64(builder, arg0);
+                        let arg1_f64 = ensure_f64(builder, arg1);
+                        let call_func = extern_funcs.get("js_closure_call2")
+                            .ok_or_else(|| anyhow!("js_closure_call2 not declared"))?;
+                        let call_ref = module.declare_func_in_func(*call_func, builder.func);
+                        let call = builder.ins().call(call_ref, &[ctor_ptr, arg0_f64, arg1_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    // Fallthrough for >2 args: use js_new_from_handle
+                }
+                // Fallback for >2 args: use js_new_from_handle (V8 runtime)
+                let ctor_f64 = ensure_f64(builder, ctor_val);
                 let args_count = args.len();
                 if args_count > 0 {
                     let stack_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
@@ -13336,7 +13371,6 @@ pub(crate) fn compile_expr(
 
                     for (i, arg) in args.iter().enumerate() {
                         let arg_val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
-                        // Ensure argument is f64 for JS interop
                         let arg_val = ensure_f64(builder, arg_val_raw);
                         let offset = (i * 8) as i32;
                         builder.ins().store(cranelift_codegen::ir::MemFlags::new(), arg_val, args_ptr, offset);
