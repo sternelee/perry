@@ -13451,6 +13451,38 @@ pub(crate) fn compile_expr(
                 }
             }
 
+            // Last resort: try to call as cross-module imported constructor function.
+            // For patterns like: export const Interface = function(abi) { return {...} }
+            // called as: new Interface(abi)
+            // Try to find __wrapper_<class_name> and call it directly.
+            {
+                let wrapper_name = format!("__wrapper_{}", class_name);
+                let scoped_key = format!("__scoped_wrapper__{}", class_name);
+                let wrapper_func_id = if let Some(&scoped_func_id) = extern_funcs.get(scoped_key.as_str()) {
+                    Some(scoped_func_id)
+                } else {
+                    // Try declaring the wrapper
+                    let mut sig = module.make_signature();
+                    sig.params.push(AbiParam::new(types::I64)); // closure_ptr (pass 0)
+                    for _ in 0..args.len() {
+                        sig.params.push(AbiParam::new(types::F64));
+                    }
+                    sig.returns.push(AbiParam::new(types::F64));
+                    module.declare_function(&wrapper_name, cranelift_module::Linkage::Import, &sig).ok()
+                };
+
+                if let Some(func_id) = wrapper_func_id {
+                    let func_ref = module.declare_func_in_func(func_id, builder.func);
+                    let mut call_args: Vec<Value> = vec![builder.ins().iconst(types::I64, 0)]; // null closure_ptr
+                    for arg in args {
+                        let arg_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
+                        call_args.push(ensure_f64(builder, arg_val));
+                    }
+                    let call = builder.ins().call(func_ref, &call_args);
+                    return Ok(builder.inst_results(call)[0]);
+                }
+            }
+
             eprintln!("  Warning: Unknown class '{}' in new expression, returning undefined", class_name);
             for arg in args {
                 let _ = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, arg, this_ctx)?;
