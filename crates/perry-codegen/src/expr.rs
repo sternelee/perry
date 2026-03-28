@@ -2331,7 +2331,30 @@ pub(crate) fn compile_expr(
                 Some(ts_expr) => {
                     // new Date(value) - handles both numeric timestamps and date strings
                     let ts_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, ts_expr, this_ctx)?;
-                    let ts_f64 = ensure_f64(builder, ts_val);
+                    // NaN-box strings with STRING_TAG so js_date_new_from_value can detect them.
+                    // Without this, string pointers get raw bitcast to f64 and lose their type info.
+                    let ts_f64 = {
+                        let val_type = builder.func.dfg.value_type(ts_val);
+                        if val_type == types::I64 {
+                            // Check if the expression is a string
+                            fn is_string_date_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                match expr {
+                                    Expr::String(_) => true,
+                                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                                    Expr::PropertyGet { .. } => true, // may be string
+                                    Expr::Call { .. } => false, // could be Date or number
+                                    _ => false,
+                                }
+                            }
+                            if is_string_date_expr(ts_expr, locals) {
+                                inline_nanbox_string(builder, ts_val)
+                            } else {
+                                inline_nanbox_pointer(builder, ts_val)
+                            }
+                        } else {
+                            ts_val // Already f64 (number/timestamp)
+                        }
+                    };
                     let func = extern_funcs.get("js_date_new_from_value")
                         .ok_or_else(|| anyhow!("js_date_new_from_value not declared"))?;
                     let func_ref = module.declare_func_in_func(*func, builder.func);
