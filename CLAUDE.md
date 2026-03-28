@@ -141,6 +141,8 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 ### v0.4.23
+- fix: bitwise NOT (~x) wrapping semantics — convert f64→i64→i32 (ireduce) for JS ToInt32 wrapping instead of fcvt_to_sint_sat(I32) which saturated at i32::MAX
+- fix: IndexGet string detection — property access returning array (e.g., `log.topics[0]`) now treated as potential string for proper comparison codegen
 - fix: i18n translations now propagate to rayon worker threads — parallel module codegen was missing the i18n string table, causing untranslated output; also walks parent dirs to find `perry.toml`
 - fix: iOS crashes — gate `ios_game_loop` behind feature flag, catch panics in UI callback trampolines (button, scrollview, tabbar), panic hook writes crash log to Documents
 - fix: iOS Spacer crash — removed NSLayoutConstraint from spacer creation that caused layout engine conflicts
