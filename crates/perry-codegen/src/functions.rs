@@ -471,7 +471,11 @@ impl crate::codegen::Compiler {
                     continue;
                 }
                 let (var_type, local_info_template) = if let Some(info) = self.module_level_locals.get(local_id) {
-                    let vt = if info.is_pointer && !info.is_union { types::I64 } else { types::F64 };
+                    // Arrays/closures/maps/sets/buffers are always I64 raw pointers, even
+                    // when is_union is set (e.g., ty=Unknown/Any inferred from untyped code).
+                    // The init function stores I64; loading as F64 causes a type mismatch
+                    // that corrupts the pointer on platforms with FP flush-to-zero (Android).
+                    let vt = if info.is_array || info.is_closure || info.is_map || info.is_set || info.is_buffer || (info.is_pointer && !info.is_union) { types::I64 } else { types::F64 };
                     (vt, info.clone())
                 } else {
                     (types::F64, LocalInfo {
