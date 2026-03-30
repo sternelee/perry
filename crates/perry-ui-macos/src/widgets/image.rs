@@ -84,6 +84,9 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
             )
         ];
 
+        // Scale image to fit the view frame (prevents intrinsic size from overriding)
+        let _: () = msg_send![&*image_view, setImageScaling: 2_isize]; // NSImageScaleProportionallyUpOrDown
+
         if let Some(img) = image {
             let _: () = msg_send![&*image_view, setImage: &*img];
         }
@@ -97,6 +100,12 @@ pub fn create_file(path_ptr: *const u8) -> i64 {
 pub fn set_size(handle: i64, width: f64, height: f64) {
     if let Some(view) = super::get_widget(handle) {
         unsafe {
+            // Resize the NSImage itself so intrinsic content size matches
+            let image: *mut objc2::runtime::AnyObject = msg_send![&*view, image];
+            if !image.is_null() {
+                let img_size = objc2_core_foundation::CGSize::new(width, height);
+                let _: () = msg_send![image, setSize: img_size];
+            }
             let size = objc2_core_foundation::CGSize::new(width, height);
             let _: () = msg_send![&*view, setFrameSize: size];
         }
