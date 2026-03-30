@@ -2022,6 +2022,20 @@ fn build_and_run_android(
     std::fs::copy(so_path, jni_dir.join("libperry_app.so"))
         .map_err(|e| anyhow!("Failed to copy .so to jniLibs: {}", e))?;
 
+    // Copy resource directories (assets/, logo/, etc.) into APK assets
+    // Android loads ImageFile('assets/foo.png') from the APK's assets/ directory,
+    // so we need 'assets/' inside 'app/src/main/assets/' → accessible as 'assets/foo.png'
+    let project_root = so_path.parent().unwrap_or(Path::new("."));
+    let apk_assets = build_dir.join("app/src/main/assets");
+    std::fs::create_dir_all(&apk_assets)?;
+    for dir_name in &["logo", "assets", "resources", "images"] {
+        let resource_dir = project_root.join(dir_name);
+        if resource_dir.is_dir() {
+            let dest = apk_assets.join(dir_name);
+            let _ = copy_dir_recursive(&resource_dir, &dest);
+        }
+    }
+
     // Update applicationId in build.gradle.kts
     let gradle_path = build_dir.join("app/build.gradle.kts");
     if gradle_path.exists() {
