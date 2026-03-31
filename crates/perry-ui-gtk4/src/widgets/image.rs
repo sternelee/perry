@@ -8,7 +8,7 @@ thread_local! {
 }
 
 enum ImageKind {
-    File(gtk4::Picture),
+    File(gtk4::Picture, Option<String>),
     Symbol(gtk4::Image),
 }
 
@@ -27,13 +27,14 @@ pub(crate) fn str_from_header(ptr: *const u8) -> &'static str {
 /// Create an image from a file path.
 pub fn create_file(path_ptr: *const u8) -> i64 {
     crate::app::ensure_gtk_init();
-    let path = str_from_header(path_ptr);
+    let raw = str_from_header(path_ptr);
+    let path = raw.split('\0').next().unwrap_or(raw);
     // Resolve path relative to executable directory (handles bundled assets)
     let resolved = crate::resolve_asset_path(path);
     let picture = gtk4::Picture::for_filename(&resolved);
     picture.set_can_shrink(true);
     let handle = super::register_widget(picture.clone().upcast());
-    IMAGE_WIDGETS.with(|w| w.borrow_mut().insert(handle, ImageKind::File(picture)));
+    IMAGE_WIDGETS.with(|w| w.borrow_mut().insert(handle, ImageKind::File(picture, Some(resolved))));
     handle
 }
 
@@ -52,8 +53,21 @@ pub fn set_size(handle: i64, width: f64, height: f64) {
     IMAGE_WIDGETS.with(|w| {
         if let Some(kind) = w.borrow().get(&handle) {
             match kind {
-                ImageKind::File(picture) => {
-                    picture.set_size_request(width as i32, height as i32);
+                ImageKind::File(picture, path) => {
+                    let w = width as i32;
+                    let h = height as i32;
+                    // Load a scaled Pixbuf so the Picture renders at the exact size
+                    if let Some(path) = path {
+                        if let Ok(pixbuf) = gtk4::gdk_pixbuf::Pixbuf::from_file_at_scale(
+                            path, w, h, true,
+                        ) {
+                            let texture = gtk4::gdk::Texture::for_pixbuf(&pixbuf);
+                            picture.set_paintable(Some(&texture));
+                        }
+                    }
+                    picture.set_size_request(w, h);
+                    picture.set_halign(gtk4::Align::Start);
+                    picture.set_valign(gtk4::Align::Center);
                 }
                 ImageKind::Symbol(image) => {
                     image.set_pixel_size(width.max(height) as i32);

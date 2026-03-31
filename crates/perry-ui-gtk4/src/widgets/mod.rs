@@ -120,6 +120,19 @@ pub fn add_child(parent_handle: i64, child_handle: i64) {
         }
 
         if let Some(container) = parent.downcast_ref::<gtk4::Box>() {
+            // Set spacer expand direction based on parent orientation
+            if child.has_css_class("perry-spacer") {
+                match container.orientation() {
+                    gtk4::Orientation::Horizontal => {
+                        child.set_hexpand(true);
+                        child.set_vexpand(false);
+                    }
+                    _ => {
+                        child.set_vexpand(true);
+                        child.set_hexpand(false);
+                    }
+                }
+            }
             container.append(&child);
         } else if let Some(scrolled) = parent.downcast_ref::<gtk4::ScrolledWindow>() {
             scrolled.set_child(Some(&child));
