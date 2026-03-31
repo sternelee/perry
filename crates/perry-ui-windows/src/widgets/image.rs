@@ -128,26 +128,10 @@ unsafe extern "system" fn image_wnd_proc(
                         GdipCreateFromHDC(hdc, &mut graphics);
                         if !graphics.is_null() {
                             GdipSetInterpolationMode(graphics, InterpolationMode(7)); // HighQualityBicubic
-
-                            // Preserve aspect ratio: fit image within the widget rect
-                            let mut img_w: u32 = 0;
-                            let mut img_h: u32 = 0;
-                            GdipGetImageWidth(gp_image, &mut img_w);
-                            GdipGetImageHeight(gp_image, &mut img_h);
-                            let (dx, dy, dw, dh) = if img_w > 0 && img_h > 0 {
-                                let src_r = img_w as f64 / img_h as f64;
-                                let dst_r = w as f64 / h as f64;
-                                if src_r > dst_r {
-                                    let fh = (w as f64 / src_r) as i32;
-                                    (0, (h - fh) / 2, w, fh)
-                                } else {
-                                    let fw = (h as f64 * src_r) as i32;
-                                    ((w - fw) / 2, 0, fw, h)
-                                }
-                            } else {
-                                (0, 0, w, h)
-                            };
-                            GdipDrawImageRectI(graphics, gp_image, dx, dy, dw, dh);
+                            // Stretch to fill — layout engine controls the aspect ratio
+                            // via widget dimensions. No letterboxing to avoid gap areas
+                            // that can't show the parent's gradient background.
+                            GdipDrawImageRectI(graphics, gp_image, 0, 0, w, h);
                             GdipDeleteGraphics(graphics);
                         }
                         GdipDisposeImage(gp_image);
