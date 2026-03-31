@@ -101,6 +101,17 @@ pub fn set_selectable(handle: i64, selectable: bool) {
     }
 }
 
+/// Enable word wrapping on a Text widget.
+/// `max_width` is currently unused on GTK4; the label wraps to its allocated width.
+pub fn set_wraps(handle: i64, _max_width: f64) {
+    if let Some(widget) = super::get_widget(handle) {
+        if let Some(label) = widget.downcast_ref::<Label>() {
+            label.set_wrap(true);
+            label.set_wrap_mode(pango::WrapMode::WordChar);
+        }
+    }
+}
+
 /// Set the font family of a Text widget.
 pub fn set_font_family(handle: i64, family_ptr: *const u8) {
     let family = str_from_header(family_ptr);
