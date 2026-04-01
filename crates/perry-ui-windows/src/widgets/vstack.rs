@@ -5,7 +5,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{HBRUSH, FillRect};
+use windows::Win32::Graphics::Gdi::{HBRUSH, HDC, FillRect, CreateSolidBrush, SetBkMode, TRANSPARENT};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -44,7 +44,30 @@ unsafe extern "system" fn container_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
     match msg {
         // Forward child notifications to the top-level window so button clicks,
         // text color, and context menus are handled by the main wnd_proc.
-        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CONTEXTMENU | WM_DRAWITEM => {
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            // For color messages, try forwarding to parent first. If the result
+            // is the default (no custom brush), provide our own ancestor brush
+            // so child controls get the correct background with WS_CLIPCHILDREN.
+            if let Ok(parent) = GetParent(hwnd) {
+                let result = SendMessageW(parent, msg, wparam, lparam);
+                if result.0 != 0 {
+                    return result;
+                }
+            }
+            // Fallback: find our own bg or ancestor bg and return that brush
+            if let Some(color) = super::get_hwnd_bg_color(hwnd)
+                .or_else(|| super::find_ancestor_hwnd_bg_color(hwnd))
+            {
+                let hdc = HDC(wparam.0 as *mut _);
+                unsafe {
+                    SetBkMode(hdc, TRANSPARENT);
+                }
+                let brush = unsafe { CreateSolidBrush(COLORREF(color)) };
+                return LRESULT(brush.0 as isize);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_COMMAND | WM_CONTEXTMENU | WM_DRAWITEM => {
             if let Ok(parent) = GetParent(hwnd) {
                 return SendMessageW(parent, msg, wparam, lparam);
             }

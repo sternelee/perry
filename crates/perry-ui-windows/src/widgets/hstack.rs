@@ -5,7 +5,7 @@ use windows::Win32::Foundation::*;
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::*;
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{HBRUSH, FillRect};
+use windows::Win32::Graphics::Gdi::{HBRUSH, HDC, FillRect, CreateSolidBrush, SetBkMode, TRANSPARENT};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -42,7 +42,26 @@ fn ensure_class_registered() {
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn container_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_COMMAND | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CONTEXTMENU | WM_DRAWITEM => {
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            if let Ok(parent) = GetParent(hwnd) {
+                let result = SendMessageW(parent, msg, wparam, lparam);
+                if result.0 != 0 {
+                    return result;
+                }
+            }
+            if let Some(color) = super::get_hwnd_bg_color(hwnd)
+                .or_else(|| super::find_ancestor_hwnd_bg_color(hwnd))
+            {
+                let hdc = HDC(wparam.0 as *mut _);
+                unsafe {
+                    SetBkMode(hdc, TRANSPARENT);
+                }
+                let brush = unsafe { CreateSolidBrush(COLORREF(color)) };
+                return LRESULT(brush.0 as isize);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_COMMAND | WM_CONTEXTMENU | WM_DRAWITEM => {
             if let Ok(parent) = GetParent(hwnd) {
                 return SendMessageW(parent, msg, wparam, lparam);
             }
