@@ -301,19 +301,21 @@ pub fn reload_bitmap_scaled(handle: i64, _w: i32, _h: i32) {
     }
 }
 
-/// Set the size of an Image widget.
+/// Set the size of an Image widget (DPI-scaled to match layout coordinates).
 pub fn set_size(handle: i64, width: f64, height: f64) {
-    // Also set fixed dimensions so the layout engine uses these
-    super::set_fixed_width(handle, width as i32);
-    super::set_fixed_height(handle, height as i32);
+    // DPI-scale to match the layout engine's coordinate system
+    let scale = crate::app::get_dpi_scale();
+    let scaled_w = (width * scale) as i32;
+    let scaled_h = (height * scale) as i32;
+    // Set fixed dimensions so the layout engine uses these
+    super::set_fixed_width(handle, scaled_w);
+    super::set_fixed_height(handle, scaled_h);
 
     #[cfg(target_os = "windows")]
     {
         if let Some(hwnd) = super::get_hwnd(handle) {
-            let w = width as i32;
-            let h = height as i32;
             unsafe {
-                let _ = SetWindowPos(hwnd, None, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
+                let _ = SetWindowPos(hwnd, None, 0, 0, scaled_w, scaled_h, SWP_NOMOVE | SWP_NOZORDER);
                 let _ = InvalidateRect(hwnd, None, false);
             }
         }
