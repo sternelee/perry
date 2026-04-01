@@ -212,6 +212,17 @@ fn layout_stack(handle: i64, width: i32, height: i32, vertical: bool) {
 
         pos += size + spacing_px;
     }
+
+    // After positioning all children, invalidate them so they repaint on top
+    // of the parent background (without WS_CLIPCHILDREN, parent bg can cover children).
+    #[cfg(target_os = "windows")]
+    for &child in &visible_children {
+        if let Some(child_hwnd) = widgets::get_hwnd_safe(child) {
+            unsafe {
+                let _ = InvalidateRect(child_hwnd, None, true);
+            }
+        }
+    }
 }
 
 fn layout_scrollview(handle: i64, width: i32, height: i32) {

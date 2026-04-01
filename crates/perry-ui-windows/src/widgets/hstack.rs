@@ -145,7 +145,7 @@ pub fn create_with_insets(spacing: f64, top: f64, left: f64, bottom: f64, right:
                 WINDOW_EX_STYLE::default(),
                 windows::core::PCWSTR(class_name.as_ptr()),
                 windows::core::PCWSTR(window_text.as_ptr()),
-                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
+                WS_CHILD | WS_VISIBLE,
                 0, 0, 100, 100,
                 super::get_parking_hwnd(),
                 None,
