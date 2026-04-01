@@ -906,6 +906,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
+        WM_MOUSEWHEEL => {
+            // Forward mouse wheel to the window under the cursor (not just the focused window).
+            // This ensures embedded views (like hone-editor) and ScrollViews receive scroll events.
+            let cursor_pos = POINT {
+                x: (lparam.0 & 0xFFFF) as i16 as i32,
+                y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+            };
+            let target = WindowFromPoint(cursor_pos);
+            if !target.is_invalid() && target != hwnd {
+                return SendMessageW(target, msg, wparam, lparam);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_COMMAND => {
             let control_id = (wparam.0 & 0xFFFF) as u16;
             let notify_code = ((wparam.0 >> 16) & 0xFFFF) as u16;
