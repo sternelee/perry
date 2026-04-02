@@ -145,6 +145,7 @@ struct ProjectConfig {
     description: Option<String>,
     entry: Option<String>,
     icons: Option<IconsConfig>,
+    features: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -417,6 +418,8 @@ struct BuildManifest {
     linux_description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     release_notes: Option<std::collections::HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1748,6 +1751,7 @@ async fn run_async(args: PublishArgs, format: OutputFormat, use_color: bool) -> 
                 .or_else(|| config.app.as_ref().and_then(|a| a.description.clone()))
         } else { None },
         release_notes: config.release_notes.clone(),
+        features: config.project.as_ref().and_then(|p| p.features.clone()),
     };
 
     // Read GCloud KMS signing credentials for Windows

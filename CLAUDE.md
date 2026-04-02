@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.40
+**Current Version:** 0.4.41
 
 ## Workflow Requirements
 
@@ -139,6 +139,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.41
+- feat: `perry publish` passes `features` from perry.toml project config to build manifest — enables feature-gated builds on the server side
+- test: add module-level array loop read tests, cross-module exported function array lookup tests, and Android label/i18n resource tests
 
 ### v0.4.40
 - fix: Windows VStack/HStack `WS_CLIPCHILDREN` with local `WM_CTLCOLORSTATIC` handling — Text controls now fill their own background with ancestor color instead of relying on parent paint-through, fixing blank text over gradient backgrounds
