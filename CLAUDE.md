@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.42
+**Current Version:** 0.4.44
 
 ## Workflow Requirements
 
@@ -139,6 +139,14 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.44
+- fix: `!('key' in obj)` always returned false — `in` operator returns NaN-boxed TAG_TRUE/TAG_FALSE but `!` used float comparison (NaN != 0.0 is true); added `Expr::In` to `needs_truthy_check`. Root cause of ethkit `Contract()` SIGSEGV: provider detection ternary evaluated wrong branch, setting `provider` to `undefined`.
+- fix: `trimStart()`/`trimEnd()` dispatched to correct runtime functions in all codegen paths — previously fell through to generic dispatch returning null bytes; broke ethkit ABI `parseSignature()` output type parsing
+- fix: cross-module default array parameter `param: T[] = []` caused SIGSEGV — `Expr::Array([])` default not handled inline, function received null pointer; added `js_array_alloc(0)` fallback
+- fix: `IndexSet` union-index string-key path NaN-boxes I64 closures/objects with POINTER_TAG — `ensure_f64` raw bitcast stripped the tag, making closures stored via `obj[dynamicKey]` uncallable through `js_native_call_method`
+- fix: `.filter(Boolean)` desugaring applied to all 4 HIR lowering paths (was only in local variable path); extracted `maybe_wrap_builtin_callback` as `LoweringContext` method
+- fix: null pointer guards in closure capture getters and `Promise.all` fulfill/reject handlers
 
 ### v0.4.43
 - feat(wasm): FFI support — `declare function` statements generate WASM imports under `"ffi"` namespace; enables Bloom Engine and other native libraries to provide GPU rendering, audio, etc. to WASM code
