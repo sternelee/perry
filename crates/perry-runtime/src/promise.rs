@@ -616,6 +616,90 @@ extern "C" fn promise_all_reject_handler(closure: *const crate::closure::Closure
     0.0
 }
 
+/// Promise.race - takes an array of promises and returns a promise that resolves
+/// or rejects with the first promise that settles.
+#[no_mangle]
+pub extern "C" fn js_promise_race(promises_arr: *const crate::array::ArrayHeader) -> *mut Promise {
+    use crate::array::{js_array_get_f64, js_array_length};
+    use crate::closure::{js_closure_alloc, js_closure_set_capture_ptr};
+    use crate::value::js_nanbox_get_pointer;
+
+    let result_promise = js_promise_new();
+
+    if promises_arr.is_null() {
+        // Promise.race([]) — never settles (per spec), but return pending promise
+        return result_promise;
+    }
+
+    let count = js_array_length(promises_arr);
+    if count == 0 {
+        return result_promise;
+    }
+
+    // For each promise, attach resolve/reject handlers that settle the result promise
+    for i in 0..count {
+        let promise_f64 = js_array_get_f64(promises_arr, i);
+        let promise_ptr = js_nanbox_get_pointer(promise_f64) as *mut Promise;
+        if promise_ptr.is_null() {
+            // Non-promise value — resolve immediately with the value
+            js_promise_resolve(result_promise, promise_f64);
+            return result_promise;
+        }
+
+        // Check if already settled — resolve/reject immediately
+        let state = unsafe { (*promise_ptr).state };
+        if matches!(state, PromiseState::Fulfilled) {
+            js_promise_resolve(result_promise, unsafe { (*promise_ptr).value });
+            return result_promise;
+        } else if matches!(state, PromiseState::Rejected) {
+            js_promise_reject(result_promise, unsafe { (*promise_ptr).value });
+            return result_promise;
+        }
+
+        // Create resolve handler closure (captures result_promise)
+        let resolve_closure = js_closure_alloc(
+            promise_race_resolve_handler as *const u8,
+            1, // 1 capture: result_promise
+        );
+        js_closure_set_capture_ptr(resolve_closure, 0, result_promise as i64);
+
+        // Create reject handler closure (captures result_promise)
+        let reject_closure = js_closure_alloc(
+            promise_race_reject_handler as *const u8,
+            1,
+        );
+        js_closure_set_capture_ptr(reject_closure, 0, result_promise as i64);
+
+        // Attach handlers via then
+        js_promise_then(promise_ptr, resolve_closure, reject_closure);
+    }
+
+    result_promise
+}
+
+/// Handler for Promise.race fulfill — resolves the race promise with the first value
+extern "C" fn promise_race_resolve_handler(closure: *const crate::closure::ClosureHeader, value: f64) -> f64 {
+    use crate::closure::js_closure_get_capture_ptr;
+    let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
+    if result_promise.is_null() { return 0.0; }
+    // Only settle if still pending (first one wins)
+    if matches!(unsafe { (*result_promise).state }, PromiseState::Pending) {
+        js_promise_resolve(result_promise, value);
+    }
+    0.0
+}
+
+/// Handler for Promise.race reject — rejects the race promise with the first reason
+extern "C" fn promise_race_reject_handler(closure: *const crate::closure::ClosureHeader, reason: f64) -> f64 {
+    use crate::closure::js_closure_get_capture_ptr;
+    let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
+    if result_promise.is_null() { return 0.0; }
+    if matches!(unsafe { (*result_promise).state }, PromiseState::Pending) {
+        js_promise_reject(result_promise, reason);
+    }
+    0.0
+}
+
 /// Await any promise value.
 /// In native-only mode (no V8), all promises are native POINTER_TAG promises.
 /// The Cranelift-generated busy-wait loop handles polling the promise state,

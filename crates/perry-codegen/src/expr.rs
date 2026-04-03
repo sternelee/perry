@@ -8346,6 +8346,23 @@ pub(crate) fn compile_expr(
                         }
                     }
 
+                    // Handle Promise.race(array)
+                    if property == "race" {
+                        if let Expr::GlobalGet(_) = object.as_ref() {
+                            if let Some(func_id) = extern_funcs.get("js_promise_race") {
+                                let func_ref = module.declare_func_in_func(*func_id, builder.func);
+                                let arr_ptr = if arg_vals.is_empty() {
+                                    builder.ins().iconst(types::I64, 0)
+                                } else {
+                                    ensure_i64(builder, arg_vals[0])
+                                };
+                                let call = builder.ins().call(func_ref, &[arr_ptr]);
+                                let promise_ptr = builder.inst_results(call)[0];
+                                return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                            }
+                        }
+                    }
+
                     // Handle Promise.delayed(value) - creates a pending promise that resolves on next microtask
                     if property == "delayed" {
                         if let Expr::GlobalGet(_) = object.as_ref() {
