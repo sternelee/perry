@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.41
+**Current Version:** 0.4.42
 
 ## Workflow Requirements
 
@@ -139,6 +139,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.42
+- fix: `Boolean()` constructor — added `BooleanCoerce` HIR/codegen handling via `js_is_truthy`; previously returned `undefined` for all inputs
+- fix: `!!string` always false — `Expr::String` and `Expr::Unary(Not)` now route through `js_is_truthy` instead of float comparison which treated NaN-boxed strings as zero
+- fix: `String(x)` on string locals/params returned "NaN" — `StringCoerce` NaN-boxed I64 string pointers with POINTER_TAG instead of STRING_TAG, so `js_string_coerce` didn't recognize them as strings
+- fix: `analyze_module_var_types` set `is_union=true` for Unknown/Any even when concrete type (array, closure, map, set, buffer) was known — caused I64/F64 type mismatch corrupting pointers on Android ARM (FP flush-to-zero)
 
 ### v0.4.41
 - feat: `perry publish` passes `features` from perry.toml project config to build manifest — enables feature-gated builds on the server side

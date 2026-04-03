@@ -530,6 +530,9 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         Expr::StringCoerce(value) => {
             collect_local_refs_expr(value, refs, visited);
         }
+        Expr::BooleanCoerce(value) => {
+            collect_local_refs_expr(value, refs, visited);
+        }
         Expr::IsNaN(value) => {
             collect_local_refs_expr(value, refs, visited);
         }
@@ -1307,6 +1310,9 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             collect_assigned_locals_expr(value, assigned);
         }
         Expr::StringCoerce(value) => {
+            collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::BooleanCoerce(value) => {
             collect_assigned_locals_expr(value, assigned);
         }
         Expr::IsNaN(value) => {

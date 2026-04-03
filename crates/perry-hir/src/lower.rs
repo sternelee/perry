@@ -4361,6 +4361,14 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     return Ok(Expr::String(String::new()));
                                 }
                             }
+                            "Boolean" => {
+                                if args.len() >= 1 {
+                                    return Ok(Expr::BooleanCoerce(Box::new(args.remove(0))));
+                                } else {
+                                    // Boolean() with no args returns false
+                                    return Ok(Expr::Bool(false));
+                                }
+                            }
                             "isNaN" => {
                                 if args.len() >= 1 {
                                     return Ok(Expr::IsNaN(Box::new(args.remove(0))));

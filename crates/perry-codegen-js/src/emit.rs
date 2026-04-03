@@ -1973,6 +1973,11 @@ impl JsEmitter {
                 self.emit_expr(val);
                 self.output.push(')');
             }
+            Expr::BooleanCoerce(val) => {
+                self.output.push_str("Boolean(");
+                self.emit_expr(val);
+                self.output.push(')');
+            }
             Expr::IsNaN(val) => {
                 self.output.push_str("isNaN(");
                 self.emit_expr(val);

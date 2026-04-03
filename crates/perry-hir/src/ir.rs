@@ -1389,6 +1389,9 @@ pub enum Expr {
     /// String(value) -> string
     /// Type coercion to string
     StringCoerce(Box<Expr>),
+    /// Boolean(value) -> boolean
+    /// Type coercion to boolean via JS truthiness rules
+    BooleanCoerce(Box<Expr>),
     /// isNaN(value) -> boolean
     /// Check if value is NaN
     IsNaN(Box<Expr>),

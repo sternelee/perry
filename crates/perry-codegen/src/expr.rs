@@ -5927,8 +5927,12 @@ pub(crate) fn compile_expr(
                         Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint || i.is_boolean).unwrap_or(false),
                         Expr::Call { .. } | Expr::PropertyGet { .. } | Expr::IndexGet { .. } | Expr::StaticMethodCall { .. } => true,
                         Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
+                        // String literals are NaN-boxed — must use js_is_truthy (empty string is falsy)
+                        Expr::String(_) | Expr::StringCoerce(_) => true,
                         // Comparisons now return NaN-boxed booleans
                         Expr::Compare { .. } | Expr::Bool(_) => true,
+                        // Unary not on another not (double negation) needs truthy check
+                        Expr::Unary { op: UnaryOp::Not, .. } => true,
                         _ => false,
                     };
                     // ! always returns a boolean in JS
@@ -22532,6 +22536,18 @@ pub(crate) fn compile_expr(
             Ok(builder.inst_results(nanbox_call)[0])
         }
         Expr::StringCoerce(value) => {
+            // Check if inner expression is already a known string
+            let is_inner_string = match value.as_ref() {
+                Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                Expr::String(_) | Expr::StringCoerce(_) => true,
+                Expr::EnumMember { enum_name, member_name } => {
+                    enums.get(&(enum_name.clone(), member_name.clone()))
+                        .map(|v| matches!(v, crate::types::EnumMemberValue::String(_)))
+                        .unwrap_or(false)
+                }
+                _ => false,
+            };
+
             // Compile the value
             let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
 
@@ -22539,9 +22555,10 @@ pub(crate) fn compile_expr(
             let val_f64 = if builder.func.dfg.value_type(val) == types::F64 {
                 val
             } else if builder.func.dfg.value_type(val) == types::I64 {
-                // NaN-box the pointer
-                let nanbox_func = extern_funcs.get("js_nanbox_pointer")
-                    .ok_or_else(|| anyhow!("js_nanbox_pointer not declared"))?;
+                // NaN-box the raw pointer — use STRING_TAG for strings, POINTER_TAG for objects
+                let tag_name = if is_inner_string { "js_nanbox_string" } else { "js_nanbox_pointer" };
+                let nanbox_func = extern_funcs.get(tag_name)
+                    .ok_or_else(|| anyhow!("{} not declared", tag_name))?;
                 let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
                 let call = builder.ins().call(nanbox_ref, &[val]);
                 builder.inst_results(call)[0]
@@ -22561,6 +22578,43 @@ pub(crate) fn compile_expr(
             let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
             let nanbox_call = builder.ins().call(nanbox_ref, &[str_ptr]);
             Ok(builder.inst_results(nanbox_call)[0])
+        }
+        Expr::BooleanCoerce(value) => {
+            // Boolean(x) — coerce to boolean via JS truthiness rules
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+
+            // Ensure f64 for js_is_truthy
+            let val_f64 = if builder.func.dfg.value_type(val) == types::F64 {
+                val
+            } else if builder.func.dfg.value_type(val) == types::I64 {
+                // Check if inner expression is a string
+                let is_inner_string = match value.as_ref() {
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                    Expr::String(_) => true,
+                    _ => false,
+                };
+                let tag_name = if is_inner_string { "js_nanbox_string" } else { "js_nanbox_pointer" };
+                let nanbox_func = extern_funcs.get(tag_name)
+                    .ok_or_else(|| anyhow!("{} not declared", tag_name))?;
+                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                let call = builder.ins().call(nanbox_ref, &[val]);
+                builder.inst_results(call)[0]
+            } else {
+                val
+            };
+
+            let truthy_func = extern_funcs.get("js_is_truthy")
+                .ok_or_else(|| anyhow!("js_is_truthy not declared"))?;
+            let truthy_ref = module.declare_func_in_func(*truthy_func, builder.func);
+            let call = builder.ins().call(truthy_ref, &[val_f64]);
+            let is_truthy = builder.inst_results(call)[0]; // i32
+
+            const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+            const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+            let true_val = builder.ins().f64const(f64::from_bits(TAG_TRUE));
+            let false_val = builder.ins().f64const(f64::from_bits(TAG_FALSE));
+            let is_falsy = builder.ins().icmp_imm(IntCC::Equal, is_truthy, 0);
+            Ok(builder.ins().select(is_falsy, false_val, true_val))
         }
         Expr::IsNaN(value) => {
             // Compile the value
