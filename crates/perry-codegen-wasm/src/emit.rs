@@ -532,6 +532,15 @@ struct WasmModuleEmitter {
     async_func_imports: Vec<(String, u32, usize)>, // (name, import_idx, param_count)
     /// Generated JS code for async functions
     async_js_code: Vec<String>,
+    /// Per-module func_map snapshots: FuncRef(id) is only unique within a module,
+    /// so each module needs its own FuncId→wasm_idx mapping.
+    module_func_maps: Vec<BTreeMap<FuncId, u32>>,
+    /// Set of WASM function indices that return void (no return value).
+    /// Used to push TAG_UNDEFINED after calling void functions via FuncRef.
+    void_funcs: std::collections::BTreeSet<u32>,
+    /// WASM function index → expected parameter count.
+    /// Used to pad missing arguments with TAG_UNDEFINED for optional params.
+    func_param_counts: BTreeMap<u32, usize>,
 }
 
 impl WasmModuleEmitter {
@@ -557,6 +566,9 @@ impl WasmModuleEmitter {
             enum_values: BTreeMap::new(),
             nan_temp_global: 0, // set during compile()
             async_func_imports: Vec::new(),
+            module_func_maps: Vec::new(),
+            void_funcs: std::collections::BTreeSet::new(),
+            func_param_counts: BTreeMap::new(),
             async_js_code: Vec::new(),
         }
     }
@@ -1113,46 +1125,53 @@ impl WasmModuleEmitter {
             }),                                            // (func_name_id, arg_count, base_addr) -> i32
         ];
 
-        // Collect all closures from all modules (they need function indices too)
-        let mut closure_funcs: Vec<(FuncId, Vec<Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>)> = Vec::new();
-        for (_, module) in modules {
-            collect_closures_from_stmts(&module.init, &mut closure_funcs);
+        // Collect all closures from all modules (they need function indices too).
+        // Track the module index so closures can be associated with their parent module's func_map.
+        let mut closure_funcs: Vec<(FuncId, Vec<Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, usize)> = Vec::new();
+        for (mod_idx, (_, module)) in modules.iter().enumerate() {
+            let mut module_closures: Vec<(FuncId, Vec<Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>)> = Vec::new();
+            collect_closures_from_stmts(&module.init, &mut module_closures);
             for func in &module.functions {
-                collect_closures_from_stmts(&func.body, &mut closure_funcs);
+                collect_closures_from_stmts(&func.body, &mut module_closures);
             }
             for class in &module.classes {
                 if let Some(ctor) = &class.constructor {
-                    collect_closures_from_stmts(&ctor.body, &mut closure_funcs);
+                    collect_closures_from_stmts(&ctor.body, &mut module_closures);
                 }
                 for method in &class.methods {
-                    collect_closures_from_stmts(&method.body, &mut closure_funcs);
+                    collect_closures_from_stmts(&method.body, &mut module_closures);
                 }
                 for method in &class.static_methods {
-                    collect_closures_from_stmts(&method.body, &mut closure_funcs);
+                    collect_closures_from_stmts(&method.body, &mut module_closures);
                 }
                 for (_, getter) in &class.getters {
-                    collect_closures_from_stmts(&getter.body, &mut closure_funcs);
+                    collect_closures_from_stmts(&getter.body, &mut module_closures);
                 }
                 for (_, setter) in &class.setters {
-                    collect_closures_from_stmts(&setter.body, &mut closure_funcs);
+                    collect_closures_from_stmts(&setter.body, &mut module_closures);
                 }
                 for field in &class.fields {
                     if let Some(init) = &field.init {
-                        collect_closures_from_expr(init, &mut closure_funcs);
+                        collect_closures_from_expr(init, &mut module_closures);
                     }
                 }
                 for field in &class.static_fields {
                     if let Some(init) = &field.init {
-                        collect_closures_from_expr(init, &mut closure_funcs);
+                        collect_closures_from_expr(init, &mut module_closures);
                     }
                 }
             }
+            for (fid, params, body, caps, mut_caps) in module_closures {
+                closure_funcs.push((fid, params, body, caps, mut_caps, mod_idx));
+            }
         }
 
-        // Register async functions as additional bridge imports
-        // Must happen before user function registration to get correct import indices
+        // Register async functions as additional bridge imports (Phase 1: assign import indices).
+        // JS code generation is deferred to Phase 2 after per-module func_maps are built.
         let mut async_import_idx = self.num_imports;
-        for (_, module) in modules {
+        let mut per_module_async: Vec<Vec<(FuncId, u32)>> = Vec::new();
+        for (_, module) in modules.iter() {
+            let mut module_async_entries = Vec::new();
             for func in &module.functions {
                 if func.is_async {
                     let param_count = func.params.len();
@@ -1160,15 +1179,13 @@ impl WasmModuleEmitter {
                     let results = vec![ValType::I64]; // returns promise handle
                     let type_idx = self.get_type_idx(params, results);
                     let _ = type_idx;
-                    self.func_map.insert(func.id, async_import_idx);
+                    module_async_entries.push((func.id, async_import_idx));
                     self.func_name_map.insert(func.name.clone(), async_import_idx);
                     self.async_func_imports.push((func.name.clone(), async_import_idx, param_count));
-                    // Generate JS for this async function
-                    let js_code = self.emit_js_async_function(func);
-                    self.async_js_code.push(js_code);
                     async_import_idx += 1;
                 }
             }
+            per_module_async.push(module_async_entries);
         }
         self.num_imports = async_import_idx;
 
@@ -1204,8 +1221,15 @@ impl WasmModuleEmitter {
         let init_strings_type = t_void;
         user_func_idx += 1;
 
-        // Register user functions from all modules (skip async ones)
-        for (_, module) in modules {
+        // Register user functions from all modules (skip async ones).
+        // FuncId is only unique within a module, so we build per-module func_maps
+        // to avoid cross-module FuncId collisions (e.g., module A's FuncId(2) != module B's FuncId(2)).
+        for (mod_idx, (_, module)) in modules.iter().enumerate() {
+            let mut module_fm: BTreeMap<FuncId, u32> = BTreeMap::new();
+            // Include async function mappings for this module
+            for &(fid, idx) in &per_module_async[mod_idx] {
+                module_fm.insert(fid, idx);
+            }
             for func in &module.functions {
                 if func.is_async {
                     continue; // already registered as bridge import
@@ -1217,13 +1241,19 @@ impl WasmModuleEmitter {
                 } else {
                     vec![]
                 };
+                let is_void = results.is_empty();
                 let type_idx = self.get_type_idx(params, results);
                 let _ = type_idx;
-                self.func_map.insert(func.id, user_func_idx);
-                // Build func_name_map for ExternFuncRef resolution
+                module_fm.insert(func.id, user_func_idx);
+                if is_void {
+                    self.void_funcs.insert(user_func_idx);
+                }
+                self.func_param_counts.insert(user_func_idx, param_count);
+                // Build func_name_map for ExternFuncRef resolution (name is globally unique)
                 self.func_name_map.insert(func.name.clone(), user_func_idx);
                 user_func_idx += 1;
             }
+            self.module_func_maps.push(module_fm);
         }
 
         // Register class constructors, methods, and static methods
@@ -1300,9 +1330,9 @@ impl WasmModuleEmitter {
             }
         }
 
-        // Register closure functions
-        for (func_id, params, body, captures, mutable_captures) in &closure_funcs {
-            if !self.func_map.contains_key(func_id) {
+        // Register closure functions into their per-module func_maps
+        for (func_id, params, body, captures, mutable_captures, mod_idx) in &closure_funcs {
+            if !self.module_func_maps[*mod_idx].contains_key(func_id) {
                 // Closure params: captures first (as f64), then declared params
                 let total_params = captures.len() + mutable_captures.len() + params.len();
                 let wasm_params = vec![ValType::I64; total_params];
@@ -1313,8 +1343,20 @@ impl WasmModuleEmitter {
                 };
                 let type_idx = self.get_type_idx(wasm_params, results);
                 let _ = type_idx;
-                self.func_map.insert(*func_id, user_func_idx);
+                self.module_func_maps[*mod_idx].insert(*func_id, user_func_idx);
                 user_func_idx += 1;
+            }
+        }
+
+        // Async function JS generation (Phase 2): now that per-module func_maps are complete,
+        // generate the JS code for async functions with correct FuncRef resolution.
+        for (mod_idx, (_, module)) in modules.iter().enumerate() {
+            self.func_map = self.module_func_maps[mod_idx].clone();
+            for func in &module.functions {
+                if func.is_async {
+                    let js_code = self.emit_js_async_function(func);
+                    self.async_js_code.push(js_code);
+                }
             }
         }
 
@@ -1433,9 +1475,9 @@ impl WasmModuleEmitter {
             }
         }
         // Closure functions
-        for (func_id, params, body, captures, mutable_captures) in &closure_funcs {
-            if self.func_map.contains_key(func_id) {
-                let total_params = captures.len() + mutable_captures.len() + params.len();
+        for (func_id, _params, _body, captures, mutable_captures, mod_idx) in &closure_funcs {
+            if self.module_func_maps[*mod_idx].contains_key(func_id) {
+                let total_params = captures.len() + mutable_captures.len() + _params.len();
                 let wasm_params = vec![ValType::I64; total_params];
                 let results = vec![ValType::I64]; // closures always return f64
                 let type_idx = self.get_type_idx(wasm_params, results);
@@ -1450,9 +1492,9 @@ impl WasmModuleEmitter {
         // Must come after Function section but before Memory section (WASM spec ordering)
         let all_func_indices: Vec<u32> = {
             let mut indices = vec![init_strings_idx]; // placeholder at index 0
-            for (_, module) in modules {
+            for (mod_idx, (_, module)) in modules.iter().enumerate() {
                 for func in &module.functions {
-                    if let Some(&idx) = self.func_map.get(&func.id) {
+                    if let Some(&idx) = self.module_func_maps[mod_idx].get(&func.id) {
                         indices.push(idx);
                     }
                 }
@@ -1477,8 +1519,8 @@ impl WasmModuleEmitter {
                     }
                 }
             }
-            for (func_id, _, _, _, _) in &closure_funcs {
-                if let Some(&idx) = self.func_map.get(func_id) {
+            for (func_id, _, _, _, _, mod_idx) in &closure_funcs {
+                if let Some(&idx) = self.module_func_maps[*mod_idx].get(func_id) {
                     if !indices.contains(&idx) {
                         indices.push(idx);
                     }
@@ -1576,8 +1618,10 @@ impl WasmModuleEmitter {
             code_section.function(&func);
         }
 
-        // User functions (skip async — they are JS bridge imports)
-        for (_, module) in modules {
+        // User functions (skip async — they are JS bridge imports).
+        // Swap in the per-module func_map so FuncRef(id) resolves correctly within each module.
+        for (mod_idx, (_, module)) in modules.iter().enumerate() {
+            self.func_map = self.module_func_maps[mod_idx].clone();
             for hir_func in &module.functions {
                 if hir_func.is_async { continue; }
                 let func = self.compile_function(hir_func);
@@ -1586,7 +1630,8 @@ impl WasmModuleEmitter {
         }
 
         // Class constructors, methods, static methods, getters, setters
-        for (_, module) in modules {
+        for (mod_idx, (_, module)) in modules.iter().enumerate() {
+            self.func_map = self.module_func_maps[mod_idx].clone();
             for class in &module.classes {
                 if let Some(ctor) = &class.constructor {
                     let func = self.compile_class_constructor(class, ctor);
@@ -1611,9 +1656,10 @@ impl WasmModuleEmitter {
             }
         }
 
-        // Closure functions
-        for (func_id, params, body, captures, mutable_captures) in &closure_funcs {
-            if let Some(&_) = self.func_map.get(func_id) {
+        // Closure functions — swap in the parent module's func_map for each closure
+        for (func_id, params, body, captures, mutable_captures, mod_idx) in &closure_funcs {
+            if self.module_func_maps[*mod_idx].contains_key(func_id) {
+                self.func_map = self.module_func_maps[*mod_idx].clone();
                 let func = self.compile_closure(params, body, captures, mutable_captures);
                 code_section.function(&func);
             }
@@ -1637,8 +1683,9 @@ impl WasmModuleEmitter {
             // Call __init_strings first
             func.instruction(&Instruction::Call(init_strings_idx));
 
-            // Initialize globals
-            for (_, module) in modules {
+            // Initialize globals — swap in per-module func_map for correct FuncRef resolution
+            for (mod_idx, (_, module)) in modules.iter().enumerate() {
+                self.func_map = self.module_func_maps[mod_idx].clone();
                 for global in &module.globals {
                     if let Some(init) = &global.init {
                         let mut ctx = FuncEmitCtx::new(self, &init_locals, start_temp_local, start_temp_i32);
@@ -1656,7 +1703,8 @@ impl WasmModuleEmitter {
             }
 
             // Register class methods with the bridge and set up inheritance
-            for (_, module) in modules {
+            for (mod_idx, (_, module)) in modules.iter().enumerate() {
+                self.func_map = self.module_func_maps[mod_idx].clone();
                 for class in &module.classes {
                     let class_name_id = self.string_map.get(class.name.as_str()).copied().unwrap_or(0);
                     let class_bits = (STRING_TAG << 48) | (class_name_id as u64);
@@ -1738,8 +1786,9 @@ impl WasmModuleEmitter {
                 }
             }
 
-            // Execute init statements from all modules
-            for (_, module) in modules {
+            // Execute init statements from all modules — swap in per-module func_map
+            for (mod_idx, (_, module)) in modules.iter().enumerate() {
+                self.func_map = self.module_func_maps[mod_idx].clone();
                 let mut ctx = FuncEmitCtx::new(self, &init_locals, start_temp_local, start_temp_i32);
                 for stmt in &module.init {
                     ctx.emit_stmt(&mut func, stmt, false);
@@ -3905,11 +3954,22 @@ impl<'a> FuncEmitCtx<'a> {
                 for arg in args {
                     self.emit_expr(func, arg);
                 }
-                // Call the function
+                // Call the function — resolve target and pad missing optional args with undefined
                 match callee.as_ref() {
                     Expr::FuncRef(id) => {
                         if let Some(&idx) = self.emitter.func_map.get(id) {
+                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
+                            if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
+                                for _ in args.len()..expected {
+                                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                            }
                             func.instruction(&Instruction::Call(idx));
+                            // Void functions don't push a return value; push undefined
+                            // so the caller always has a value on the stack.
+                            if self.emitter.void_funcs.contains(&idx) {
+                                func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                            }
                         } else {
                             // Unknown function — push undefined
                             for _ in args {
@@ -3921,10 +3981,16 @@ impl<'a> FuncEmitCtx<'a> {
                     Expr::ExternFuncRef { name, return_type, .. } => {
                         // Cross-module or FFI function call — look up by name
                         if let Some(&idx) = self.emitter.func_name_map.get(name) {
+                            // Pad missing arguments with TAG_UNDEFINED (for optional params)
+                            if let Some(&expected) = self.emitter.func_param_counts.get(&idx) {
+                                for _ in args.len()..expected {
+                                    func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
+                                }
+                            }
                             func.instruction(&Instruction::Call(idx));
-                            // Void FFI functions don't push a return value, but call
+                            // Void functions don't push a return value, but call
                             // expressions always need a value on the stack. Push undefined.
-                            if matches!(return_type, perry_types::Type::Void) {
+                            if matches!(return_type, perry_types::Type::Void) || self.emitter.void_funcs.contains(&idx) {
                                 func.instruction(&Instruction::I64Const(TAG_UNDEFINED as i64));
                             }
                         } else {
