@@ -144,7 +144,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - fix: `Boolean()` constructor — added `BooleanCoerce` HIR/codegen handling via `js_is_truthy`; previously returned `undefined` for all inputs
 - fix: `!!string` always false — `Expr::String` and `Expr::Unary(Not)` now route through `js_is_truthy` instead of float comparison which treated NaN-boxed strings as zero
 - fix: `String(x)` on string locals/params returned "NaN" — `StringCoerce` NaN-boxed I64 string pointers with POINTER_TAG instead of STRING_TAG, so `js_string_coerce` didn't recognize them as strings
+- fix: `.filter(Boolean)` / `.map(Number)` / `.map(String)` — desugar bare built-in identifiers to synthetic closures in all 4 HIR lowering paths (local vars, imported vars, inline array literals, generic expressions)
 - fix: `analyze_module_var_types` set `is_union=true` for Unknown/Any even when concrete type (array, closure, map, set, buffer) was known — caused I64/F64 type mismatch corrupting pointers on Android ARM (FP flush-to-zero)
+- fix: null pointer guards in closure capture getters (`js_closure_get_capture_f64/ptr`) and `Promise.all` fulfill/reject handlers — prevents SIGSEGV when closures are corrupted before async callbacks fire
 
 ### v0.4.41
 - feat: `perry publish` passes `features` from perry.toml project config to build manifest — enables feature-gated builds on the server side
