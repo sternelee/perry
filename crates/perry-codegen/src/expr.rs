@@ -16242,7 +16242,14 @@ pub(crate) fn compile_expr(
                         let str_call = builder.ins().call(get_str_ptr_ref, &[idx_f64]);
                         let key_ptr = builder.inst_results(str_call)[0];
 
-                        let val_f64 = ensure_f64(builder, val);
+                        // NaN-box I64 pointers (closures, objects) with POINTER_TAG
+                        // so js_native_call_method can identify them as callable
+                        let val_type = builder.func.dfg.value_type(val);
+                        let val_f64 = if val_type == types::I64 {
+                            inline_nanbox_pointer(builder, val)
+                        } else {
+                            ensure_f64(builder, val)
+                        };
                         let set_func = extern_funcs.get("js_object_set_field_by_name")
                             .ok_or_else(|| anyhow!("js_object_set_field_by_name not declared"))?;
                         let func_ref = module.declare_func_in_func(*set_func, builder.func);
