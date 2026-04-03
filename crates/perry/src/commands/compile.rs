@@ -3681,12 +3681,41 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
     let target = args.target.clone();
 
-    // Pre-compute feature flags (moved out of parallel loop to avoid ctx mutation)
-    let compiled_features: Vec<String> = if let Some(ref features_str) = args.features {
-        let mut features: Vec<String> = features_str.split(',')
-            .map(|f| f.trim().to_string())
-            .filter(|f| !f.is_empty())
-            .collect();
+    // Pre-compute feature flags: CLI --features merged with perry.toml [project].features
+    let compiled_features: Vec<String> = {
+        let mut features: Vec<String> = if let Some(ref features_str) = args.features {
+            features_str.split(',')
+                .map(|f| f.trim().to_string())
+                .filter(|f| !f.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if let Ok(input_path) = args.input.canonicalize() {
+            let mut dir = input_path.clone();
+            for _ in 0..5 {
+                dir = match dir.parent() { Some(p) => p.to_path_buf(), None => break };
+                let toml_path = dir.join("perry.toml");
+                if toml_path.exists() {
+                    if let Ok(data) = fs::read_to_string(&toml_path) {
+                        if let Ok(doc) = data.parse::<toml::Table>() {
+                            if let Some(proj) = doc.get("project").and_then(|p| p.as_table()) {
+                                if let Some(arr) = proj.get("features").and_then(|f| f.as_array()) {
+                                    for v in arr {
+                                        if let Some(s) = v.as_str() {
+                                            if !features.contains(&s.to_string()) {
+                                                features.push(s.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
         let is_mobile = matches!(target.as_deref(), Some("ios") | Some("ios-simulator") | Some("android") | Some("watchos") | Some("watchos-simulator") | Some("tvos") | Some("tvos-simulator"));
         if is_mobile {
             features.retain(|f| f != "plugins");
@@ -3695,8 +3724,6 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             ctx.needs_plugins = true;
         }
         features
-    } else {
-        Vec::new()
     };
 
     // Pre-compute native library FFI functions
