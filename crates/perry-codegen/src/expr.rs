@@ -15877,7 +15877,7 @@ pub(crate) fn compile_expr(
                     builder.switch_to_block(integer_key_block);
                     builder.seal_block(integer_key_block);
                     let obj_is_known_array = if let Expr::LocalGet(id) = object.as_ref() {
-                        locals.get(id).map(|i| i.is_array || i.is_buffer || i.is_mixed_array).unwrap_or(false)
+                        locals.get(id).map(|i| i.is_array || i.is_buffer || i.is_mixed_array || i.is_union).unwrap_or(false)
                     } else {
                         !matches!(object.as_ref(), Expr::Object(_) | Expr::ObjectSpread { .. })
                     };
@@ -15919,7 +15919,7 @@ pub(crate) fn compile_expr(
                     // In JS, all object keys are strings — obj[0] is equivalent to obj["0"].
                     // Only treat as array indexing if we KNOW the object is an array.
                     let is_known_array = if let Expr::LocalGet(id) = object.as_ref() {
-                        locals.get(id).map(|i| i.is_array || i.is_buffer || i.is_mixed_array).unwrap_or(false)
+                        locals.get(id).map(|i| i.is_array || i.is_buffer || i.is_mixed_array || i.is_union).unwrap_or(false)
                     } else {
                         // For non-local expressions (PropertyGet, Call, etc.), assume array
                         // since most indexed accesses on non-locals are array element reads
