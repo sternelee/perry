@@ -792,14 +792,14 @@ pub extern "C" fn js_bigint_cmp(a: *const BigIntHeader, b: *const BigIntHeader) 
 /// Check if two BigInts are equal
 #[no_mangle]
 #[inline(never)]
-pub extern "C" fn js_bigint_eq(a: *const BigIntHeader, b: *const BigIntHeader) -> bool {
+pub extern "C" fn js_bigint_eq(a: *const BigIntHeader, b: *const BigIntHeader) -> i32 {
     let a = clean_bigint_ptr(a);
     let b = clean_bigint_ptr(b);
     if a.is_null() || b.is_null() {
-        return a == b; // both null = equal, one null = not equal
+        return if a == b { 1 } else { 0 }; // both null = equal, one null = not equal
     }
     unsafe {
-        (*a).limbs == (*b).limbs
+        if (*a).limbs == (*b).limbs { 1 } else { 0 }
     }
 }
 

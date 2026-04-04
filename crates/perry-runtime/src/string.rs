@@ -439,26 +439,26 @@ pub extern "C" fn js_string_compare(a: *const StringHeader, b: *const StringHead
 
 /// Compare two strings for equality
 #[no_mangle]
-pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeader) -> bool {
+pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeader) -> i32 {
     // Pointer identity fast path
     if std::ptr::eq(a, b) {
-        return true;
+        return 1;
     }
 
     let a_valid = is_valid_string_ptr(a);
     let b_valid = is_valid_string_ptr(b);
     if !a_valid && !b_valid {
-        return true;
+        return 1;
     }
     if !a_valid || !b_valid {
-        return false;
+        return 0;
     }
 
     let len_a = unsafe { (*a).length };
     let len_b = unsafe { (*b).length };
 
     if len_a != len_b {
-        return false;
+        return 0;
     }
 
     unsafe {
@@ -466,7 +466,7 @@ pub extern "C" fn js_string_equals(a: *const StringHeader, b: *const StringHeade
         let data_b = string_data(b);
         let slice_a = std::slice::from_raw_parts(data_a, len_a as usize);
         let slice_b = std::slice::from_raw_parts(data_b, len_b as usize);
-        slice_a == slice_b
+        if slice_a == slice_b { 1 } else { 0 }
     }
 }
 

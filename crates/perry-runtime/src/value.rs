@@ -965,15 +965,14 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
     if a_val.is_bigint() && b_val.is_bigint() {
         let a_ptr = a_val.as_bigint_ptr();
         let b_ptr = b_val.as_bigint_ptr();
-        let result = crate::bigint::js_bigint_eq(a_ptr, b_ptr);
-        return if result { 1 } else { 0 };
+        return crate::bigint::js_bigint_eq(a_ptr, b_ptr);
     }
 
     // String comparison: compare by content, not by pointer
     if a_val.is_string() && b_val.is_string() {
         let a_str = a_val.as_string_ptr();
         let b_str = b_val.as_string_ptr();
-        return if crate::string::js_string_equals(a_str, b_str) { 1 } else { 0 };
+        return crate::string::js_string_equals(a_str, b_str);
     }
 
     // Helper: check if bits represent a plain IEEE 754 number (not a NaN-boxed tagged value).
@@ -1181,7 +1180,7 @@ pub extern "C" fn js_dynamic_string_equals(a: f64, b: f64) -> i32 {
         return 0;
     }
 
-    if crate::string::js_string_equals(a_ptr, b_ptr) {
+    if crate::string::js_string_equals(a_ptr, b_ptr) != 0 {
         1
     } else {
         0

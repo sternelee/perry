@@ -968,7 +968,7 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
             let stored_key_val = crate::array::js_array_get(keys, i as u32);
             if stored_key_val.is_string() {
                 let stored_key = stored_key_val.as_string_ptr();
-                if crate::string::js_string_equals(key_str, stored_key) {
+                if crate::string::js_string_equals(key_str, stored_key) != 0 {
                     // Check if the field was deleted (set to undefined by delete operator)
                     let field_val = js_object_get_field(obj_ptr, i as u32);
                     if field_val.is_undefined() {
@@ -1120,7 +1120,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             let key_val = crate::array::js_array_get(keys, i as u32);
             if key_val.is_string() {
                 let stored_key = key_val.as_string_ptr();
-                if crate::string::js_string_equals(key, stored_key) {
+                if crate::string::js_string_equals(key, stored_key) != 0 {
                     // Cache this lookup for next time
                     FIELD_CACHE.with(|c| {
                         let cache = &mut *c.get();
@@ -1266,7 +1266,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
                 let stored_key = key_val.as_string_ptr();
-                if crate::string::js_string_equals(key, stored_key) {
+                if crate::string::js_string_equals(key, stored_key) != 0 {
                     // Found it - update the field
                     if i < alloc_limit {
                         js_object_set_field(obj, i as u32, JSValue::from_bits(value.to_bits()));
@@ -1365,7 +1365,7 @@ pub extern "C" fn js_object_delete_field(obj: *mut ObjectHeader, key: *const cra
             // Keys are stored as string pointers (NaN-boxed)
             if key_val.is_string() {
                 let stored_key = key_val.as_string_ptr();
-                if crate::string::js_string_equals(key, stored_key) {
+                if crate::string::js_string_equals(key, stored_key) != 0 {
                     // Found it - set the field to undefined
                     js_object_set_field(obj, i as u32, JSValue::undefined());
                     return 1;
@@ -1443,7 +1443,7 @@ pub extern "C" fn js_object_rest(src: *const ObjectHeader, exclude_keys: *const 
                 let ex_val = crate::array::js_array_get(exclude_keys, j as u32);
                 if ex_val.is_string() {
                     let ex_str = ex_val.as_string_ptr();
-                    if crate::string::js_string_equals(key_str, ex_str) {
+                    if crate::string::js_string_equals(key_str, ex_str) != 0 {
                         excluded = true;
                         break;
                     }
@@ -1699,7 +1699,7 @@ pub unsafe extern "C" fn js_native_call_method(
                             let key_val = crate::array::js_array_get(keys, i as u32);
                             if key_val.is_string() {
                                 let stored_key = key_val.as_string_ptr();
-                                if crate::string::js_string_equals(method_key, stored_key) {
+                                if crate::string::js_string_equals(method_key, stored_key) != 0 {
                                     let field_val = js_object_get_field(obj as *mut _, i as u32);
                                     if field_val.is_pointer() {
                                         return crate::closure::js_native_call_value(
@@ -1827,7 +1827,7 @@ pub unsafe extern "C" fn js_native_call_method(
                             let key_val = crate::array::js_array_get(keys, i as u32);
                             if key_val.is_string() {
                                 let stored_key = key_val.as_string_ptr();
-                                if crate::string::js_string_equals(method_key, stored_key) {
+                                if crate::string::js_string_equals(method_key, stored_key) != 0 {
                                     let field_val = js_object_get_field(obj as *mut _, i as u32);
                                     if field_val.is_pointer() {
                                         return crate::closure::js_native_call_value(
@@ -1989,7 +1989,7 @@ pub unsafe extern "C" fn js_native_call_method(
                 let key_val = crate::array::js_array_get(keys, i as u32);
                 if key_val.is_string() {
                     let stored_key = key_val.as_string_ptr();
-                    if crate::string::js_string_equals(method_key, stored_key) {
+                    if crate::string::js_string_equals(method_key, stored_key) != 0 {
                         // Found the method - get it and call it if it's a closure
                         let field_val = js_object_get_field(obj as *mut _, i as u32);
                         if field_val.is_pointer() {
@@ -2487,7 +2487,7 @@ unsafe fn dispatch_bigint_binary_method(
         // Comparison → returns boolean/number
         "eq" => {
             let result = crate::bigint::js_bigint_eq(a, b);
-            return f64::from_bits(JSValue::bool(result).bits());
+            return f64::from_bits(JSValue::bool(result != 0).bits());
         }
         "lt" => {
             let result = crate::bigint::js_bigint_cmp(a, b);
