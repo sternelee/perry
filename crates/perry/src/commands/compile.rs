@@ -271,6 +271,10 @@ fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<PathBuf> {
         Some("windows")
     } else if lib_name.contains("_ios") {
         Some("ios")
+    } else if lib_name.contains("_tvos") {
+        Some("tvos")
+    } else if lib_name.contains("_watchos") {
+        Some("watchos")
     } else {
         None
     };
@@ -4127,7 +4131,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let is_cross_windows = is_windows && !cfg!(target_os = "windows");
     let is_cross_ios = is_ios && !cfg!(target_os = "macos");
     let is_cross_macos = matches!(target.as_deref(), Some("macos")) && !cfg!(target_os = "macos");
-    // Note: is_watchos and is_tvos were already defined earlier near jsruntime_lib
+    // Note: is_watchos and is_tvos are defined below (near jsruntime_lib); is_cross_tvos
+    // is set after them so this block keeps all is_cross_* bindings together.
 
     // For dylib output, skip runtime/stdlib linking — symbols resolve from host at dlopen time
     if is_dylib {
@@ -4191,6 +4196,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     let stdlib_lib = find_stdlib_library(target.as_deref());
     let is_watchos = matches!(target.as_deref(), Some("watchos") | Some("watchos-simulator"));
     let is_tvos = matches!(target.as_deref(), Some("tvos") | Some("tvos-simulator"));
+    // Cross-compile tvOS from Linux — mirrors is_cross_ios / is_cross_macos.
+    // Without this the is_tvos branch below would unconditionally call `xcrun`,
+    // which only exists on macOS with Xcode.
+    let is_cross_tvos = is_tvos && !cfg!(target_os = "macos");
     let jsruntime_lib = if !is_ios && !is_android && !is_watchos && !is_tvos && (ctx.needs_js_runtime || args.enable_js_runtime) {
         match find_jsruntime_library(target.as_deref()) {
             Some(lib) => {
@@ -4312,6 +4321,42 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
          .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
          // Swift compatibility static archives in the toolchain
          .arg("-L").arg(format!("{}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/{}", developer_dir, sdk));
+        c
+    } else if is_tvos && is_cross_tvos {
+        // Cross-compile tvOS from Linux using ld64.lld + Apple SDK sysroot.
+        // The Linux builder worker ships a sysroot at /opt/apple-sysroot/tvos
+        // (symlinked to the iOS sysroot — tvOS headers/libs are compatible with
+        // the iOS SDK on aarch64 for our usage).
+        let ld64 = find_llvm_tool("ld64.lld")
+            .or_else(|| {
+                // Check common paths
+                for p in &["/usr/local/bin/ld64.lld", "/usr/bin/ld64.lld-18", "/usr/bin/ld64.lld"] {
+                    if std::path::Path::new(p).exists() { return Some(PathBuf::from(p)); }
+                }
+                None
+            })
+            .unwrap_or_else(|| {
+                eprintln!("Warning: ld64.lld not found for tvOS cross-compilation. Install lld.");
+                PathBuf::from("ld64.lld")
+            });
+        let sysroot = std::env::var("PERRY_TVOS_SYSROOT")
+            .unwrap_or_else(|_| "/opt/apple-sysroot/tvos".to_string());
+        eprintln!("[cross-tvos] Using ld64.lld: {}", ld64.display());
+        eprintln!("[cross-tvos] Sysroot: {sysroot}");
+
+        // tvOS 17.0 minimum matches the non-cross branch's arm64-apple-tvos17.0 triple.
+        // SDK version 26.0.0 matches the iOS cross branch (same Apple SDK release train).
+        // Simulator (tvos-simulator) is not supported in the cross-compile path —
+        // ld64.lld on Linux targets the device (arm64) only, matching is_cross_ios.
+        let mut c = Command::new(&ld64);
+        c.arg("-arch").arg("arm64")
+         .arg("-platform_version").arg("tvos").arg("17.0.0").arg("26.0.0")
+         .arg("-syslibroot").arg(&sysroot)
+         .arg("-L").arg(format!("{}/usr/lib", sysroot))
+         .arg("-L").arg(format!("{}/usr/lib/swift", sysroot))
+         .arg("-F").arg(format!("{}/System/Library/Frameworks", sysroot))
+         .arg("-lSystem")
+         .arg("-dead_strip");
         c
     } else if is_tvos {
         let sdk = if target.as_deref() == Some("tvos-simulator") { "appletvsimulator" } else { "appletvos" };
@@ -4455,7 +4500,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     if !is_windows {
         if is_android || is_linux {
             cmd.arg("-Wl,--gc-sections");
-        } else if is_cross_ios || is_cross_macos {
+        } else if is_cross_ios || is_cross_macos || is_cross_tvos {
             // ld64.lld called directly — no -Wl, prefix needed
             cmd.arg("-dead_strip");
         } else if is_watchos {
