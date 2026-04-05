@@ -79,6 +79,13 @@ pub fn handle_exists(handle: Handle) -> bool {
     HANDLES.contains_key(&handle)
 }
 
+/// Diagnostic: total number of registered handles.
+/// Useful for detecting handle leaks in long-running services.
+#[no_mangle]
+pub extern "C" fn js_handle_count() -> i64 {
+    HANDLES.len() as i64
+}
+
 /// Clone a handle's value if it implements Clone
 pub fn clone_handle<T: 'static + Send + Sync + Clone>(handle: Handle) -> Option<Handle> {
     HANDLES.get(&handle).and_then(|entry| {

@@ -18,6 +18,17 @@ lazy_static::lazy_static! {
     static ref NEXT_RESPONSE_ID: Mutex<usize> = Mutex::new(1);
     static ref STREAM_HANDLES: Mutex<HashMap<usize, StreamState>> = Mutex::new(HashMap::new());
     static ref NEXT_STREAM_ID: Mutex<usize> = Mutex::new(1);
+
+    /// Shared HTTP client — reuses connection pool, DNS cache, and TLS session cache
+    /// across all fetch() calls. Without this, each fetch allocates a fresh
+    /// reqwest::Client (~250KB of state per request) and the memory never gets
+    /// reused, causing unbounded RSS growth in long-running services.
+    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 }
 
 struct StreamState {
@@ -48,6 +59,13 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())
 }
 
+/// Diagnostic: return the number of FETCH_RESPONSES entries.
+/// Useful for detecting response handle leaks in long-running services.
+#[no_mangle]
+pub extern "C" fn js_fetch_response_count() -> i64 {
+    FETCH_RESPONSES.lock().map(|g| g.len() as i64).unwrap_or(-1)
+}
+
 /// Perform a GET request
 /// fetch(url) -> Promise<Response>
 #[no_mangle]
@@ -67,8 +85,7 @@ pub unsafe extern "C" fn js_fetch_get(url_ptr: *const StringHeader) -> *mut perr
     };
 
     spawn(async move {
-        let client = reqwest::Client::new();
-        match client.get(&url).send().await {
+        match HTTP_CLIENT.get(&url).send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 let status_text = response.status().canonical_reason().unwrap_or("").to_string();
@@ -135,7 +152,7 @@ pub unsafe extern "C" fn js_fetch_get_with_auth(
     let auth_header = string_from_header(auth_header_ptr).unwrap_or_default();
 
     spawn(async move {
-        let client = reqwest::Client::new();
+        let client = HTTP_CLIENT.clone();
         let mut request = client.get(&url);
         if !auth_header.is_empty() {
             request = request.header("Authorization", &auth_header);
@@ -207,7 +224,7 @@ pub unsafe extern "C" fn js_fetch_post_with_auth(
     let body = string_from_header(body_ptr).unwrap_or_default();
 
     spawn(async move {
-        let client = reqwest::Client::new();
+        let client = HTTP_CLIENT.clone();
         let mut request = client.post(&url)
             .header("Content-Type", "application/json");
         if !auth_header.is_empty() {
@@ -281,7 +298,7 @@ pub unsafe extern "C" fn js_fetch_post(
     let content_type = string_from_header(content_type_ptr).unwrap_or_else(|| "application/json".to_string());
 
     spawn(async move {
-        let client = reqwest::Client::new();
+        let client = HTTP_CLIENT.clone();
         match client
             .post(&url)
             .header("Content-Type", &content_type)
@@ -363,7 +380,7 @@ pub unsafe extern "C" fn js_fetch_with_options(
     let custom_headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
 
     spawn(async move {
-        let client = reqwest::Client::new();
+        let client = HTTP_CLIENT.clone();
         let mut request = match method.to_uppercase().as_str() {
             "POST" => client.post(&url),
             "PUT" => client.put(&url),
@@ -472,10 +489,13 @@ pub unsafe extern "C" fn js_fetch_response_text(handle: i64) -> *mut perry_runti
     let promise_ptr = promise as usize;
     let response_id = handle as usize;
 
+    // Take (not clone) the body — consumes the FETCH_RESPONSES entry so it
+    // doesn't accumulate forever. JS fetch() API semantics: each response body
+    // is readable once.
     let body = {
-        let guard = FETCH_RESPONSES.lock().unwrap();
-        match guard.get(&response_id) {
-            Some(resp) => resp.body.clone(),
+        let mut guard = FETCH_RESPONSES.lock().unwrap();
+        match guard.remove(&response_id) {
+            Some(resp) => resp.body,
             None => {
                 let err_msg = "Invalid response handle";
                 let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
@@ -546,10 +566,11 @@ pub unsafe extern "C" fn js_fetch_response_json(handle: i64) -> *mut perry_runti
     let promise_ptr = promise as usize;
     let response_id = handle as usize;
 
+    // Take (not clone) the body — consumes the FETCH_RESPONSES entry.
     let body = {
-        let guard = FETCH_RESPONSES.lock().unwrap();
-        match guard.get(&response_id) {
-            Some(resp) => resp.body.clone(),
+        let mut guard = FETCH_RESPONSES.lock().unwrap();
+        match guard.remove(&response_id) {
+            Some(resp) => resp.body,
             None => {
                 let err_msg = "Invalid response handle";
                 let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
@@ -597,8 +618,7 @@ pub unsafe extern "C" fn js_fetch_text(url_ptr: *const StringHeader) -> *mut per
     };
 
     spawn(async move {
-        let client = reqwest::Client::new();
-        match client.get(&url).send().await {
+        match HTTP_CLIENT.get(&url).send().await {
             Ok(response) => {
                 match response.text().await {
                     Ok(text) => {
@@ -649,7 +669,7 @@ pub unsafe extern "C" fn js_fetch_stream_start(
     });
     let sid = stream_id;
     spawn(async move {
-        let client = reqwest::Client::new();
+        let client = HTTP_CLIENT.clone();
         let mut request = match method.to_uppercase().as_str() {
             "POST" => client.post(&url), "PUT" => client.put(&url),
             "PATCH" => client.patch(&url), _ => client.get(&url),

@@ -94,7 +94,11 @@ const GC_THRESHOLD_BYTES: usize = 64 * 1024 * 1024; // 64MB
 /// long-running services where arena usage stays flat (free list hits) but
 /// malloc tracking accumulates. Previously GC was only triggered on arena block
 /// allocation — services that never grew the arena never collected.
-const GC_MALLOC_COUNT_THRESHOLD: usize = 100_000;
+///
+/// Tuned for backend services doing ~100-1000 RPC calls/cycle: triggers GC
+/// every few cycles so memory stays bounded and glibc malloc_trim returns
+/// pages to the OS promptly.
+const GC_MALLOC_COUNT_THRESHOLD: usize = 10_000;
 
 /// Allocate memory via malloc with GcHeader prepended.
 /// Returns pointer to usable memory AFTER the header.
@@ -280,6 +284,17 @@ fn gc_collect_inner() {
     // sweep() now clears mark bits on surviving objects inline,
     // eliminating 2 redundant heap walks (arena + malloc).
     let freed_bytes = sweep();
+
+    // Return released glibc heap pages to the kernel. Without this, glibc
+    // keeps freed memory in its arena for reuse but never shrinks RSS, so
+    // long-running services show unbounded RSS growth from transient
+    // allocations (HTTP buffers, JSON parsers, etc.) even though the
+    // Perry GC successfully frees the underlying objects.
+    // No-op on non-glibc platforms (macOS, musl).
+    #[cfg(target_env = "gnu")]
+    unsafe {
+        libc::malloc_trim(0);
+    }
 
     let elapsed_us = start.elapsed().as_micros() as u64;
 
