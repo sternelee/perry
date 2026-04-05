@@ -753,6 +753,67 @@ impl crate::codegen::Compiler {
                 }
             }
 
+            // For CLI entry modules, emit an event loop that keeps the process alive
+            // while there are pending setInterval/setTimeout callback timers. Without
+            // this, the process exits as soon as the init statements finish, causing
+            // setInterval/setTimeout-based services to die after the first tick.
+            // Skipped for dylibs (no main() exit) and iOS game loop (runtime manages).
+            if self.is_entry_module && !is_dylib && !ios_game_loop {
+                let current_block = builder.current_block().unwrap();
+                if !is_block_filled(&builder, current_block) {
+                    let interval_tick_id = self.extern_funcs.get("js_interval_timer_tick").copied();
+                    let callback_tick_id = self.extern_funcs.get("js_callback_timer_tick").copied();
+                    let interval_pending_id = self.extern_funcs.get("js_interval_timer_has_pending").copied();
+                    let callback_pending_id = self.extern_funcs.get("js_callback_timer_has_pending").copied();
+                    let sleep_id = self.extern_funcs.get("js_sleep_ms").copied();
+
+                    if let (Some(int_tick), Some(cb_tick), Some(int_pend), Some(cb_pend), Some(sleep_fn)) =
+                        (interval_tick_id, callback_tick_id, interval_pending_id, callback_pending_id, sleep_id)
+                    {
+                        let int_tick_ref = self.module.declare_func_in_func(int_tick, builder.func);
+                        let cb_tick_ref = self.module.declare_func_in_func(cb_tick, builder.func);
+                        let int_pend_ref = self.module.declare_func_in_func(int_pend, builder.func);
+                        let cb_pend_ref = self.module.declare_func_in_func(cb_pend, builder.func);
+                        let sleep_ref = self.module.declare_func_in_func(sleep_fn, builder.func);
+
+                        let loop_header = builder.create_block();
+                        let loop_body = builder.create_block();
+                        let loop_exit = builder.create_block();
+
+                        // Jump to the loop header to start checking for pending timers
+                        builder.ins().jump(loop_header, &[]);
+
+                        // loop_header: if any pending timers, go to body; else exit
+                        builder.switch_to_block(loop_header);
+                        let int_has = {
+                            let call = builder.ins().call(int_pend_ref, &[]);
+                            builder.inst_results(call)[0]
+                        };
+                        let cb_has = {
+                            let call = builder.ins().call(cb_pend_ref, &[]);
+                            builder.inst_results(call)[0]
+                        };
+                        let any_pending = builder.ins().bor(int_has, cb_has);
+                        let zero_i32 = builder.ins().iconst(types::I32, 0);
+                        let has_work = builder.ins().icmp(IntCC::NotEqual, any_pending, zero_i32);
+                        builder.ins().brif(has_work, loop_body, &[], loop_exit, &[]);
+
+                        // loop_body: tick both timer queues, sleep 10ms, jump back
+                        builder.switch_to_block(loop_body);
+                        builder.seal_block(loop_body);
+                        builder.ins().call(int_tick_ref, &[]);
+                        builder.ins().call(cb_tick_ref, &[]);
+                        let ten_ms = builder.ins().f64const(10.0);
+                        builder.ins().call(sleep_ref, &[ten_ms]);
+                        builder.ins().jump(loop_header, &[]);
+
+                        builder.seal_block(loop_header);
+                        builder.switch_to_block(loop_exit);
+                        builder.seal_block(loop_exit);
+                    }
+                }
+            }
+
             // Return from init function (if not already terminated)
             let current_block = builder.current_block().unwrap();
             if !is_block_filled(&builder, current_block) {

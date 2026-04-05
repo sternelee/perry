@@ -3278,6 +3278,32 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_interval_timer_has_pending"), func_id);
         }
 
+        // js_callback_timer_tick() -> i32
+        // Process expired setTimeout callback timers
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function(
+                "js_callback_timer_tick",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_callback_timer_tick"), func_id);
+        }
+
+        // js_callback_timer_has_pending() -> i32
+        // Check if there are pending setTimeout callback timers
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function(
+                "js_callback_timer_has_pending",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_callback_timer_has_pending"), func_id);
+        }
+
         // ========================================================================
         // worker_threads stdlib functions
         // ========================================================================

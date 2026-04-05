@@ -11952,13 +11952,23 @@ pub(crate) fn compile_expr(
                     for (idx, &arg_val) in arg_vals.iter().enumerate() {
                         let arg_type = builder.func.dfg.value_type(arg_val);
                         let arg_f64 = if arg_type == types::I64 {
-                            // I64 value: could be BigInt pointer or object/array pointer.
+                            // I64 value: could be string, BigInt, or object/array/closure pointer.
                             // Must NaN-box with the correct tag so the callee recognizes the type.
+                            // Without this, strings get POINTER_TAG and stringify as "[object Object]".
+                            let is_string_literal = idx < args.len() && matches!(args[idx], Expr::String(_));
+                            let is_string_local = idx < args.len() && matches!(&args[idx],
+                                Expr::LocalGet(id) if locals.get(id).map(|i| i.is_string).unwrap_or(false));
                             let is_bigint_arg = idx < args.len() && matches!(args[idx],
                                 Expr::BigInt(_) | Expr::BigIntCoerce(_));
                             let is_bigint_local = idx < args.len() && matches!(&args[idx],
                                 Expr::LocalGet(id) if locals.get(id).map(|i| i.is_bigint).unwrap_or(false));
-                            if is_bigint_arg || is_bigint_local {
+                            if is_string_literal || is_string_local {
+                                let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                    .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                let call = builder.ins().call(nanbox_ref, &[arg_val]);
+                                builder.inst_results(call)[0]
+                            } else if is_bigint_arg || is_bigint_local {
                                 let nanbox_func = extern_funcs.get("js_nanbox_bigint")
                                     .ok_or_else(|| anyhow!("js_nanbox_bigint not declared"))?;
                                 let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
