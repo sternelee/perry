@@ -4140,6 +4140,18 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_buffer_from_string"), func_id);
         }
 
+        // js_encoding_tag_from_value(value: f64) -> i32
+        // Parse a JS string value ("utf8"/"hex"/"base64"/...) into the integer
+        // encoding tag expected by js_buffer_from_string / js_buffer_to_string.
+        // Used for non-literal encoding arguments (literals are folded at compile time).
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64)); // NaN-boxed string value
+            sig.returns.push(AbiParam::new(types::I32)); // encoding tag
+            let func_id = self.module.declare_function("js_encoding_tag_from_value", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_encoding_tag_from_value"), func_id);
+        }
+
         // js_buffer_from_array(arr_ptr: i64) -> i64
         {
             let mut sig = self.module.make_signature();

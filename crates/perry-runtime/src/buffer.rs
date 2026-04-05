@@ -116,6 +116,48 @@ pub extern "C" fn js_buffer_from_string(str_ptr: *const StringHeader, encoding: 
     }
 }
 
+/// Map a JS string value (NaN-boxed, pointer-tagged, or raw `*const StringHeader`
+/// bitcast to f64) to the integer encoding tag expected by `js_buffer_from_string`
+/// and `js_buffer_to_string`:
+/// - 0 = utf8 / utf-8 / ascii / latin1 / binary (fallback default)
+/// - 1 = hex
+/// - 2 = base64 / base64url
+///
+/// Used by codegen for non-literal encoding arguments to `Buffer.from(str, enc)`
+/// and `buf.toString(enc)` where the encoding expression cannot be statically
+/// resolved to a string literal.
+#[no_mangle]
+pub extern "C" fn js_encoding_tag_from_value(value: f64) -> i32 {
+    let str_ptr = crate::value::js_get_string_pointer_unified(value) as *const StringHeader;
+    if str_ptr.is_null() || (str_ptr as usize) < 0x1000 {
+        return 0;
+    }
+    unsafe {
+        let len = (*str_ptr).length as usize;
+        // Cap at a reasonable upper bound to avoid pathological reads on garbage inputs.
+        if len == 0 || len > 32 {
+            return 0;
+        }
+        let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let bytes = std::slice::from_raw_parts(data_ptr, len);
+        // Case-insensitive compare against known encoding names.
+        // Avoid heap allocation: compare byte-by-byte with ASCII lowercase fold.
+        fn eq_ascii_lower(a: &[u8], b: &[u8]) -> bool {
+            if a.len() != b.len() { return false; }
+            a.iter().zip(b.iter()).all(|(x, y)| x.to_ascii_lowercase() == *y)
+        }
+        if eq_ascii_lower(bytes, b"hex") {
+            1
+        } else if eq_ascii_lower(bytes, b"base64") || eq_ascii_lower(bytes, b"base64url") {
+            2
+        } else {
+            // utf8, utf-8, ascii, latin1, binary, and unknown all fall through to UTF-8.
+            // Matches the runtime's `_ =>` arm in js_buffer_from_string/js_buffer_to_string.
+            0
+        }
+    }
+}
+
 /// Create a Buffer from a value (auto-detects string vs array vs buffer)
 /// This is used by Buffer.from() which accepts multiple input types.
 #[no_mangle]

@@ -153,6 +153,79 @@ pub(crate) fn detect_state_condition(expr: &Expr) -> Option<&Expr> {
     None
 }
 
+/// Map a known encoding name string to the integer tag expected by
+/// `js_buffer_from_string` / `js_buffer_to_string`:
+/// - 0 = utf8 / utf-8 / ascii / latin1 / binary (all UTF-8 fallback in the runtime)
+/// - 1 = hex
+/// - 2 = base64 / base64url
+///
+/// Returns `None` for unrecognised names so the caller can emit a helpful
+/// compile-time error instead of silently defaulting to UTF-8.
+pub(crate) fn encoding_literal_to_tag(s: &str) -> Option<i64> {
+    // Node.js encoding names are case-insensitive in practice.
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "utf8" | "utf-8" | "ascii" | "latin1" | "binary" => Some(0),
+        "hex" => Some(1),
+        "base64" | "base64url" => Some(2),
+        _ => None,
+    }
+}
+
+/// Compile an encoding argument expression (e.g. the `enc` in `Buffer.from(str, enc)`
+/// or `buf.toString(enc)`) to the i32 encoding tag passed to the runtime.
+///
+/// Historical bug: this was previously `fcvt_to_sint_sat(ensure_f64(enc))`, which
+/// treats the encoding as a JS number and produces garbage when the encoding is a
+/// string (the common case). The encoding argument in JS/TS is a string
+/// (`'utf8' | 'hex' | 'base64' | ...`), NOT a number.
+///
+/// - `Expr::String(lit)` with a known name: folded to an `iconst` at compile time.
+/// - `Expr::String(lit)` with an unknown name: compile-time error (more helpful
+///   than silently defaulting to UTF-8 and producing wrong bytes).
+/// - Non-literal expression: compiled, then passed through the runtime helper
+///   `js_encoding_tag_from_value`, which extracts the underlying string pointer
+///   and parses the encoding name at runtime.
+pub(crate) fn compile_encoding_tag_arg(
+    builder: &mut FunctionBuilder,
+    module: &mut ObjectModule,
+    func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    closure_func_ids: &HashMap<u32, cranelift_module::FuncId>,
+    func_wrapper_ids: &HashMap<u32, cranelift_module::FuncId>,
+    extern_funcs: &HashMap<Cow<'static, str>, cranelift_module::FuncId>,
+    async_func_ids: &HashSet<u32>,
+    classes: &HashMap<String, ClassMeta>,
+    enums: &HashMap<(String, String), EnumMemberValue>,
+    func_param_types: &HashMap<u32, Vec<types::Type>>,
+    func_union_params: &HashMap<u32, Vec<bool>>,
+    func_return_types: &HashMap<u32, types::Type>,
+    func_hir_return_types: &HashMap<u32, perry_types::Type>,
+    func_rest_param_index: &HashMap<u32, usize>,
+    imported_func_param_counts: &HashMap<String, usize>,
+    locals: &HashMap<LocalId, LocalInfo>,
+    enc_expr: &Expr,
+    this_ctx: Option<&ThisContext>,
+) -> Result<Value> {
+    if let Expr::String(s) = enc_expr {
+        return match encoding_literal_to_tag(s) {
+            Some(tag) => Ok(builder.ins().iconst(types::I32, tag)),
+            None => Err(anyhow!(
+                "unknown Buffer encoding \"{}\": expected one of utf8, utf-8, hex, base64, base64url, ascii, latin1, binary",
+                s
+            )),
+        };
+    }
+
+    // Dynamic case: compile the expression, ensure f64, then call the runtime helper.
+    let enc_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, enc_expr, this_ctx)?;
+    let enc_f64 = ensure_f64(builder, enc_val);
+    let helper = extern_funcs.get("js_encoding_tag_from_value")
+        .ok_or_else(|| anyhow!("js_encoding_tag_from_value not declared"))?;
+    let helper_ref = module.declare_func_in_func(*helper, builder.func);
+    let call = builder.ins().call(helper_ref, &[enc_f64]);
+    Ok(builder.inst_results(call)[0])
+}
+
 pub(crate) fn compile_expr(
     builder: &mut FunctionBuilder,
     module: &mut ObjectModule,
@@ -1665,12 +1738,12 @@ pub(crate) fn compile_expr(
                 let result_ptr = builder.inst_results(call)[0];
                 Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr))
             } else {
-                // String or unknown data: call js_buffer_from_string
-                // (original behavior, works for string pointers)
+                // String or unknown data: call js_buffer_from_string.
+                // The encoding argument in JS is a string ('utf8'/'hex'/'base64'/...),
+                // NOT a number. Fold string literals at compile time; fall back to the
+                // runtime helper `js_encoding_tag_from_value` for dynamic expressions.
                 let encoding_val = if let Some(enc_expr) = encoding {
-                    let enc = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, enc_expr, this_ctx)?;
-                    let enc_f64 = ensure_f64(builder, enc);
-                    builder.ins().fcvt_to_sint_sat(types::I32, enc_f64)
+                    compile_encoding_tag_arg(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, enc_expr, this_ctx)?
                 } else {
                     builder.ins().iconst(types::I32, 0)
                 };
@@ -1754,10 +1827,10 @@ pub(crate) fn compile_expr(
         Expr::BufferToString { buffer, encoding } => {
             let buf_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, buffer, this_ctx)?;
             let buf_ptr = ensure_i64(builder, buf_val);
+            // Encoding argument is a string in JS ('utf8'/'hex'/'base64'/...), not a number.
+            // Fold string literals at compile time; use the runtime helper for dynamic values.
             let encoding_val = if let Some(enc_expr) = encoding {
-                let enc = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, enc_expr, this_ctx)?;
-                let enc_f64 = ensure_f64(builder, enc);
-                builder.ins().fcvt_to_sint_sat(types::I32, enc_f64)
+                compile_encoding_tag_arg(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, enc_expr, this_ctx)?
             } else {
                 builder.ins().iconst(types::I32, 0)
             };
@@ -8891,18 +8964,10 @@ pub(crate) fn compile_expr(
 
                                 match property.as_str() {
                                     "toString" => {
-                                        // buf.toString(encoding?)
+                                        // buf.toString(encoding?) — encoding is a string in JS.
+                                        // Fold literals at compile time, use runtime helper otherwise.
                                         let encoding = if !args.is_empty() {
-                                            // Parse encoding string literal
-                                            let enc_val = match &args[0] {
-                                                Expr::String(s) => match s.as_str() {
-                                                    "hex" => 1i64,
-                                                    "base64" => 2i64,
-                                                    _ => 0i64, // utf8
-                                                },
-                                                _ => 0i64,
-                                            };
-                                            builder.ins().iconst(types::I32, enc_val)
+                                            compile_encoding_tag_arg(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?
                                         } else {
                                             builder.ins().iconst(types::I32, 0) // UTF-8 default
                                         };
@@ -10296,16 +10361,9 @@ pub(crate) fn compile_expr(
                                     return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), result_ptr));
                                 }
                                 "toString" => {
+                                    // buf.toString(encoding?) — encoding is a string in JS.
                                     let encoding = if !args.is_empty() {
-                                        let enc_val = match &args[0] {
-                                            Expr::String(s) => match s.as_str() {
-                                                "hex" => 1i64,
-                                                "base64" => 2i64,
-                                                _ => 0i64,
-                                            },
-                                            _ => 0i64,
-                                        };
-                                        builder.ins().iconst(types::I32, enc_val)
+                                        compile_encoding_tag_arg(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?
                                     } else {
                                         builder.ins().iconst(types::I32, 0)
                                     };
