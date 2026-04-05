@@ -192,188 +192,24 @@ pub(crate) fn get_pat_type(pat: &ast::Pat, ctx: &LoweringContext) -> Type {
 /// For object patterns like `{a, b}`, generates:
 ///   let a = param.a;
 ///   let b = param.b;
-/// Returns the statements and defines the variables in the context.
+/// Delegates to the recursive `lower_pattern_binding` helper so that nested
+/// patterns, defaults, rest, and computed keys all work consistently.
 pub(crate) fn generate_param_destructuring_stmts(
     ctx: &mut LoweringContext,
     pat: &ast::Pat,
     param_id: LocalId,
 ) -> Result<Vec<Stmt>> {
-    let mut stmts = Vec::new();
-
     match pat {
-        ast::Pat::Array(arr_pat) => {
-            for (idx, elem) in arr_pat.elems.iter().enumerate() {
-                if let Some(elem_pat) = elem {
-                    match elem_pat {
-                        ast::Pat::Ident(ident) => {
-                            let name = ident.id.sym.to_string();
-                            let id = ctx.define_local(name.clone(), Type::Any);
-                            let index_expr = Expr::IndexGet {
-                                object: Box::new(Expr::LocalGet(param_id)),
-                                index: Box::new(Expr::Number(idx as f64)),
-                            };
-                            stmts.push(Stmt::Let {
-                                id,
-                                name,
-                                ty: Type::Any,
-                                mutable: false,
-                                init: Some(index_expr),
-                            });
-                        }
-                        ast::Pat::Array(nested_arr) => {
-                            // Nested array destructuring: [[a, b], c]
-                            // First extract the nested array element
-                            let nested_id = ctx.fresh_local();
-                            let nested_name = format!("__nested_{}", nested_id);
-                            ctx.locals.push((nested_name.clone(), nested_id, Type::Any));
-                            let index_expr = Expr::IndexGet {
-                                object: Box::new(Expr::LocalGet(param_id)),
-                                index: Box::new(Expr::Number(idx as f64)),
-                            };
-                            stmts.push(Stmt::Let {
-                                id: nested_id,
-                                name: nested_name,
-                                ty: Type::Any,
-                                mutable: false,
-                                init: Some(index_expr),
-                            });
-                            // Recursively generate destructuring for nested pattern
-                            let nested_stmts = generate_param_destructuring_stmts(ctx, &ast::Pat::Array(nested_arr.clone()), nested_id)?;
-                            stmts.extend(nested_stmts);
-                        }
-                        ast::Pat::Object(nested_obj) => {
-                            // Nested object destructuring: [{a, b}, c]
-                            let nested_id = ctx.fresh_local();
-                            let nested_name = format!("__nested_{}", nested_id);
-                            ctx.locals.push((nested_name.clone(), nested_id, Type::Any));
-                            let index_expr = Expr::IndexGet {
-                                object: Box::new(Expr::LocalGet(param_id)),
-                                index: Box::new(Expr::Number(idx as f64)),
-                            };
-                            stmts.push(Stmt::Let {
-                                id: nested_id,
-                                name: nested_name,
-                                ty: Type::Any,
-                                mutable: false,
-                                init: Some(index_expr),
-                            });
-                            let nested_stmts = generate_param_destructuring_stmts(ctx, &ast::Pat::Object(nested_obj.clone()), nested_id)?;
-                            stmts.extend(nested_stmts);
-                        }
-                        ast::Pat::Rest(rest_pat) => {
-                            // Rest pattern: [a, ...rest]
-                            // For now, skip (would need slice operation)
-                            if let ast::Pat::Ident(ident) = rest_pat.arg.as_ref() {
-                                let name = ident.id.sym.to_string();
-                                let id = ctx.define_local(name.clone(), Type::Array(Box::new(Type::Any)));
-                                // Create a slice from idx to end
-                                let slice_expr = Expr::ArraySlice {
-                                    array: Box::new(Expr::LocalGet(param_id)),
-                                    start: Box::new(Expr::Number(idx as f64)),
-                                    end: None,
-                                };
-                                stmts.push(Stmt::Let {
-                                    id,
-                                    name,
-                                    ty: Type::Array(Box::new(Type::Any)),
-                                    mutable: false,
-                                    init: Some(slice_expr),
-                                });
-                            }
-                        }
-                        ast::Pat::Assign(assign_pat) => {
-                            // Default value: [a = default, b]
-                            if let ast::Pat::Ident(ident) = assign_pat.left.as_ref() {
-                                let name = ident.id.sym.to_string();
-                                let id = ctx.define_local(name.clone(), Type::Any);
-                                let index_expr = Expr::IndexGet {
-                                    object: Box::new(Expr::LocalGet(param_id)),
-                                    index: Box::new(Expr::Number(idx as f64)),
-                                };
-                                // TODO: handle default value with nullish coalescing
-                                stmts.push(Stmt::Let {
-                                    id,
-                                    name,
-                                    ty: Type::Any,
-                                    mutable: false,
-                                    init: Some(index_expr),
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
+        ast::Pat::Array(_) | ast::Pat::Object(_) => {
+            crate::destructuring::lower_pattern_binding(
+                ctx,
+                pat,
+                Expr::LocalGet(param_id),
+                false,
+            )
         }
-        ast::Pat::Object(obj_pat) => {
-            for prop in &obj_pat.props {
-                match prop {
-                    ast::ObjectPatProp::KeyValue(kv) => {
-                        let key = match &kv.key {
-                            ast::PropName::Ident(ast::IdentName { sym, .. }) => sym.to_string(),
-                            ast::PropName::Str(s) => String::from_utf8_lossy(s.value.as_bytes()).to_string(),
-                            _ => continue,
-                        };
-                        if let ast::Pat::Ident(ident) = kv.value.as_ref() {
-                            let name = ident.id.sym.to_string();
-                            let id = ctx.define_local(name.clone(), Type::Any);
-                            let prop_expr = Expr::PropertyGet {
-                                object: Box::new(Expr::LocalGet(param_id)),
-                                property: key,
-                            };
-                            stmts.push(Stmt::Let {
-                                id,
-                                name,
-                                ty: Type::Any,
-                                mutable: false,
-                                init: Some(prop_expr),
-                            });
-                        }
-                    }
-                    ast::ObjectPatProp::Assign(assign) => {
-                        let name = assign.key.sym.to_string();
-                        let id = ctx.define_local(name.clone(), Type::Any);
-                        let init_value = if let Some(default_expr) = &assign.value {
-                            // { key = default } - use default if property is undefined
-                            let prop_access = Expr::PropertyGet {
-                                object: Box::new(Expr::LocalGet(param_id)),
-                                property: name.clone(),
-                            };
-                            let default_val = lower_expr(ctx, default_expr)?;
-                            let condition = Expr::Compare {
-                                op: CompareOp::Ne,
-                                left: Box::new(prop_access.clone()),
-                                right: Box::new(Expr::Undefined),
-                            };
-                            Expr::Conditional {
-                                condition: Box::new(condition),
-                                then_expr: Box::new(prop_access),
-                                else_expr: Box::new(default_val),
-                            }
-                        } else {
-                            Expr::PropertyGet {
-                                object: Box::new(Expr::LocalGet(param_id)),
-                                property: name.clone(),
-                            }
-                        };
-                        stmts.push(Stmt::Let {
-                            id,
-                            name,
-                            ty: Type::Any,
-                            mutable: false,
-                            init: Some(init_value),
-                        });
-                    }
-                    ast::ObjectPatProp::Rest(_) => {
-                        // Rest pattern: {...rest} - skip for now
-                    }
-                }
-            }
-        }
-        _ => {}
+        _ => Ok(Vec::new()),
     }
-
-    Ok(stmts)
 }
 
 /// Check if a pattern is a destructuring pattern (array or object)

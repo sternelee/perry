@@ -32,6 +32,7 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
 
     // Lower parameters with type extraction (using context for type param resolution)
     let mut params = Vec::new();
+    let mut destructuring_params: Vec<(LocalId, ast::Pat)> = Vec::new();
     for param in fn_decl.function.params.iter() {
         let param_name = get_pat_name(&param.pat)?;
         let param_type = extract_param_type_with_ctx(&param.pat, Some(ctx));
@@ -45,6 +46,15 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
             default: param_default,
             is_rest,
         });
+        // Track destructuring patterns (or an Assign wrapping one) for extraction stmts
+        let inner_pat = if let ast::Pat::Assign(assign) = &param.pat {
+            assign.left.as_ref()
+        } else {
+            &param.pat
+        };
+        if is_destructuring_pattern(inner_pat) {
+            destructuring_params.push((param_id, inner_pat.clone()));
+        }
     }
 
     // Register parameters with known native types as native instances
@@ -110,12 +120,26 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         }
     }
 
+    // Generate destructuring statements for patterns in parameters BEFORE lowering body
+    let mut destructuring_stmts = Vec::new();
+    for (param_id, pat) in &destructuring_params {
+        let stmts = generate_param_destructuring_stmts(ctx, pat, *param_id)?;
+        destructuring_stmts.extend(stmts);
+    }
+
     // Lower body
-    let body = if let Some(ref block) = fn_decl.function.body {
+    let mut body = if let Some(ref block) = fn_decl.function.body {
         lower_block_stmt(ctx, block)?
     } else {
         Vec::new()
     };
+
+    // Prepend destructuring statements to body
+    if !destructuring_stmts.is_empty() {
+        let mut new_body = destructuring_stmts;
+        new_body.append(&mut body);
+        body = new_body;
+    }
 
     // After body lowering, check if any return statement returns a native instance.
     // This handles patterns like: function initDb() { const d = new Database(...); return d; }

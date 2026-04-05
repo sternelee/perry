@@ -6062,7 +6062,7 @@ pub(crate) fn compile_expr(
                             Expr::Unary { op: UnaryOp::Not, .. } => true,
                             Expr::Null | Expr::Undefined => true,
                             Expr::Array(_) | Expr::ArraySpread(_) | Expr::Object(_) | Expr::New { .. } => true,
-                            Expr::BooleanCoerce(_) | Expr::IsNaN(_) | Expr::IsFinite(_) => true,
+                            Expr::BooleanCoerce(_) | Expr::IsNaN(_) | Expr::IsUndefinedOrBareNan(_) | Expr::IsFinite(_) => true,
                             Expr::NumberIsNaN(_) | Expr::NumberIsFinite(_) | Expr::NumberIsInteger(_) | Expr::NumberIsSafeInteger(_) => true,
                             // String concatenation: if either side is a string, the result is a string.
                             Expr::Binary { op: BinaryOp::Add, left, right } => {
@@ -23088,6 +23088,26 @@ pub(crate) fn compile_expr(
             let isnan_ref = module.declare_func_in_func(*isnan_func, builder.func);
             let call = builder.ins().call(isnan_ref, &[val_f64]);
             Ok(builder.inst_results(call)[0])
+        }
+        Expr::IsUndefinedOrBareNan(value) => {
+            // Emitted by destructuring lowering for defaults: true if value
+            // is TAG_UNDEFINED or a bare IEEE NaN (e.g., from OOB array read).
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
+            let val_f64 = ensure_f64(builder, val);
+
+            let func = extern_funcs.get("js_is_undefined_or_bare_nan")
+                .ok_or_else(|| anyhow!("js_is_undefined_or_bare_nan not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let result_i32 = builder.inst_results(call)[0];
+
+            // Convert i32 → NaN-boxed boolean (TAG_TRUE / TAG_FALSE)
+            const CMP_TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+            const CMP_TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+            let true_val = builder.ins().f64const(f64::from_bits(CMP_TAG_TRUE));
+            let false_val = builder.ins().f64const(f64::from_bits(CMP_TAG_FALSE));
+            let cmp = builder.ins().icmp_imm(IntCC::NotEqual, result_i32, 0);
+            Ok(builder.ins().select(cmp, true_val, false_val))
         }
         Expr::IsFinite(value) => {
             // Compile the value

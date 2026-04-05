@@ -862,7 +862,7 @@ impl crate::codegen::Compiler {
             }
             // Global functions
             Expr::ParseFloat(s) | Expr::NumberCoerce(s) | Expr::BigIntCoerce(s) | Expr::StringCoerce(s) |
-            Expr::BooleanCoerce(s) | Expr::IsNaN(s) | Expr::IsFinite(s) | Expr::NumberIsNaN(s) | Expr::NumberIsFinite(s) | Expr::NumberIsInteger(s) | Expr::NumberIsSafeInteger(s) | Expr::StaticPluginResolve(s) => {
+            Expr::BooleanCoerce(s) | Expr::IsNaN(s) | Expr::IsUndefinedOrBareNan(s) | Expr::IsFinite(s) | Expr::NumberIsNaN(s) | Expr::NumberIsFinite(s) | Expr::NumberIsInteger(s) | Expr::NumberIsSafeInteger(s) | Expr::StaticPluginResolve(s) => {
                 self.collect_closures_from_expr(s, closures, enclosing_class);
             }
             // Yield expression

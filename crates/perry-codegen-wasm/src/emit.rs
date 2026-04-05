@@ -2877,7 +2877,7 @@ impl WasmModuleEmitter {
             }
             Expr::ErrorMessage(e) => { self.collect_strings_in_expr(e); }
             Expr::JsonParse(e) | Expr::JsonStringify(e) => { self.collect_strings_in_expr(e); }
-            Expr::NumberCoerce(e) | Expr::IsNaN(e) | Expr::IsFinite(e) | Expr::BigIntCoerce(e) => {
+            Expr::NumberCoerce(e) | Expr::IsNaN(e) | Expr::IsUndefinedOrBareNan(e) | Expr::IsFinite(e) | Expr::BigIntCoerce(e) => {
                 self.collect_strings_in_expr(e);
             }
             Expr::ParseInt { string, radix } => {
@@ -5982,6 +5982,17 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_memcall(func, "number_coerce", 1);
             }
             Expr::IsNaN(val) => {
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, val);
+                self.emit_memcall_i32(func, "is_nan", 1);
+                func.instruction(&Instruction::If(wasm_encoder::BlockType::Result(ValType::I64)));
+                func.instruction(&Instruction::I64Const(TAG_TRUE as i64));
+                func.instruction(&Instruction::Else);
+                func.instruction(&Instruction::I64Const(TAG_FALSE as i64));
+                func.instruction(&Instruction::End);
+            }
+            Expr::IsUndefinedOrBareNan(val) => {
+                // WASM fallback: delegate to is_nan (close enough for most cases)
                 self.emit_frame_begin(func, 1);
                 self.emit_store_arg(func, 0, val);
                 self.emit_memcall_i32(func, "is_nan", 1);

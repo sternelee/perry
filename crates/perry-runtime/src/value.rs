@@ -785,6 +785,26 @@ pub extern "C" fn js_nanbox_is_string(value: f64) -> i32 {
     if jsval.is_string() { 1 } else { 0 }
 }
 
+/// Check if a value should trigger a destructuring default.
+/// Returns 1 if the value is TAG_UNDEFINED, or a bare IEEE NaN (e.g., from
+/// out-of-bounds array read), 0 otherwise. All other NaN-boxed values
+/// (strings, pointers, booleans, etc.) return 0 because their NaN payload
+/// does not match NaN or TAG_UNDEFINED exactly.
+#[no_mangle]
+pub extern "C" fn js_is_undefined_or_bare_nan(value: f64) -> i32 {
+    let bits = value.to_bits();
+    // TAG_UNDEFINED = 0x7FFC_0000_0000_0001
+    if bits == 0x7FFC_0000_0000_0001 {
+        return 1;
+    }
+    // Bare IEEE NaN (0.0/0.0) — produced by OOB array reads
+    // Canonical NaN is 0x7FF8_0000_0000_0000 on most platforms
+    if bits == 0x7FF8_0000_0000_0000 {
+        return 1;
+    }
+    0
+}
+
 /// Convert a NaN-boxed f64 value to a string pointer.
 /// Handles all value types: strings (extract pointer), numbers (convert), JS handles, etc.
 #[no_mangle]

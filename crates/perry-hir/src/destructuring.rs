@@ -436,6 +436,252 @@ pub(crate) fn lower_destructuring_assignment_stmt_from_local(
     Ok(result)
 }
 
+/// Recursively lower a binding pattern against a source expression, producing
+/// `Let` statements that declare each bound variable.
+///
+/// This is the single source of truth for destructuring binding patterns. It
+/// handles:
+/// - `Pat::Ident(x)`     → `let x = <source>`
+/// - `Pat::Assign(p = d)`→ `let tmp = <source>; <recurse on p with tmp !== undefined ? tmp : d>`
+/// - `Pat::Array([...])`→ materialize source in a temp, then recurse on each
+///   element with `tmp[i]` as the source. Handles `Pat::Rest` (last element)
+///   via `ArraySlice` and skips holes (`None`) like `[a, , c]`.
+/// - `Pat::Object({...})`→ materialize source in a temp, then for each prop
+///   recurse on the value pattern with `tmp.key` (or `tmp[expr]` for computed
+///   keys) as the source. `Assign` shorthand props apply defaults inline.
+///   `Rest` props use `ObjectRest` with the list of explicitly-destructured keys.
+pub(crate) fn lower_pattern_binding(
+    ctx: &mut LoweringContext,
+    pat: &ast::Pat,
+    source: Expr,
+    mutable: bool,
+) -> Result<Vec<Stmt>> {
+    let mut result = Vec::new();
+    lower_pattern_binding_into(ctx, pat, source, mutable, &mut result)?;
+    Ok(result)
+}
+
+fn lower_pattern_binding_into(
+    ctx: &mut LoweringContext,
+    pat: &ast::Pat,
+    source: Expr,
+    mutable: bool,
+    result: &mut Vec<Stmt>,
+) -> Result<()> {
+    match pat {
+        ast::Pat::Ident(ident) => {
+            let name = ident.id.sym.to_string();
+            let ty = ident.type_ann.as_ref()
+                .map(|ann| extract_ts_type(&ann.type_ann))
+                .unwrap_or(Type::Any);
+            let id = ctx.define_local(name.clone(), ty.clone());
+            result.push(Stmt::Let {
+                id,
+                name,
+                ty,
+                mutable,
+                init: Some(source),
+            });
+            Ok(())
+        }
+        ast::Pat::Assign(assign_pat) => {
+            // `p = default` — apply default when source is undefined.
+            // We also need to treat bare IEEE NaN (e.g., from OOB array reads)
+            // as undefined, because Perry's number arrays return NaN rather
+            // than TAG_UNDEFINED for out-of-bounds indices.
+            let tmp_id = ctx.fresh_local();
+            let tmp_name = format!("__destruct_{}", tmp_id);
+            ctx.locals.push((tmp_name.clone(), tmp_id, Type::Any));
+            result.push(Stmt::Let {
+                id: tmp_id,
+                name: tmp_name,
+                ty: Type::Any,
+                mutable: false,
+                init: Some(source),
+            });
+            let default_val = lower_expr(ctx, &assign_pat.right)?;
+            // If `IsUndefinedOrBareNan(tmp)` then use default, else use tmp.
+            let with_default = Expr::Conditional {
+                condition: Box::new(Expr::IsUndefinedOrBareNan(Box::new(Expr::LocalGet(tmp_id)))),
+                then_expr: Box::new(default_val),
+                else_expr: Box::new(Expr::LocalGet(tmp_id)),
+            };
+            lower_pattern_binding_into(ctx, &assign_pat.left, with_default, mutable, result)
+        }
+        ast::Pat::Array(arr_pat) => {
+            // Materialize source into a temp
+            let arr_ty = arr_pat.type_ann.as_ref()
+                .map(|ann| extract_ts_type(&ann.type_ann))
+                .unwrap_or(Type::Array(Box::new(Type::Any)));
+            let tmp_id = ctx.fresh_local();
+            let tmp_name = format!("__destruct_{}", tmp_id);
+            ctx.locals.push((tmp_name.clone(), tmp_id, arr_ty.clone()));
+            result.push(Stmt::Let {
+                id: tmp_id,
+                name: tmp_name,
+                ty: arr_ty,
+                mutable: false,
+                init: Some(source),
+            });
+
+            for (idx, elem) in arr_pat.elems.iter().enumerate() {
+                let Some(elem_pat) = elem else { continue }; // hole — skip
+
+                if let ast::Pat::Rest(rest_pat) = elem_pat {
+                    // Rest element `...rest` — take remaining elements as an array
+                    let slice_expr = Expr::ArraySlice {
+                        array: Box::new(Expr::LocalGet(tmp_id)),
+                        start: Box::new(Expr::Number(idx as f64)),
+                        end: None,
+                    };
+                    lower_pattern_binding_into(ctx, &rest_pat.arg, slice_expr, mutable, result)?;
+                    break; // Rest must be last
+                }
+
+                let element_source = Expr::IndexGet {
+                    object: Box::new(Expr::LocalGet(tmp_id)),
+                    index: Box::new(Expr::Number(idx as f64)),
+                };
+                lower_pattern_binding_into(ctx, elem_pat, element_source, mutable, result)?;
+            }
+            Ok(())
+        }
+        ast::Pat::Object(obj_pat) => {
+            // Materialize source into a temp
+            let obj_ty = obj_pat.type_ann.as_ref()
+                .map(|ann| extract_ts_type(&ann.type_ann))
+                .unwrap_or(Type::Any);
+            let tmp_id = ctx.fresh_local();
+            let tmp_name = format!("__destruct_{}", tmp_id);
+            ctx.locals.push((tmp_name.clone(), tmp_id, obj_ty.clone()));
+            result.push(Stmt::Let {
+                id: tmp_id,
+                name: tmp_name,
+                ty: obj_ty,
+                mutable: false,
+                init: Some(source),
+            });
+
+            // Collect statically-known keys for rest exclusion tracking.
+            let mut static_keys: Vec<String> = Vec::new();
+
+            for prop in &obj_pat.props {
+                match prop {
+                    ast::ObjectPatProp::KeyValue(kv) => {
+                        let key_source = match &kv.key {
+                            ast::PropName::Ident(ident) => {
+                                let key = ident.sym.to_string();
+                                static_keys.push(key.clone());
+                                Expr::PropertyGet {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    property: key,
+                                }
+                            }
+                            ast::PropName::Str(s) => {
+                                let key = s.value.as_str().unwrap_or("").to_string();
+                                static_keys.push(key.clone());
+                                Expr::PropertyGet {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    property: key,
+                                }
+                            }
+                            ast::PropName::Num(n) => {
+                                let key = n.value.to_string();
+                                static_keys.push(key.clone());
+                                Expr::PropertyGet {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    property: key,
+                                }
+                            }
+                            ast::PropName::Computed(computed) => {
+                                // Computed key: const { [prop]: target } = obj
+                                // Lower to IndexGet with the computed expression
+                                let index_expr = lower_expr(ctx, &computed.expr)?;
+                                Expr::IndexGet {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    index: Box::new(index_expr),
+                                }
+                            }
+                            ast::PropName::BigInt(_) => continue,
+                        };
+                        lower_pattern_binding_into(ctx, &kv.value, key_source, mutable, result)?;
+                    }
+                    ast::ObjectPatProp::Assign(assign) => {
+                        // Shorthand { key } or { key = default }
+                        let name = assign.key.sym.to_string();
+                        static_keys.push(name.clone());
+                        let ty = assign.key.type_ann.as_ref()
+                            .map(|ann| extract_ts_type(&ann.type_ann))
+                            .unwrap_or(Type::Any);
+                        let id = ctx.define_local(name.clone(), ty.clone());
+
+                        let init_value = if let Some(default_expr) = &assign.value {
+                            // Materialize the property read into a temp so we
+                            // only evaluate it once (important if the property
+                            // getter is side-effecting, but also required for
+                            // correct NaN detection).
+                            let val_tmp_id = ctx.fresh_local();
+                            let val_tmp_name = format!("__destruct_{}", val_tmp_id);
+                            ctx.locals.push((val_tmp_name.clone(), val_tmp_id, Type::Any));
+                            result.push(Stmt::Let {
+                                id: val_tmp_id,
+                                name: val_tmp_name,
+                                ty: Type::Any,
+                                mutable: false,
+                                init: Some(Expr::PropertyGet {
+                                    object: Box::new(Expr::LocalGet(tmp_id)),
+                                    property: name.clone(),
+                                }),
+                            });
+                            let default_val = lower_expr(ctx, default_expr)?;
+                            Expr::Conditional {
+                                condition: Box::new(Expr::IsUndefinedOrBareNan(
+                                    Box::new(Expr::LocalGet(val_tmp_id)),
+                                )),
+                                then_expr: Box::new(default_val),
+                                else_expr: Box::new(Expr::LocalGet(val_tmp_id)),
+                            }
+                        } else {
+                            Expr::PropertyGet {
+                                object: Box::new(Expr::LocalGet(tmp_id)),
+                                property: name.clone(),
+                            }
+                        };
+                        result.push(Stmt::Let {
+                            id,
+                            name,
+                            ty,
+                            mutable,
+                            init: Some(init_value),
+                        });
+                    }
+                    ast::ObjectPatProp::Rest(rest) => {
+                        // { ...rest } — collect remaining statically-known keys
+                        // and use ObjectRest to clone the object without them.
+                        let rest_source = Expr::ObjectRest {
+                            object: Box::new(Expr::LocalGet(tmp_id)),
+                            exclude_keys: static_keys.clone(),
+                        };
+                        lower_pattern_binding_into(ctx, &rest.arg, rest_source, mutable, result)?;
+                        break; // Rest must be last
+                    }
+                }
+            }
+            Ok(())
+        }
+        ast::Pat::Rest(_) => {
+            // Rest patterns should be handled by their enclosing Array/Object
+            Err(anyhow!("Rest pattern outside of array/object destructuring"))
+        }
+        ast::Pat::Expr(_) => {
+            Err(anyhow!("Expression patterns are not supported in binding destructuring"))
+        }
+        ast::Pat::Invalid(_) => {
+            Err(anyhow!("Invalid binding pattern"))
+        }
+    }
+}
+
 /// Lower a destructuring assignment expression.
 /// For [a, b] = expr or { a, b } = expr, we generate a Sequence expression:
 ///   1. Assign each element/property to the corresponding target
@@ -1103,255 +1349,16 @@ pub(crate) fn lower_var_decl_with_destructuring(
                 init,
             });
         }
-        ast::Pat::Array(arr_pat) => {
-            // Array destructuring: let [a, b, c] = expr
-            // Desugar to:
-            //   let __tmp = expr;
-            //   let a = __tmp[0];
-            //   let b = __tmp[1];
-            //   let c = __tmp[2];
-
-            // First, store the initializer in a temporary variable
+        ast::Pat::Array(_) | ast::Pat::Object(_) => {
+            // Delegate to the recursive pattern binding helper so that all
+            // destructuring features (nested patterns, defaults, rest, computed
+            // keys) work consistently across all call sites.
             let init_expr = decl.init.as_ref()
                 .map(|e| lower_expr(ctx, e))
                 .transpose()?
-                .ok_or_else(|| anyhow!("Array destructuring requires an initializer"))?;
-
-            // Get the array type from the pattern's type annotation, or infer from init
-            let arr_ty = arr_pat.type_ann.as_ref()
-                .map(|ann| extract_ts_type(&ann.type_ann))
-                .unwrap_or(Type::Array(Box::new(Type::Any)));
-
-            // Determine element type
-            let elem_ty = match &arr_ty {
-                Type::Array(elem) => (**elem).clone(),
-                Type::Tuple(types) => types.first().cloned().unwrap_or(Type::Any),
-                _ => Type::Any,
-            };
-
-            // Create a temporary variable to hold the array
-            let tmp_id = ctx.fresh_local();
-            let tmp_name = format!("__destruct_{}", tmp_id);
-            ctx.locals.push((tmp_name.clone(), tmp_id, arr_ty.clone()));
-
-            result.push(Stmt::Let {
-                id: tmp_id,
-                name: tmp_name,
-                ty: arr_ty.clone(),
-                mutable: false,
-                init: Some(init_expr),
-            });
-
-            // Now extract each element
-            for (idx, elem) in arr_pat.elems.iter().enumerate() {
-                if let Some(elem_pat) = elem {
-                    match elem_pat {
-                        ast::Pat::Ident(ident) => {
-                            let name = ident.id.sym.to_string();
-                            // Use explicit type annotation if provided, otherwise use inferred element type
-                            let ty = ident.type_ann.as_ref()
-                                .map(|ann| extract_ts_type(&ann.type_ann))
-                                .unwrap_or_else(|| {
-                                    // For tuples, use the specific element type
-                                    match &arr_ty {
-                                        Type::Tuple(types) => types.get(idx).cloned().unwrap_or(elem_ty.clone()),
-                                        _ => elem_ty.clone(),
-                                    }
-                                });
-                            let id = ctx.define_local(name.clone(), ty.clone());
-
-                            // Generate: let name = __tmp[idx]
-                            result.push(Stmt::Let {
-                                id,
-                                name,
-                                ty,
-                                mutable,
-                                init: Some(Expr::IndexGet {
-                                    object: Box::new(Expr::LocalGet(tmp_id)),
-                                    index: Box::new(Expr::Number(idx as f64)),
-                                }),
-                            });
-                        }
-                        ast::Pat::Rest(rest_pat) => {
-                            // Rest element: let [a, b, ...rest] = arr
-                            // Generate: let rest = __tmp.slice(idx)
-                            if let ast::Pat::Ident(ident) = &*rest_pat.arg {
-                                let name = ident.id.sym.to_string();
-                                let ty = Type::Array(Box::new(elem_ty.clone()));
-                                let id = ctx.define_local(name.clone(), ty.clone());
-                                result.push(Stmt::Let {
-                                    id,
-                                    name,
-                                    ty,
-                                    mutable,
-                                    init: Some(Expr::ArraySlice {
-                                        array: Box::new(Expr::LocalGet(tmp_id)),
-                                        start: Box::new(Expr::Number(idx as f64)),
-                                        end: None,
-                                    }),
-                                });
-                            }
-                        }
-                        _ => {
-                            // Nested patterns - could be nested array or object destructuring
-                            // For now, skip unsupported patterns
-                        }
-                    }
-                }
-                // If elem is None, it's a hole in the pattern like [a, , c]
-                // We just skip it (no variable to bind)
-            }
-        }
-        ast::Pat::Object(obj_pat) => {
-            // Object destructuring: const { a, b, c } = expr
-            // Desugar to:
-            //   let __tmp = expr;
-            //   let a = __tmp.a;
-            //   let b = __tmp.b;
-            //   let c = __tmp.c;
-
-            // First, store the initializer in a temporary variable
-            let init_expr = decl.init.as_ref()
-                .map(|e| lower_expr(ctx, e))
-                .transpose()?
-                .ok_or_else(|| anyhow!("Object destructuring requires an initializer"))?;
-
-            // Get the object type from the pattern's type annotation
-            let obj_ty = obj_pat.type_ann.as_ref()
-                .map(|ann| extract_ts_type(&ann.type_ann))
-                .unwrap_or(Type::Any);
-
-            // Create a temporary variable to hold the object
-            let tmp_id = ctx.fresh_local();
-            let tmp_name = format!("__destruct_{}", tmp_id);
-            ctx.locals.push((tmp_name.clone(), tmp_id, obj_ty.clone()));
-
-            result.push(Stmt::Let {
-                id: tmp_id,
-                name: tmp_name,
-                ty: obj_ty.clone(),
-                mutable: false,
-                init: Some(init_expr),
-            });
-
-            // Now extract each property
-            for prop in &obj_pat.props {
-                match prop {
-                    ast::ObjectPatProp::KeyValue(kv) => {
-                        // { key: value } - extracts obj.key into variable named by value pattern
-                        let key = match &kv.key {
-                            ast::PropName::Ident(ident) => ident.sym.to_string(),
-                            ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
-                            ast::PropName::Num(n) => n.value.to_string(),
-                            _ => continue, // Skip computed keys
-                        };
-
-                        // Get the variable name from the value pattern
-                        if let ast::Pat::Ident(ident) = &*kv.value {
-                            let name = ident.id.sym.to_string();
-                            let ty = ident.type_ann.as_ref()
-                                .map(|ann| extract_ts_type(&ann.type_ann))
-                                .unwrap_or(Type::Any);
-                            let id = ctx.define_local(name.clone(), ty.clone());
-
-                            // Generate: let name = __tmp.key
-                            result.push(Stmt::Let {
-                                id,
-                                name,
-                                ty,
-                                mutable,
-                                init: Some(Expr::PropertyGet {
-                                    object: Box::new(Expr::LocalGet(tmp_id)),
-                                    property: key,
-                                }),
-                            });
-                        }
-                    }
-                    ast::ObjectPatProp::Assign(assign) => {
-                        // { key } or { key = default } - shorthand property
-                        let name = assign.key.sym.to_string();
-                        let ty = assign.key.type_ann.as_ref()
-                            .map(|ann| extract_ts_type(&ann.type_ann))
-                            .unwrap_or(Type::Any);
-                        let id = ctx.define_local(name.clone(), ty.clone());
-
-                        // Check if there's a default value
-                        let init_value = if let Some(default_expr) = &assign.value {
-                            // { key = default } - use default if property is undefined
-                            // Use conditional: __tmp.key !== undefined ? __tmp.key : default
-                            let prop_access = Expr::PropertyGet {
-                                object: Box::new(Expr::LocalGet(tmp_id)),
-                                property: name.clone(),
-                            };
-                            let default_val = lower_expr(ctx, default_expr)?;
-                            // Check if property is undefined
-                            let condition = Expr::Compare {
-                                op: CompareOp::Ne,
-                                left: Box::new(prop_access.clone()),
-                                right: Box::new(Expr::Undefined),
-                            };
-                            Expr::Conditional {
-                                condition: Box::new(condition),
-                                then_expr: Box::new(prop_access),
-                                else_expr: Box::new(default_val),
-                            }
-                        } else {
-                            // { key } - just access the property
-                            Expr::PropertyGet {
-                                object: Box::new(Expr::LocalGet(tmp_id)),
-                                property: name.clone(),
-                            }
-                        };
-
-                        result.push(Stmt::Let {
-                            id,
-                            name,
-                            ty,
-                            mutable,
-                            init: Some(init_value),
-                        });
-                    }
-                    ast::ObjectPatProp::Rest(rest) => {
-                        // { ...rest } - collect remaining properties not explicitly destructured
-                        if let ast::Pat::Ident(ident) = &*rest.arg {
-                            let name = ident.id.sym.to_string();
-                            let ty = Type::Any;
-                            let id = ctx.define_local(name.clone(), ty.clone());
-
-                            // Collect all explicitly destructured keys from this pattern
-                            let mut exclude_keys = Vec::new();
-                            for other_prop in &obj_pat.props {
-                                match other_prop {
-                                    ast::ObjectPatProp::KeyValue(kv) => {
-                                        if let Some(key) = match &kv.key {
-                                            ast::PropName::Ident(i) => Some(i.sym.to_string()),
-                                            ast::PropName::Str(s) => Some(s.value.as_str().unwrap_or("").to_string()),
-                                            _ => None,
-                                        } {
-                                            exclude_keys.push(key);
-                                        }
-                                    }
-                                    ast::ObjectPatProp::Assign(assign) => {
-                                        exclude_keys.push(assign.key.sym.to_string());
-                                    }
-                                    ast::ObjectPatProp::Rest(_) => {} // Skip the rest itself
-                                }
-                            }
-
-                            result.push(Stmt::Let {
-                                id,
-                                name,
-                                ty,
-                                mutable,
-                                init: Some(Expr::ObjectRest {
-                                    object: Box::new(Expr::LocalGet(tmp_id)),
-                                    exclude_keys,
-                                }),
-                            });
-                        }
-                    }
-                }
-            }
+                .ok_or_else(|| anyhow!("Destructuring requires an initializer"))?;
+            let stmts = lower_pattern_binding(ctx, &decl.name, init_expr, mutable)?;
+            result.extend(stmts);
         }
         _ => {
             // For other patterns, fall back to existing behavior

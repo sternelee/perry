@@ -1329,6 +1329,7 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
         Expr::BigIntCoerce(value) => Expr::BigIntCoerce(Box::new(substitute_expr(value, substitutions))),
         Expr::StringCoerce(value) => Expr::StringCoerce(Box::new(substitute_expr(value, substitutions))),
         Expr::IsNaN(value) => Expr::IsNaN(Box::new(substitute_expr(value, substitutions))),
+        Expr::IsUndefinedOrBareNan(value) => Expr::IsUndefinedOrBareNan(Box::new(substitute_expr(value, substitutions))),
         Expr::IsFinite(value) => Expr::IsFinite(Box::new(substitute_expr(value, substitutions))),
         Expr::StaticPluginResolve(value) => Expr::StaticPluginResolve(Box::new(substitute_expr(value, substitutions))),
         // JS Runtime expressions - pass through unchanged (no type substitution needed)

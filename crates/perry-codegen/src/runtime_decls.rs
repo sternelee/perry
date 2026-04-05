@@ -7736,6 +7736,17 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_is_nan"), func_id);
         }
 
+        // js_is_undefined_or_bare_nan(value: f64) -> i32
+        // Used by destructuring defaults: returns 1 if the value is
+        // TAG_UNDEFINED or a bare IEEE NaN (e.g., from OOB array read).
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_is_undefined_or_bare_nan", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_is_undefined_or_bare_nan"), func_id);
+        }
+
         // js_is_finite(value: f64) -> f64 (boolean as 1.0/0.0)
         {
             let mut sig = self.module.make_signature();

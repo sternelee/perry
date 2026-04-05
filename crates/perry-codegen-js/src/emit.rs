@@ -2015,6 +2015,14 @@ impl JsEmitter {
                 self.emit_expr(val);
                 self.output.push(')');
             }
+            Expr::IsUndefinedOrBareNan(val) => {
+                // JS fallback: (v === undefined || Number.isNaN(v))
+                self.output.push_str("((");
+                self.emit_expr(val);
+                self.output.push_str(") === undefined || Number.isNaN(");
+                self.emit_expr(val);
+                self.output.push_str("))");
+            }
             Expr::IsFinite(val) => {
                 self.output.push_str("isFinite(");
                 self.emit_expr(val);

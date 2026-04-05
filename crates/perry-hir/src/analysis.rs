@@ -536,6 +536,9 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         Expr::IsNaN(value) => {
             collect_local_refs_expr(value, refs, visited);
         }
+        Expr::IsUndefinedOrBareNan(value) => {
+            collect_local_refs_expr(value, refs, visited);
+        }
         Expr::IsFinite(value) => {
             collect_local_refs_expr(value, refs, visited);
         }
@@ -1334,6 +1337,9 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             collect_assigned_locals_expr(value, assigned);
         }
         Expr::IsNaN(value) => {
+            collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::IsUndefinedOrBareNan(value) => {
             collect_assigned_locals_expr(value, assigned);
         }
         Expr::IsFinite(value) => {

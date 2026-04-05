@@ -1417,6 +1417,10 @@ pub enum Expr {
     /// isNaN(value) -> boolean
     /// Check if value is NaN
     IsNaN(Box<Expr>),
+    /// Internal: check if a value is TAG_UNDEFINED or a bare IEEE NaN
+    /// (emitted by the lowerer for destructuring defaults). Returns a
+    /// NaN-boxed boolean.
+    IsUndefinedOrBareNan(Box<Expr>),
     /// isFinite(value) -> boolean
     /// Check if value is finite
     IsFinite(Box<Expr>),
