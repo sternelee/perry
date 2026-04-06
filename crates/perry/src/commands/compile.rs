@@ -5209,6 +5209,31 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             None
         })().unwrap_or_default();
 
+        // Game-loop apps use traditional UIApplicationMain lifecycle, not SceneDelegate.
+        // Including UIApplicationSceneManifest causes a black screen with game-loop.
+        let scene_manifest = if compiled_features.iter().any(|f| f == "ios-game-loop") {
+            String::new()
+        } else {
+            r#"    <key>UIApplicationSceneManifest</key>
+    <dict>
+        <key>UIApplicationSupportsMultipleScenes</key>
+        <false/>
+        <key>UISceneConfigurations</key>
+        <dict>
+            <key>UIWindowSceneSessionRoleApplication</key>
+            <array>
+                <dict>
+                    <key>UISceneConfigurationName</key>
+                    <string>Default Configuration</string>
+                    <key>UISceneDelegateClassName</key>
+                    <string>PerrySceneDelegate</string>
+                </dict>
+            </array>
+        </dict>
+    </dict>
+"#.to_string()
+        };
+
         let info_plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -5293,24 +5318,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
-    <key>UIApplicationSceneManifest</key>
-    <dict>
-        <key>UIApplicationSupportsMultipleScenes</key>
-        <false/>
-        <key>UISceneConfigurations</key>
-        <dict>
-            <key>UIWindowSceneSessionRoleApplication</key>
-            <array>
-                <dict>
-                    <key>UISceneConfigurationName</key>
-                    <string>Default Configuration</string>
-                    <key>UISceneDelegateClassName</key>
-                    <string>PerrySceneDelegate</string>
-                </dict>
-            </array>
-        </dict>
-    </dict>
-</dict>
+    {scene_manifest}</dict>
 </plist>"#,
         );
 
