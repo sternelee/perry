@@ -185,6 +185,20 @@ fn collect_referenced_locals_expr(expr: &Expr, out: &mut std::collections::HashS
             if let Some(v) = value { collect_referenced_locals_expr(v, out); }
         }
         Expr::EnvGetDynamic(e) => collect_referenced_locals_expr(e, out),
+        // Array mutation expressions with array_id: LocalId
+        Expr::ArrayPush { array_id, value } | Expr::ArrayUnshift { array_id, value } | Expr::ArrayPushSpread { array_id, source: value } => {
+            out.insert(*array_id);
+            collect_referenced_locals_expr(value, out);
+        }
+        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
+            out.insert(*array_id);
+        }
+        Expr::ArraySplice { array_id, start, delete_count, items } => {
+            out.insert(*array_id);
+            collect_referenced_locals_expr(start, out);
+            if let Some(dc) = delete_count { collect_referenced_locals_expr(dc, out); }
+            for item in items { collect_referenced_locals_expr(item, out); }
+        }
         // Leaf nodes with no LocalId references
         _ => {}
     }
