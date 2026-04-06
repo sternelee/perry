@@ -1137,7 +1137,27 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             substitute_locals(map, param_map, next_local_id);
         }
         // Array operations
-        Expr::ArrayPush { value, .. } | Expr::ArrayUnshift { value, .. } | Expr::ArrayPushSpread { source: value, .. } => {
+        Expr::ArrayPop(array_id) | Expr::ArrayShift(array_id) => {
+            if let Some(replacement) = param_map.get(array_id) {
+                if let Expr::LocalGet(new_id) = replacement {
+                    *array_id = *new_id;
+                }
+            }
+        }
+        Expr::ArrayPush { array_id, value } | Expr::ArrayUnshift { array_id, value } => {
+            if let Some(replacement) = param_map.get(array_id) {
+                if let Expr::LocalGet(new_id) = replacement {
+                    *array_id = *new_id;
+                }
+            }
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::ArrayPushSpread { array_id, source: value } => {
+            if let Some(replacement) = param_map.get(array_id) {
+                if let Expr::LocalGet(new_id) = replacement {
+                    *array_id = *new_id;
+                }
+            }
             substitute_locals(value, param_map, next_local_id);
         }
         Expr::ArrayIndexOf { array, value } | Expr::ArrayIncludes { array, value } => {
@@ -1151,7 +1171,12 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
                 substitute_locals(e, param_map, next_local_id);
             }
         }
-        Expr::ArraySplice { start, delete_count, items, .. } => {
+        Expr::ArraySplice { array_id, start, delete_count, items } => {
+            if let Some(replacement) = param_map.get(array_id) {
+                if let Expr::LocalGet(new_id) = replacement {
+                    *array_id = *new_id;
+                }
+            }
             substitute_locals(start, param_map, next_local_id);
             if let Some(dc) = delete_count {
                 substitute_locals(dc, param_map, next_local_id);
@@ -1592,6 +1617,11 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
         Expr::ArrayFromMapped { iterable, map_fn } => {
             substitute_this(iterable, obj_id);
             substitute_this(map_fn, obj_id);
+        }
+        Expr::ArraySplice { start, delete_count, items, .. } => {
+            substitute_this(start, obj_id);
+            if let Some(dc) = delete_count { substitute_this(dc, obj_id); }
+            for item in items { substitute_this(item, obj_id); }
         }
         Expr::StringSplit(s, sep) => {
             substitute_this(s, obj_id);

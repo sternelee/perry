@@ -11682,7 +11682,7 @@ pub(crate) fn compile_expr(
                             let result_ptr = builder.inst_results(call)[0];
                             return Ok(inline_nanbox_string(builder, result_ptr));
                         }
-                        "toString" if !matches!(object.as_ref(), Expr::LocalGet(_)) => {
+                        "toString" if !matches!(object.as_ref(), Expr::LocalGet(_) | Expr::StaticMethodCall { .. } | Expr::New { .. }) => {
                             let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
                             let num_f64 = ensure_f64(builder, obj_val);
                             let result_ptr = if !arg_vals.is_empty() {
