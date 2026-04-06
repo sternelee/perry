@@ -65,6 +65,55 @@ pub fn register_widget(view: Retained<NSView>) -> i64 {
     handle
 }
 
+#[cfg(feature = "geisterhand")]
+fn alloc_string_result(s: &str, out_len: *mut usize) -> *mut u8 {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let buf = unsafe { libc::malloc(len) as *mut u8 };
+    if buf.is_null() { return std::ptr::null_mut(); }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, len);
+        *out_len = len;
+    }
+    buf
+}
+
+/// Read the current value of a widget by handle (text field → string, slider → number, button → state).
+#[cfg(feature = "geisterhand")]
+#[no_mangle]
+pub extern "C" fn perry_ui_read_widget_value(handle: i64, out_len: *mut usize) -> *mut u8 {
+    unsafe { *out_len = 0; }
+    if let Some(view) = get_widget(handle) {
+        unsafe {
+            if let Some(tf_cls) = objc2::runtime::AnyClass::get(c"NSTextField") {
+                let is_tf: bool = msg_send![&*view, isKindOfClass: tf_cls];
+                if is_tf {
+                    let val: *const objc2::runtime::AnyObject = msg_send![&*view, stringValue];
+                    if !val.is_null() {
+                        let ns: &objc2_foundation::NSString = &*(val as *const objc2_foundation::NSString);
+                        return alloc_string_result(&ns.to_string(), out_len);
+                    }
+                }
+            }
+            if let Some(slider_cls) = objc2::runtime::AnyClass::get(c"NSSlider") {
+                let is_slider: bool = msg_send![&*view, isKindOfClass: slider_cls];
+                if is_slider {
+                    let val: f64 = msg_send![&*view, doubleValue];
+                    return alloc_string_result(&format!("{}", val), out_len);
+                }
+            }
+            if let Some(btn_cls) = objc2::runtime::AnyClass::get(c"NSButton") {
+                let is_btn: bool = msg_send![&*view, isKindOfClass: btn_cls];
+                if is_btn {
+                    let state: isize = msg_send![&*view, state];
+                    return alloc_string_result(if state == 1 { "true" } else { "false" }, out_len);
+                }
+            }
+        }
+    }
+    std::ptr::null_mut()
+}
+
 /// Register an external NSView (e.g. from a native library) into the widget system.
 /// The raw pointer is retained and assigned a handle usable with widgetAddChild etc.
 pub fn register_external_nsview(nsview_ptr: i64) -> i64 {

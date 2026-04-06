@@ -14,6 +14,8 @@ extern "C" {
     fn perry_geisterhand_request_screenshot(out_len: *mut usize) -> *mut u8;
     fn perry_geisterhand_find_by_shortcut(shortcut_ptr: *const u8, shortcut_len: usize) -> f64;
     fn perry_geisterhand_queue_scroll(handle: i64, x: f64, y: f64);
+    fn perry_geisterhand_queue_set_text(handle: i64, text_ptr: *const u8, text_len: usize);
+    fn perry_geisterhand_request_value(handle: i64, out_len: *mut usize) -> *mut u8;
 }
 
 // Callback kind constants (must match perry-runtime/src/geisterhand_registry.rs)
@@ -218,7 +220,10 @@ pub fn run_server(port: u16) {
                             }
                             ok_json(r#"{"ok":true}"#)
                         } else {
-                            error_json(404, "no HWND for this handle")
+                            // Non-Windows: queue text set via the action queue
+                            let text_bytes = text.as_bytes();
+                            unsafe { perry_geisterhand_queue_set_text(handle, text_bytes.as_ptr(), text_bytes.len()); }
+                            ok_json(r#"{"ok":true}"#)
                         }
                     }
                     None => error_json(400, "invalid handle"),
@@ -395,6 +400,63 @@ pub fn run_server(port: u16) {
                         };
                         unsafe { perry_geisterhand_queue_scroll(handle, x, y); }
                         ok_json(r#"{"ok":true}"#)
+                    }
+                    None => error_json(400, "invalid handle"),
+                }
+            }
+
+            // POST /wait — wait for a widget with matching label to appear
+            (Method::Post, "/wait") => {
+                let body = read_body(&mut request);
+                let (label, timeout_ms) = match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(v) => (
+                        v.get("label").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                        v.get("timeout").and_then(|t| t.as_u64()).unwrap_or(5000),
+                    ),
+                    Err(_) => (String::new(), 5000),
+                };
+                if label.is_empty() {
+                    error_json(400, "missing label field")
+                } else {
+                    let start = std::time::Instant::now();
+                    let timeout = std::time::Duration::from_millis(timeout_ms);
+                    loop {
+                        let mut len: usize = 0;
+                        let ptr = unsafe { perry_geisterhand_get_registry_json(&mut len) };
+                        if !ptr.is_null() && len > 0 {
+                            let json = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
+                            unsafe { perry_geisterhand_free_string(ptr, len); }
+                            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                                if let Some(w) = arr.iter().find(|w| {
+                                    w.get("label").and_then(|l| l.as_str())
+                                        .map(|l| l.to_lowercase().contains(&label.to_lowercase()))
+                                        .unwrap_or(false)
+                                }) {
+                                    break ok_json(&serde_json::to_string(w).unwrap_or_else(|_| "{}".to_string()));
+                                }
+                            }
+                        }
+                        if start.elapsed() >= timeout {
+                            break error_json(408, "timeout waiting for widget");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
+
+            // GET /value/:handle — read current widget value
+            (Method::Get, p) if p.starts_with("/value/") => {
+                match parse_handle(p, "/value/") {
+                    Some(handle) => {
+                        let mut len: usize = 0;
+                        let ptr = unsafe { perry_geisterhand_request_value(handle, &mut len) };
+                        if !ptr.is_null() && len > 0 {
+                            let val = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned() };
+                            unsafe { perry_geisterhand_free_string(ptr, len); }
+                            ok_json(&format!(r#"{{"handle":{},"value":"{}"}}"#, handle, val.replace('"', "\\\"")))
+                        } else {
+                            ok_json(&format!(r#"{{"handle":{},"value":null}}"#, handle))
+                        }
                     }
                     None => error_json(400, "invalid handle"),
                 }

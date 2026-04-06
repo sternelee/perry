@@ -41,6 +41,7 @@ pub enum PendingAction {
     CaptureScreenshot,
     SetText { handle: i64, text: String },
     ScrollTo { handle: i64, x: f64, y: f64 },
+    ReadValue { handle: i64 },
 }
 
 static REGISTRY: Mutex<Vec<RegisteredWidget>> = Mutex::new(Vec::new());
@@ -52,6 +53,11 @@ static SCREENSHOT_RESULT: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 static SCREENSHOT_CONDVAR: Condvar = Condvar::new();
 /// Flag indicating a screenshot request is pending (prevents duplicate requests)
 static SCREENSHOT_REQUESTED: Mutex<bool> = Mutex::new(false);
+
+/// Value read result: same condvar pattern as screenshot.
+static VALUE_RESULT: Mutex<Option<String>> = Mutex::new(None);
+static VALUE_CONDVAR: Condvar = Condvar::new();
+static VALUE_REQUESTED: Mutex<bool> = Mutex::new(false);
 
 extern "C" {
     fn js_closure_call0(closure: *const u8) -> f64;
@@ -68,6 +74,7 @@ static UI_STATE_SET_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_SCREENSHOT_CAPTURE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_TEXTFIELD_SET_STRING_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_SCROLL_SET_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static UI_READ_VALUE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Register the platform UI crate's state_set function.
 #[no_mangle]
@@ -93,6 +100,12 @@ pub extern "C" fn perry_geisterhand_register_textfield_set_string(f: extern "C" 
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_register_scroll_set(f: extern "C" fn(i64, f64, f64)) {
     UI_SCROLL_SET_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Register the platform UI crate's read_value function.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_read_value(f: extern "C" fn(i64, *mut usize) -> *mut u8) {
+    UI_READ_VALUE_FN.store(f as *mut (), Ordering::Release);
 }
 
 /// Register a widget callback in the global registry.
@@ -323,6 +336,29 @@ pub extern "C" fn perry_geisterhand_pump() {
                     }
                 }
             }
+            PendingAction::ReadValue { handle } => {
+                let f = UI_READ_VALUE_FN.load(Ordering::Acquire);
+                let result = if !f.is_null() {
+                    unsafe {
+                        let func: extern "C" fn(i64, *mut usize) -> *mut u8 = std::mem::transmute(f);
+                        let mut len: usize = 0;
+                        let ptr = func(handle, &mut len);
+                        if !ptr.is_null() && len > 0 {
+                            let s = String::from_utf8_lossy(std::slice::from_raw_parts(ptr, len)).into_owned();
+                            libc::free(ptr as *mut libc::c_void);
+                            s
+                        } else {
+                            String::new()
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+                if let Ok(mut r) = VALUE_RESULT.lock() {
+                    *r = Some(result);
+                }
+                VALUE_CONDVAR.notify_all();
+            }
             PendingAction::CaptureScreenshot => {
                 let f = UI_SCREENSHOT_CAPTURE_FN.load(Ordering::Acquire);
                 let (ptr, len) = if !f.is_null() {
@@ -443,6 +479,49 @@ pub extern "C" fn perry_geisterhand_request_screenshot(out_len: *mut usize) -> *
         Some(data) if !data.is_empty() => {
             let len = data.len();
             let boxed = data.into_boxed_slice();
+            let raw = Box::into_raw(boxed);
+            unsafe { *out_len = len; }
+            raw as *mut u8
+        }
+        _ => {
+            unsafe { *out_len = 0; }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Request a widget value read. Called from the HTTP server thread.
+/// Queues a ReadValue action and blocks until the main thread completes it.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_request_value(handle: i64, out_len: *mut usize) -> *mut u8 {
+    if let Ok(mut requested) = VALUE_REQUESTED.lock() {
+        if *requested {
+            unsafe { *out_len = 0; }
+            return std::ptr::null_mut();
+        }
+        *requested = true;
+    }
+    if let Ok(mut result) = VALUE_RESULT.lock() {
+        *result = None;
+    }
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::ReadValue { handle });
+    }
+    let value_str = {
+        let result = VALUE_RESULT.lock().unwrap();
+        let (result, timeout) = VALUE_CONDVAR
+            .wait_timeout_while(result, std::time::Duration::from_secs(5), |r| r.is_none())
+            .unwrap();
+        if timeout.timed_out() { None } else { result.clone() }
+    };
+    if let Ok(mut requested) = VALUE_REQUESTED.lock() {
+        *requested = false;
+    }
+    match value_str {
+        Some(s) if !s.is_empty() => {
+            let bytes = s.into_bytes();
+            let len = bytes.len();
+            let boxed = bytes.into_boxed_slice();
             let raw = Box::into_raw(boxed);
             unsafe { *out_len = len; }
             raw as *mut u8
