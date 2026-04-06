@@ -1034,7 +1034,11 @@ impl Compiler {
                     },
                     is_integer: false,
                     is_integer_array: false,
-                    is_i32: false, is_boolean: false,
+                    is_i32: false,
+                    is_boolean: matches!(ty, HirType::Boolean)
+                        || matches!(init, Some(Expr::Bool(_)))
+                        || matches!(init, Some(Expr::Compare { .. }))
+                        || matches!(init, Some(Expr::Unary { op: perry_hir::UnaryOp::Not, .. })),
                     i32_shadow: None,
                     bounded_by_array: None,
                     bounded_by_constant: None,

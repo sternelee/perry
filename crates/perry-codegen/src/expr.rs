@@ -6161,7 +6161,7 @@ pub(crate) fn compile_expr(
                     // In those cases, use js_is_truthy for correct falsiness (e.g., "" is falsy)
                     fn expr_yields_nanboxed(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                         match expr {
-                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint || i.is_boolean).unwrap_or(false),
+                            Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string || i.is_pointer || i.is_union || i.is_bigint || i.is_boolean || i.is_boxed).unwrap_or(false),
                             Expr::Call { .. } | Expr::PropertyGet { .. } | Expr::IndexGet { .. } | Expr::StaticMethodCall { .. } => true,
                             Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
                             Expr::String(_) | Expr::StringCoerce(_) => true,

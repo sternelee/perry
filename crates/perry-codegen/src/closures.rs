@@ -1607,7 +1607,7 @@ impl crate::codegen::Compiler {
                         is_mixed_array: orig.map(|o| o.is_mixed_array).unwrap_or(false),
                         is_integer: false,
                         is_integer_array: false,
-                        is_i32: false, is_boolean: false,
+                        is_i32: false, is_boolean: orig.map(|o| o.is_boolean).unwrap_or(false),
                         i32_shadow: None,
                         bounded_by_array: None,
                         bounded_by_constant: None,
