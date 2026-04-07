@@ -442,6 +442,12 @@ unsafe fn write_escaped_string(buf: &mut String, s: &str) {
 unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     let bits: u64 = value.to_bits();
 
+    if bits == TAG_UNDEFINED {
+        // In arrays, undefined becomes null. In objects, the field is skipped
+        // (handled by stringify_object). At root level, undefined is not valid JSON.
+        buf.push_str("null");
+        return;
+    }
     if bits == TAG_NULL {
         buf.push_str("null");
         return;
@@ -527,10 +533,20 @@ unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
     // Use keys_len as the iteration count since field_count may include pre-allocated slots.
     // Only the first keys_len fields have corresponding key names.
     let actual_fields = std::cmp::min(num_fields, keys_len);
+    let mut first = true;
     for f in 0..actual_fields {
-        if f > 0 {
+        let field_val = *fields_ptr.add(f as usize);
+        let field_bits = field_val.to_bits();
+
+        // Skip undefined values in objects (JS JSON.stringify spec)
+        if field_bits == TAG_UNDEFINED {
+            continue;
+        }
+
+        if !first {
             buf.push(',');
         }
+        first = false;
 
         if (f as u32) < keys_len {
             let key_f64 = *keys_elements.add(f as usize);
@@ -552,7 +568,6 @@ unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
             let _ = write!(buf, "\"field{}\":", f);
         }
 
-        let field_val = *fields_ptr.add(f as usize);
         stringify_value(field_val, TYPE_UNKNOWN, buf);
     }
     buf.push('}');
@@ -643,9 +658,13 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 
 /// Generic JSON.stringify that handles any JSValue
 /// Takes a f64 (NaN-boxed JSValue) and a type_hint (0=unknown, 1=object, 2=array)
-/// Returns a string pointer
+/// Returns a string pointer (null if value is undefined — per JSON spec)
 #[no_mangle]
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
+    // JSON.stringify(undefined) returns undefined (not a string)
+    if value.to_bits() == TAG_UNDEFINED {
+        return std::ptr::null_mut();
+    }
     let estimated = estimate_json_size(value, type_hint);
     let mut buf = String::with_capacity(estimated);
     stringify_value(value, type_hint, &mut buf);
