@@ -679,6 +679,13 @@ impl crate::codegen::Compiler {
             Expr::StringFromCharCode(code) => {
                 self.collect_closures_from_expr(code, closures, enclosing_class);
             }
+            Expr::StringFromCodePoint(code) => {
+                self.collect_closures_from_expr(code, closures, enclosing_class);
+            }
+            Expr::StringAt { string, index } | Expr::StringCodePointAt { string, index } => {
+                self.collect_closures_from_expr(string, closures, enclosing_class);
+                self.collect_closures_from_expr(index, closures, enclosing_class);
+            }
             Expr::RegExpTest { regex, string } => {
                 self.collect_closures_from_expr(regex, closures, enclosing_class);
                 self.collect_closures_from_expr(string, closures, enclosing_class);
@@ -1641,11 +1648,6 @@ impl crate::codegen::Compiler {
                     // Preserve type info from the original module-level variable
                     // so that array indexing, string comparison, typeof etc. work correctly
                     let orig = self.module_level_locals.get(capture_id);
-                    eprintln!("[CLOSURE DEBUG] mutable capture id={} idx={} orig_in_module_level={} orig_is_array={:?} orig_is_pointer={:?} orig_name={:?}",
-                        capture_id, i, orig.is_some(),
-                        orig.map(|o| o.is_array),
-                        orig.map(|o| o.is_pointer),
-                        orig.and_then(|o| o.name.as_ref()));
                     locals.insert(*capture_id, LocalInfo {
                         var,
                         name: None, // Captures don't have a direct name

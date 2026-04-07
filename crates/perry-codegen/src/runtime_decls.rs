@@ -1909,6 +1909,47 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_string_char_code_at"), func_id);
         }
 
+        // js_string_at(s: *const StringHeader, index: i32) -> f64 (NaN-boxed string or undefined)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_string_at",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_at"), func_id);
+        }
+
+        // js_string_code_point_at(s: *const StringHeader, index: i32) -> f64 (number or undefined)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function(
+                "js_string_code_point_at",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_code_point_at"), func_id);
+        }
+
+        // js_string_from_code_point(code: i32) -> *mut StringHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I32));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(
+                "js_string_from_code_point",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_string_from_code_point"), func_id);
+        }
+
         // js_string_pad_start(s: *const StringHeader, target_length: u32, pad_string: *const StringHeader) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();

@@ -2781,8 +2781,12 @@ impl WasmModuleEmitter {
                 self.collect_strings_in_expr(a);
                 self.collect_strings_in_expr(b);
             }
-            Expr::StringFromCharCode(e) | Expr::StringCoerce(e) => {
+            Expr::StringFromCharCode(e) | Expr::StringFromCodePoint(e) | Expr::StringCoerce(e) => {
                 self.collect_strings_in_expr(e);
+            }
+            Expr::StringAt { string, index } | Expr::StringCodePointAt { string, index } => {
+                self.collect_strings_in_expr(string);
+                self.collect_strings_in_expr(index);
             }
             Expr::ObjectSpread { parts } => {
                 for (key_opt, val) in parts {
@@ -5714,6 +5718,26 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_frame_begin(func, 1);
                 self.emit_store_arg(func, 0, code);
                 self.emit_memcall(func, "string_from_char_code", 1);
+            }
+            Expr::StringFromCodePoint(code) => {
+                // WASM stub: same as fromCharCode for now (BMP-only)
+                self.emit_frame_begin(func, 1);
+                self.emit_store_arg(func, 0, code);
+                self.emit_memcall(func, "string_from_char_code", 1);
+            }
+            Expr::StringAt { string, index } => {
+                // WASM stub: alias to char_at
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, string);
+                self.emit_store_arg(func, 1, index);
+                self.emit_memcall(func, "string_char_at", 2);
+            }
+            Expr::StringCodePointAt { string, index } => {
+                // WASM stub: alias to char_code_at
+                self.emit_frame_begin(func, 2);
+                self.emit_store_arg(func, 0, string);
+                self.emit_store_arg(func, 1, index);
+                self.emit_memcall(func, "string_char_code_at", 2);
             }
             Expr::StringMatch { string, regex } => {
                 self.emit_frame_begin(func, 2);

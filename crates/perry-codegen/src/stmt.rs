@@ -193,7 +193,9 @@ pub(crate) fn compile_async_stmt(
             fn is_string_expr(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
                 match expr {
                     Expr::String(_) => true,
-                    Expr::StringFromCharCode(_) => true,  // String.fromCharCode() returns a string
+                    Expr::StringFromCharCode(_) => true,
+                    Expr::StringFromCodePoint(_) => true,
+                    Expr::StringAt { .. } => true,  // String.fromCharCode() returns a string
                     Expr::ArrayJoin { .. } => true,  // array.join() returns a string
                     Expr::EnvGet(_) | Expr::EnvGetDynamic(_) | Expr::FsReadFileSync(_) => true,
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
@@ -441,6 +443,8 @@ pub(crate) fn compile_stmt(
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
+                    Expr::StringFromCodePoint(_) => true,
+                    Expr::StringAt { .. } => true,
                     // EnvGet is NOT included - it returns string OR undefined (handled as union)
                     Expr::FsReadFileSync(_) => true, // fs.readFileSync returns a string
                     // All path operations return strings
@@ -1504,6 +1508,8 @@ pub(crate) fn compile_stmt(
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
+                    Expr::StringFromCodePoint(_) => true,
+                    Expr::StringAt { .. } => true,
                     Expr::ArrayJoin { .. } => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                     Expr::Binary { op: BinaryOp::Add, left, right } => {

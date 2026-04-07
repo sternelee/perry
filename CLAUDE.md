@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.56
+**Current Version:** 0.4.58
 
 ## Workflow Requirements
 
@@ -139,6 +139,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.58
+- feat: `String.prototype.at` / `String.prototype.codePointAt` / `String.fromCodePoint` — full Unicode support with UTF-16 code unit indexing semantics (matches JS spec, including surrogate pair handling for emoji); multi-arg `String.fromCodePoint(a, b, c)` and `String.fromCharCode(a, b, c)` lowered to a chain of binary string concats; new HIR variants `StringFromCodePoint`/`StringAt`/`StringCodePointAt` and runtime functions `js_string_from_code_point`/`js_string_at`/`js_string_code_point_at`; `is_string_expr` updated in 4 dispatch sites so concatenated `StringFromCodePoint` results take the string-add path
+
+### v0.4.57
+- perf: Windows binaries now dead-strip unused code — `compile.rs` Windows linker branch passes `/OPT:REF /OPT:ICF` to MSVC link.exe / lld-link, the COFF equivalent of `--gc-sections` / `-dead_strip`. These flags are documented as defaults under `/RELEASE` but Perry doesn't pass `/RELEASE`, so the linker fell back to `/OPT:NOREF` and pulled the entire perry-stdlib archive even when only a fraction was used. First step toward shrinking Windows binaries; pairs with upcoming lazy runtime declarations and stdlib subsystem feature-gating.
 
 ### v0.4.56
 - fix: `for (let i = 0; i < capturedArr.length; i++) total += capturedArr[i]` inside closures returned garbage — two for-loop optimizations (i32 counter promotion and array pointer caching) read the box pointer instead of the actual array pointer for boxed mutable captures; both now skip when `is_boxed`. `test_closure_capture_types` passes.

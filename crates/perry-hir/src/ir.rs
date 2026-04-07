@@ -1231,6 +1231,9 @@ pub enum Expr {
     // String methods
     StringSplit(Box<Expr>, Box<Expr>),  // string.split(delimiter) -> string[]
     StringFromCharCode(Box<Expr>),      // String.fromCharCode(code) -> single-char string
+    StringFromCodePoint(Box<Expr>),     // String.fromCodePoint(code) -> string
+    StringAt { string: Box<Expr>, index: Box<Expr> },         // str.at(i) -> string | undefined (negative supported)
+    StringCodePointAt { string: Box<Expr>, index: Box<Expr> }, // str.codePointAt(i) -> number | undefined
 
     // Map operations
     MapNew,                                                    // new Map() -> empty map

@@ -1691,6 +1691,23 @@ impl JsEmitter {
                 self.emit_expr(code);
                 self.output.push(')');
             }
+            Expr::StringFromCodePoint(code) => {
+                self.output.push_str("String.fromCodePoint(");
+                self.emit_expr(code);
+                self.output.push(')');
+            }
+            Expr::StringAt { string, index } => {
+                self.emit_expr(string);
+                self.output.push_str(".at(");
+                self.emit_expr(index);
+                self.output.push(')');
+            }
+            Expr::StringCodePointAt { string, index } => {
+                self.emit_expr(string);
+                self.output.push_str(".codePointAt(");
+                self.emit_expr(index);
+                self.output.push(')');
+            }
 
             // --- Map operations ---
             Expr::MapNew => self.output.push_str("new Map()"),
@@ -2203,6 +2220,23 @@ impl JsEmitter {
                 let _ = write!(self.output, ", ");
                 self.emit_expr(b);
                 let _ = write!(self.output, ")");
+            }
+            Expr::StringFromCodePoint(arg) => {
+                self.output.push_str("String.fromCodePoint(");
+                self.emit_expr(arg);
+                self.output.push(')');
+            }
+            Expr::StringAt { string, index } => {
+                self.emit_expr(string);
+                self.output.push_str(".at(");
+                self.emit_expr(index);
+                self.output.push(')');
+            }
+            Expr::StringCodePointAt { string, index } => {
+                self.emit_expr(string);
+                self.output.push_str(".codePointAt(");
+                self.emit_expr(index);
+                self.output.push(')');
             }
         }
     }

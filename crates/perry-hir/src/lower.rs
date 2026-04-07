@@ -4382,8 +4382,36 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     let method_name = method_ident.sym.as_ref();
                                     match method_name {
                                         "fromCharCode" => {
-                                            if args.len() >= 1 {
+                                            if args.len() == 1 {
                                                 return Ok(Expr::StringFromCharCode(Box::new(args.into_iter().next().unwrap())));
+                                            } else if args.len() > 1 {
+                                                // Multi-arg: concat each char as a separate fromCharCode call
+                                                let mut iter = args.into_iter();
+                                                let mut acc = Expr::StringFromCharCode(Box::new(iter.next().unwrap()));
+                                                for arg in iter {
+                                                    acc = Expr::Binary {
+                                                        op: crate::ir::BinaryOp::Add,
+                                                        left: Box::new(acc),
+                                                        right: Box::new(Expr::StringFromCharCode(Box::new(arg))),
+                                                    };
+                                                }
+                                                return Ok(acc);
+                                            }
+                                        }
+                                        "fromCodePoint" => {
+                                            if args.len() == 1 {
+                                                return Ok(Expr::StringFromCodePoint(Box::new(args.into_iter().next().unwrap())));
+                                            } else if args.len() > 1 {
+                                                let mut iter = args.into_iter();
+                                                let mut acc = Expr::StringFromCodePoint(Box::new(iter.next().unwrap()));
+                                                for arg in iter {
+                                                    acc = Expr::Binary {
+                                                        op: crate::ir::BinaryOp::Add,
+                                                        left: Box::new(acc),
+                                                        right: Box::new(Expr::StringFromCodePoint(Box::new(arg))),
+                                                    };
+                                                }
+                                                return Ok(acc);
                                             }
                                         }
                                         _ => {} // Fall through to generic handling

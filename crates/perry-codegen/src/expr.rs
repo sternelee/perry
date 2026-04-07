@@ -1639,6 +1639,42 @@ pub(crate) fn compile_expr(
             let nanbox_call = builder.ins().call(nanbox_func_ref, &[result_ptr]);
             Ok(builder.inst_results(nanbox_call)[0])
         }
+        Expr::StringFromCodePoint(code_expr) => {
+            // String.fromCodePoint(code) — supports full Unicode code points (incl. surrogate pairs)
+            let code_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, code_expr, this_ctx)?;
+            let code_f64 = ensure_f64(builder, code_val);
+            let code_i32 = builder.ins().fcvt_to_sint_sat(types::I32, code_f64);
+            let func = extern_funcs.get("js_string_from_code_point")
+                .ok_or_else(|| anyhow!("js_string_from_code_point not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[code_i32]);
+            let result_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, result_ptr))
+        }
+        Expr::StringAt { string, index } => {
+            let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
+            let str_ptr = ensure_i64(builder, str_val);
+            let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+            let idx_f64 = ensure_f64(builder, idx_val);
+            let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
+            let func = extern_funcs.get("js_string_at")
+                .ok_or_else(|| anyhow!("js_string_at not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[str_ptr, idx_i32]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::StringCodePointAt { string, index } => {
+            let str_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, string, this_ctx)?;
+            let str_ptr = ensure_i64(builder, str_val);
+            let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+            let idx_f64 = ensure_f64(builder, idx_val);
+            let idx_i32 = builder.ins().fcvt_to_sint_sat(types::I32, idx_f64);
+            let func = extern_funcs.get("js_string_code_point_at")
+                .ok_or_else(|| anyhow!("js_string_code_point_at not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[str_ptr, idx_i32]);
+            Ok(builder.inst_results(call)[0])
+        }
         // Crypto operations
         Expr::CryptoRandomBytes(size_expr) => {
             // Compile size argument (number)
@@ -3271,9 +3307,6 @@ pub(crate) fn compile_expr(
             // Update the local variable with the new pointer (in case of reallocation)
             if info.is_boxed {
                 // For boxed variables (mutable closure captures), write new pointer into the box
-                eprintln!("[CODEGEN DEBUG] ArrayPush boxed path: array_id={} name={:?} is_array={} is_pointer={} is_union={} module_data_id={:?} func={}",
-                    array_id, info.name, info.is_array, info.is_pointer, info.is_union, info.module_var_data_id,
-                    builder.func.name);
                 let box_ptr = builder.use_var(info.var);
                 let box_set_func = extern_funcs.get("js_box_set")
                     .ok_or_else(|| anyhow!("js_box_set not declared"))?;
@@ -4905,6 +4938,8 @@ pub(crate) fn compile_expr(
                                 match expr {
                                     Expr::String(_) => true,
                                     Expr::StringFromCharCode(_) => true,
+                                    Expr::StringFromCodePoint(_) => true,
+                                    Expr::StringAt { .. } => true,
                                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                                     Expr::Binary { op: BinaryOp::Add, left, right } => {
                                         is_string_operand(left, locals) || is_string_operand(right, locals)
@@ -5403,6 +5438,8 @@ pub(crate) fn compile_expr(
                 match expr {
                     Expr::String(_) => true,
                     Expr::StringFromCharCode(_) => true,
+                    Expr::StringFromCodePoint(_) => true,
+                    Expr::StringAt { .. } => true,
                     Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string && !i.is_union).unwrap_or(false),
                     Expr::FsReadFileSync(_) |
                     Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
@@ -9337,6 +9374,36 @@ pub(crate) fn compile_expr(
                                             return Ok(builder.inst_results(nanbox_call)[0]);
                                         }
                                     }
+                                    "at" => {
+                                        // str.at(index) — supports negative indices
+                                        if !arg_vals.is_empty() {
+                                            let func = extern_funcs.get("js_string_at")
+                                                .ok_or_else(|| anyhow!("js_string_at not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                                            let index = {
+                                                let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                                builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                                            };
+                                            let call = builder.ins().call(func_ref, &[str_ptr, index]);
+                                            // returns f64 (NaN-boxed string or undefined)
+                                            return Ok(builder.inst_results(call)[0]);
+                                        }
+                                    }
+                                    "codePointAt" => {
+                                        // str.codePointAt(index)
+                                        if !arg_vals.is_empty() {
+                                            let func = extern_funcs.get("js_string_code_point_at")
+                                                .ok_or_else(|| anyhow!("js_string_code_point_at not declared"))?;
+                                            let func_ref = module.declare_func_in_func(*func, builder.func);
+                                            let index = {
+                                                let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                                builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                                            };
+                                            let call = builder.ins().call(func_ref, &[str_ptr, index]);
+                                            // returns f64 (number or undefined NaN-boxed)
+                                            return Ok(builder.inst_results(call)[0]);
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -11338,6 +11405,32 @@ pub(crate) fn compile_expr(
                                         let call = builder.ins().call(func_ref, &[str_ptr, index]);
                                         let result_f64 = builder.inst_results(call)[0];
                                         return Ok(result_f64);
+                                    }
+                                }
+                                "at" => {
+                                    if !arg_vals.is_empty() {
+                                        let func = extern_funcs.get("js_string_at")
+                                            .ok_or_else(|| anyhow!("js_string_at not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let index = {
+                                            let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                                        };
+                                        let call = builder.ins().call(func_ref, &[str_ptr, index]);
+                                        return Ok(builder.inst_results(call)[0]);
+                                    }
+                                }
+                                "codePointAt" => {
+                                    if !arg_vals.is_empty() {
+                                        let func = extern_funcs.get("js_string_code_point_at")
+                                            .ok_or_else(|| anyhow!("js_string_code_point_at not declared"))?;
+                                        let func_ref = module.declare_func_in_func(*func, builder.func);
+                                        let index = {
+                                            let arg_f64 = ensure_f64(builder, arg_vals[0]);
+                                            builder.ins().fcvt_to_sint_sat(types::I32, arg_f64)
+                                        };
+                                        let call = builder.ins().call(func_ref, &[str_ptr, index]);
+                                        return Ok(builder.inst_results(call)[0]);
                                     }
                                 }
                                 _ => {}
@@ -16301,6 +16394,8 @@ pub(crate) fn compile_expr(
                             match expr {
                                 Expr::String(_) => true,
                                 Expr::StringFromCharCode(_) => true,
+                                Expr::StringFromCodePoint(_) => true,
+                                Expr::StringAt { .. } => true,
                                 Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
                                 Expr::StringCoerce(_) => true,
                                 // String concatenation produces a string
@@ -17831,9 +17926,47 @@ pub(crate) fn compile_expr(
                 let box_alloc_ref = module.declare_func_in_func(*box_alloc_func, builder.func);
 
                 for (i, capture_id) in captures.iter().enumerate() {
+                    // FALLBACK PATH: capture refers to a variable that isn't yet
+                    // in this function's `locals` (typical case: a closure body
+                    // references a module-level var, the HIR adds it to
+                    // `captures`, but the construction site hasn't bound it as a
+                    // local). Without this fallback, the capture slot silently
+                    // gets 0.0 and the closure crashes with NULL box pointer the
+                    // first time it reads it. If the var is a known module-level
+                    // var, store the global slot address as the box pointer
+                    // (matching the slot-as-box trick used elsewhere).
                     if !locals.contains_key(capture_id) {
-                        eprintln!("[CLOSURE BUG] capture id={} idx={} NOT in locals at closure construction — slot will be 0.0 and crash on use",
-                            capture_id, i);
+                        let slot_data_id = crate::util::MODULE_VAR_DATA_IDS.with(|p| {
+                            p.borrow().get(capture_id).copied()
+                        });
+                        if let Some(data_id) = slot_data_id {
+                            let global_val = module.declare_data_in_func(data_id, builder.func);
+                            let slot_addr = builder.ins().global_value(types::I64, global_val);
+                            // The slot address itself acts as the box pointer (slot-as-box).
+                            // Bitcast to f64 for closure capture storage.
+                            let val_to_store = builder.ins().bitcast(types::F64, MemFlags::new(), slot_addr);
+                            let idx = builder.ins().iconst(types::I32, (i + capture_offset) as i64);
+                            builder.ins().call(set_ref, &[closure_ptr, idx, val_to_store]);
+                            continue;
+                        } else {
+                            // Not in module_var_data_ids either — allocate a fresh box
+                            // initialized with 0.0 so the closure body's reads/writes
+                            // operate on a valid heap box. The captured variable will
+                            // appear as `0`/`false`/`undefined` to the closure, and any
+                            // mutations write to the local box (orphaned from the outer
+                            // scope, which is fine because by definition the outer scope
+                            // didn't bind this id at the construction site). This is
+                            // strictly better than writing 0.0 (NULL box pointer →
+                            // runtime warnings + dropped writes) and preserves slot
+                            // index alignment.
+                            let zero_f64 = builder.ins().f64const(0.0);
+                            let alloc_call = builder.ins().call(box_alloc_ref, &[zero_f64]);
+                            let box_ptr = builder.inst_results(alloc_call)[0];
+                            let val_to_store = builder.ins().bitcast(types::F64, MemFlags::new(), box_ptr);
+                            let idx = builder.ins().iconst(types::I32, (i + capture_offset) as i64);
+                            builder.ins().call(set_ref, &[closure_ptr, idx, val_to_store]);
+                            continue;
+                        }
                     }
                     if let Some(info) = locals.get(capture_id) {
                         let val = builder.use_var(info.var);

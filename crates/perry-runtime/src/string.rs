@@ -709,6 +709,81 @@ pub extern "C" fn js_string_from_char_code(code: i32) -> *mut StringHeader {
     js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32)
 }
 
+/// Create a string from a Unicode code point (String.fromCodePoint).
+/// Supports the full Unicode range (0..0x10FFFF), unlike fromCharCode (0..0xFFFF).
+#[no_mangle]
+pub extern "C" fn js_string_from_code_point(code: i32) -> *mut StringHeader {
+    if code < 0 || code > 0x10FFFF {
+        return js_string_from_bytes(std::ptr::null(), 0);
+    }
+    let ch = match char::from_u32(code as u32) {
+        Some(c) => c,
+        None => return js_string_from_bytes(std::ptr::null(), 0),
+    };
+    let mut buf = [0u8; 4];
+    let encoded = ch.encode_utf8(&mut buf);
+    js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32)
+}
+
+/// String.prototype.at(index) — supports negative indices.
+/// Returns NaN-boxed single-char string, or NaN-boxed undefined if out of bounds.
+/// Index is in UTF-16 code units (matches JS spec).
+#[no_mangle]
+pub extern "C" fn js_string_at(s: *const StringHeader, index: i32) -> f64 {
+    if !is_valid_string_ptr(s) {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    let str_data = string_as_str(s);
+    let utf16: Vec<u16> = str_data.encode_utf16().collect();
+    let len = utf16.len() as i32;
+    let resolved = if index < 0 { len + index } else { index };
+    if resolved < 0 || resolved >= len {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    // Decode the UTF-16 code unit at `resolved`. If it's a high surrogate followed
+    // by a low surrogate, decode the pair; otherwise the unit is the code point.
+    let unit = utf16[resolved as usize];
+    let cp: u32 = if (0xD800..=0xDBFF).contains(&unit) && (resolved + 1) < len {
+        let next = utf16[(resolved + 1) as usize];
+        if (0xDC00..=0xDFFF).contains(&next) {
+            0x10000 + ((unit as u32 - 0xD800) << 10) + (next as u32 - 0xDC00)
+        } else {
+            unit as u32
+        }
+    } else {
+        unit as u32
+    };
+    let ch = char::from_u32(cp).unwrap_or('\u{FFFD}');
+    let mut buf = [0u8; 4];
+    let encoded = ch.encode_utf8(&mut buf);
+    let ptr = js_string_from_bytes(encoded.as_ptr(), encoded.len() as u32);
+    crate::value::js_nanbox_string(ptr as i64)
+}
+
+/// String.prototype.codePointAt(index) — returns the Unicode code point at the given
+/// UTF-16 code unit position, or NaN-boxed undefined if out of bounds.
+#[no_mangle]
+pub extern "C" fn js_string_code_point_at(s: *const StringHeader, index: i32) -> f64 {
+    if !is_valid_string_ptr(s) || index < 0 {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    let str_data = string_as_str(s);
+    let utf16: Vec<u16> = str_data.encode_utf16().collect();
+    let len = utf16.len() as i32;
+    if index >= len {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    let unit = utf16[index as usize];
+    if (0xD800..=0xDBFF).contains(&unit) && (index + 1) < len {
+        let next = utf16[(index + 1) as usize];
+        if (0xDC00..=0xDFFF).contains(&next) {
+            let cp = 0x10000 + ((unit as u32 - 0xD800) << 10) + (next as u32 - 0xDC00);
+            return cp as f64;
+        }
+    }
+    unit as f64
+}
+
 /// Print a string to stdout
 #[no_mangle]
 pub extern "C" fn js_string_print(s: *const StringHeader) {
