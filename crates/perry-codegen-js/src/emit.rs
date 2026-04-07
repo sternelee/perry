@@ -2079,6 +2079,19 @@ impl JsEmitter {
             Expr::StaticPluginResolve(_) => {
                 self.output.push_str("undefined");
             }
+            Expr::PerformanceNow => {
+                self.output.push_str("performance.now()");
+            }
+            Expr::Atob(inner) => {
+                self.output.push_str("atob(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
+            Expr::Btoa(inner) => {
+                self.output.push_str("btoa(");
+                self.emit_expr(inner);
+                self.output.push(')');
+            }
 
             // --- V8/JS interop (passthrough in browser) ---
             Expr::JsLoadModule { path } => {

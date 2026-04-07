@@ -782,6 +782,10 @@ impl crate::codegen::Compiler {
             Expr::MathHypot(args) => {
                 for a in args { self.collect_closures_from_expr(a, closures, enclosing_class); }
             }
+            Expr::PerformanceNow => {}
+            Expr::Atob(inner) | Expr::Btoa(inner) => {
+                self.collect_closures_from_expr(inner, closures, enclosing_class);
+            }
             // Crypto operations
             Expr::CryptoRandomBytes(inner) | Expr::CryptoSha256(inner) | Expr::CryptoMd5(inner) => {
                 self.collect_closures_from_expr(inner, closures, enclosing_class);
@@ -942,6 +946,9 @@ impl crate::codegen::Compiler {
             Expr::UrlSearchParamsNew(None) |
             Expr::RegExp { .. } | Expr::JsLoadModule { .. } | Expr::ImportMetaUrl(_) => {
                 // No inner expressions to traverse
+            }
+            _ => {
+                // Catch-all for HIR variants without inner expressions
             }
         }
     }

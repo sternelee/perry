@@ -14811,16 +14811,55 @@ pub(crate) fn compile_expr(
             // Handle object literal field set via compile-time known field indices.
             // When a variable was assigned from an object literal, we know the field ordering
             // and can use direct offset stores instead of the slow string-based runtime lookup.
+            //
+            // This applies regardless of whether `info.class_name` is set: the class_name
+            // may be an interface name (e.g. `License`) that has no entry in `classes`,
+            // so the class-instance path above falls through. As long as we have
+            // `object_field_indices` (populated when the variable was initialized from a
+            // literal), we can use the same direct-offset store.
             if let Expr::LocalGet(id) = object.as_ref() {
                 if let Some(info) = locals.get(id) {
-                    if info.class_name.is_none() {
+                    let interface_field_set = info.class_name.as_ref()
+                        .map(|n| !classes.contains_key(n))
+                        .unwrap_or(true);
+                    if interface_field_set {
                         if let Some(ref field_indices) = info.object_field_indices {
                             if let Some(&field_idx) = field_indices.get(property) {
+                                // Detect whether the value being assigned is a string —
+                                // strings need STRING_TAG NaN-boxing, not POINTER_TAG.
+                                // Without this, reading the field back returns "[object Object]"
+                                // because the codegen interprets POINTER_TAG as a generic
+                                // object pointer. Mirrors the same check the class-instance
+                                // path does using class_meta.field_types.
+                                fn is_string_value(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                                    match expr {
+                                        Expr::String(_) => true,
+                                        Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
+                                        Expr::FsReadFileSync(_) => true,
+                                        Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
+                                        Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) |
+                                        Expr::JsonStringify(_) => true,
+                                        Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
+                                        Expr::OsTmpdir | Expr::OsType | Expr::OsRelease | Expr::OsEOL => true,
+                                        Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                                        _ => false,
+                                    }
+                                }
+                                let value_is_string = is_string_value(value, locals);
+
                                 let obj_val = builder.use_var(info.var);
                                 let obj_ptr = ensure_i64(builder, obj_val);
                                 let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
                                 let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
-                                    inline_nanbox_pointer(builder, val)
+                                    if value_is_string {
+                                        let nanbox_func = extern_funcs.get("js_nanbox_string")
+                                            .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                                        let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                                        let call = builder.ins().call(nanbox_ref, &[val]);
+                                        builder.inst_results(call)[0]
+                                    } else {
+                                        inline_nanbox_pointer(builder, val)
+                                    }
                                 } else {
                                     ensure_f64(builder, val)
                                 };
@@ -14930,13 +14969,40 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(alloc_ref, &[slot_addr, len_val]);
             let key_str_ptr = builder.inst_results(call)[0];
 
+            // Detect if the value is a string before compiling — strings need STRING_TAG
+            // NaN-boxing, not POINTER_TAG. Without this, reading the field back returns
+            // "[object Object]" because POINTER_TAG is interpreted as a generic object.
+            fn is_string_value(expr: &Expr, locals: &HashMap<LocalId, LocalInfo>) -> bool {
+                match expr {
+                    Expr::String(_) => true,
+                    Expr::EnvGet(_) | Expr::EnvGetDynamic(_) => true,
+                    Expr::FsReadFileSync(_) => true,
+                    Expr::PathJoin(_, _) | Expr::PathDirname(_) | Expr::PathBasename(_) |
+                    Expr::PathExtname(_) | Expr::PathResolve(_) | Expr::FileURLToPath(_) |
+                    Expr::JsonStringify(_) => true,
+                    Expr::OsPlatform | Expr::OsArch | Expr::OsHostname | Expr::OsHomedir |
+                    Expr::OsTmpdir | Expr::OsType | Expr::OsRelease | Expr::OsEOL => true,
+                    Expr::LocalGet(id) => locals.get(id).map(|i| i.is_string).unwrap_or(false),
+                    _ => false,
+                }
+            }
+            let value_is_string = is_string_value(value, locals);
+
             // Compile the value
             let val_raw = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, value, this_ctx)?;
-            // NaN-box I64 pointers with POINTER_TAG so they can be retrieved correctly later.
-            // Raw ensure_f64 bitcast strips the tag, making closures/objects unrecognizable.
+            // NaN-box I64 pointers with the correct tag (STRING_TAG for strings,
+            // POINTER_TAG for everything else) so they can be retrieved correctly later.
             let val_type = builder.func.dfg.value_type(val_raw);
             let val = if val_type == types::I64 {
-                inline_nanbox_pointer(builder, val_raw)
+                if value_is_string {
+                    let nanbox_func = extern_funcs.get("js_nanbox_string")
+                        .ok_or_else(|| anyhow!("js_nanbox_string not declared"))?;
+                    let nanbox_ref = module.declare_func_in_func(*nanbox_func, builder.func);
+                    let call = builder.ins().call(nanbox_ref, &[val_raw]);
+                    builder.inst_results(call)[0]
+                } else {
+                    inline_nanbox_pointer(builder, val_raw)
+                }
             } else {
                 ensure_f64(builder, val_raw)
             };
@@ -24684,6 +24750,36 @@ pub(crate) fn compile_expr(
                 }
                 Ok(result)
             }
+        }
+
+        Expr::PerformanceNow => {
+            let func = extern_funcs.get("js_performance_now")
+                .ok_or_else(|| anyhow!("js_performance_now not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::Atob(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                inline_nanbox_string(builder, val)
+            } else { val };
+            let func = extern_funcs.get("js_atob").ok_or_else(|| anyhow!("js_atob not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let str_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, str_ptr))
+        }
+        Expr::Btoa(inner) => {
+            let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, inner, this_ctx)?;
+            let val_f64 = if builder.func.dfg.value_type(val) == types::I64 {
+                inline_nanbox_string(builder, val)
+            } else { val };
+            let func = extern_funcs.get("js_btoa").ok_or_else(|| anyhow!("js_btoa not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[val_f64]);
+            let str_ptr = builder.inst_results(call)[0];
+            Ok(inline_nanbox_string(builder, str_ptr))
         }
 
         _ => Err(anyhow!("Unsupported expression: {:?}", expr)),

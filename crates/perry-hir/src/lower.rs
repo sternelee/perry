@@ -4139,6 +4139,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 }
                             }
 
+                            // Check for performance.now()
+                            if obj_ident.sym.as_ref() == "performance" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    if method_ident.sym.as_ref() == "now" {
+                                        return Ok(Expr::PerformanceNow);
+                                    }
+                                }
+                            }
+
                             // Check for Math.methodName() calls
                             if obj_ident.sym.as_ref() == "Math" {
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
@@ -5742,6 +5751,20 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     return Ok(Expr::IsFinite(Box::new(args.remove(0))));
                                 } else {
                                     return Err(anyhow!("isFinite requires one argument"));
+                                }
+                            }
+                            "atob" => {
+                                if args.len() >= 1 {
+                                    return Ok(Expr::Atob(Box::new(args.remove(0))));
+                                } else {
+                                    return Err(anyhow!("atob requires one argument"));
+                                }
+                            }
+                            "btoa" => {
+                                if args.len() >= 1 {
+                                    return Ok(Expr::Btoa(Box::new(args.remove(0))));
+                                } else {
+                                    return Err(anyhow!("btoa requires one argument"));
                                 }
                             }
                             "perryResolveStaticPlugin" => {

@@ -7265,6 +7265,23 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_math_random"), func_id);
         }
 
+        // js_performance_now() -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_performance_now", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_performance_now"), func_id);
+        }
+
+        // js_atob/js_btoa(value: f64) -> i64
+        for name in &["js_atob", "js_btoa"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
+        }
+
         // js_math_min_array(arr_ptr: i64) -> f64
         {
             let mut sig = self.module.make_signature();

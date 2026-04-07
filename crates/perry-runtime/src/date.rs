@@ -14,6 +14,16 @@ pub extern "C" fn js_date_now() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// performance.now() — high-resolution time in milliseconds (sub-ms precision).
+/// Returns ms since UNIX_EPOCH as f64; the float retains microsecond resolution.
+#[no_mangle]
+pub extern "C" fn js_performance_now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0)
+}
+
 /// Create a new Date from current time, returning timestamp in milliseconds
 #[no_mangle]
 pub extern "C" fn js_date_new() -> f64 {

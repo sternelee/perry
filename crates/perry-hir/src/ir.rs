@@ -1041,6 +1041,13 @@ pub enum Expr {
     MathAcosh(Box<Expr>),                // Math.acosh(x) -> number
     MathAtanh(Box<Expr>),                // Math.atanh(x) -> number
 
+    /// performance.now() -> number (high-resolution time in ms)
+    PerformanceNow,
+    /// atob(base64) -> string
+    Atob(Box<Expr>),
+    /// btoa(string) -> string
+    Btoa(Box<Expr>),
+
     // Crypto operations
     CryptoRandomBytes(Box<Expr>),        // crypto.randomBytes(size) -> string (hex)
     CryptoRandomUUID,                    // crypto.randomUUID() -> string
