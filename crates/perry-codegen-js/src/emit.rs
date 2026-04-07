@@ -1364,11 +1364,20 @@ impl JsEmitter {
                 self.emit_expr(space);
                 self.output.push(')');
             }
-            Expr::JsonParseReviver { text, reviver } => {
+            Expr::JsonParseReviver { text, reviver } | Expr::JsonParseWithReviver(text, reviver) => {
                 self.output.push_str("JSON.parse(");
                 self.emit_expr(text);
                 self.output.push_str(", ");
                 self.emit_expr(reviver);
+                self.output.push(')');
+            }
+            Expr::JsonStringifyFull(value, replacer, spacer) => {
+                self.output.push_str("JSON.stringify(");
+                self.emit_expr(value);
+                self.output.push_str(", ");
+                self.emit_expr(replacer);
+                self.output.push_str(", ");
+                self.emit_expr(spacer);
                 self.output.push(')');
             }
 

@@ -873,7 +873,7 @@ impl crate::codegen::Compiler {
             Expr::JsonParse(expr) | Expr::JsonStringify(expr) => {
                 self.collect_closures_from_expr(expr, closures, enclosing_class);
             }
-            Expr::JsonParseReviver { text, reviver } => {
+            Expr::JsonParseReviver { text, reviver } | Expr::JsonParseWithReviver(text, reviver) => {
                 self.collect_closures_from_expr(text, closures, enclosing_class);
                 self.collect_closures_from_expr(reviver, closures, enclosing_class);
             }
@@ -881,6 +881,11 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(value, closures, enclosing_class);
                 if let Some(r) = replacer { self.collect_closures_from_expr(r, closures, enclosing_class); }
                 self.collect_closures_from_expr(space, closures, enclosing_class);
+            }
+            Expr::JsonStringifyFull(value, replacer, spacer) => {
+                self.collect_closures_from_expr(value, closures, enclosing_class);
+                self.collect_closures_from_expr(replacer, closures, enclosing_class);
+                self.collect_closures_from_expr(spacer, closures, enclosing_class);
             }
             // Math operations
             Expr::MathFloor(expr) | Expr::MathCeil(expr) | Expr::MathRound(expr) |

@@ -8,7 +8,14 @@ use crate::{
     js_array_alloc, js_array_push, js_object_alloc, js_object_set_field,
     js_object_set_keys, js_string_from_bytes, JSValue, StringHeader,
 };
+use std::cell::RefCell;
 use std::fmt::Write as FmtWrite;
+
+// ─── Circular reference detection ────────────────────────────────────────────
+thread_local! {
+    /// Stack of object pointers currently being stringified (for circular detection).
+    static STRINGIFY_STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+}
 
 // ─── Zero-copy string access ──────────────────────────────────────────────────
 
@@ -439,15 +446,66 @@ unsafe fn write_escaped_string(buf: &mut String, s: &str) {
     buf.push('"');
 }
 
+/// Check if a NaN-boxed value is a closure (function).
+#[inline]
+unsafe fn is_closure_value(bits: u64) -> bool {
+    if let Some(ptr) = extract_pointer(bits) {
+        // Check for ClosureHeader magic at offset 8 (type_tag field)
+        let type_tag = *((ptr as *const u8).add(12) as *const u32);
+        type_tag == crate::closure::CLOSURE_MAGIC
+    } else {
+        false
+    }
+}
+
+/// Check if an object has a toJSON method. If so, call it and return the result as f64.
+/// Returns None if no toJSON method exists.
+#[inline]
+unsafe fn object_get_to_json(ptr: *const u8) -> Option<f64> {
+    let obj = ptr as *const crate::ObjectHeader;
+    let keys_arr = (*obj).keys_array;
+    if keys_arr.is_null() {
+        return None;
+    }
+    let keys_len = (*keys_arr).length;
+    let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+    let fields_ptr = (ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
+
+    for f in 0..keys_len {
+        let key_f64 = *keys_elements.add(f as usize);
+        let key_bits = key_f64.to_bits();
+        let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+        let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+            (key_bits & POINTER_MASK) as *const StringHeader
+        } else {
+            key_bits as *const StringHeader
+        };
+        if let Some(key_str) = str_from_header(key_ptr) {
+            if key_str == "toJSON" {
+                let field_val = *fields_ptr.add(f as usize);
+                let field_bits = field_val.to_bits();
+                // Check if this field is a closure
+                if is_closure_value(field_bits) {
+                    let closure_ptr = if (field_bits & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+                        (field_bits & POINTER_MASK) as *const crate::closure::ClosureHeader
+                    } else {
+                        field_bits as *const crate::closure::ClosureHeader
+                    };
+                    // Call toJSON() with no arguments (pass empty string key per spec)
+                    let empty_str = js_string_from_bytes(b"".as_ptr(), 0);
+                    let key_f64_arg = f64::from_bits(STRING_TAG | (empty_str as u64 & POINTER_MASK));
+                    let result = crate::js_closure_call1(closure_ptr, key_f64_arg);
+                    return Some(result);
+                }
+            }
+        }
+    }
+    None
+}
+
 unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
     let bits: u64 = value.to_bits();
 
-    if bits == TAG_UNDEFINED {
-        // In arrays, undefined becomes null. In objects, the field is skipped
-        // (handled by stringify_object). At root level, undefined is not valid JSON.
-        buf.push_str("null");
-        return;
-    }
     if bits == TAG_NULL {
         buf.push_str("null");
         return;
@@ -520,6 +578,24 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
 }
 
 unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
+    // Circular reference check
+    if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
+        let msg = "Converting circular structure to JSON";
+        let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+        let err_ptr = crate::error::js_error_new_with_message(msg_ptr);
+        let type_error_name = js_string_from_bytes(b"TypeError".as_ptr(), 9);
+        (*err_ptr).name = type_error_name;
+        crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
+    }
+    STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
+
+    // Check for toJSON method
+    if let Some(to_json_val) = object_get_to_json(ptr) {
+        STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+        stringify_value(to_json_val, TYPE_UNKNOWN, buf);
+        return;
+    }
+
     let obj = ptr as *const crate::ObjectHeader;
     let num_fields = (*obj).field_count;
     buf.push('{');
@@ -537,9 +613,11 @@ unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
     for f in 0..actual_fields {
         let field_val = *fields_ptr.add(f as usize);
         let field_bits = field_val.to_bits();
-
-        // Skip undefined values in objects (JS JSON.stringify spec)
+        // Skip undefined and function/closure values per JSON spec
         if field_bits == TAG_UNDEFINED {
+            continue;
+        }
+        if is_closure_value(field_bits) {
             continue;
         }
 
@@ -571,6 +649,7 @@ unsafe fn stringify_object(ptr: *const u8, buf: &mut String) {
         stringify_value(field_val, TYPE_UNKNOWN, buf);
     }
     buf.push('}');
+    STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
 }
 
 unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
@@ -587,7 +666,9 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
         let elem_bits = elem.to_bits();
         let elem_tag = elem_bits & 0xFFFF_0000_0000_0000;
 
-        if elem_tag == STRING_TAG {
+        if elem_bits == TAG_UNDEFINED {
+            buf.push_str("null"); // undefined in arrays becomes null per JSON spec
+        } else if elem_tag == STRING_TAG {
             let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
                 write_escaped_string(buf, s);
@@ -658,13 +739,9 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 
 /// Generic JSON.stringify that handles any JSValue
 /// Takes a f64 (NaN-boxed JSValue) and a type_hint (0=unknown, 1=object, 2=array)
-/// Returns a string pointer (null if value is undefined — per JSON spec)
+/// Returns a string pointer
 #[no_mangle]
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
-    // JSON.stringify(undefined) returns undefined (not a string)
-    if value.to_bits() == TAG_UNDEFINED {
-        return std::ptr::null_mut();
-    }
     let estimated = estimate_json_size(value, type_hint);
     let mut buf = String::with_capacity(estimated);
     stringify_value(value, type_hint, &mut buf);
@@ -1215,141 +1292,534 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
     js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
 }
 
-/// JSON.stringify(value, replacer?, space) — pretty-printing and/or replacer support.
-#[no_mangle]
-pub unsafe extern "C" fn js_json_stringify_pretty(
-    value: f64,
-    replacer_ptr: i64,
-    space_f64: f64,
-) -> *mut StringHeader {
-    // First, produce the compact JSON (with or without replacer)
-    let compact = if replacer_ptr != 0 {
-        js_json_stringify_with_replacer(value, 0, replacer_ptr)
-    } else {
-        js_json_stringify(value, 0)
-    };
-    if compact.is_null() {
-        return std::ptr::null_mut();
+// ─── Pretty-print stringify ─────────────────────────────────────────────────
+
+unsafe fn stringify_value_pretty(value: f64, type_hint: u32, buf: &mut String, indent: &str, depth: usize) {
+    let bits: u64 = value.to_bits();
+
+    if bits == TAG_NULL || bits == TAG_UNDEFINED {
+        buf.push_str("null");
+        return;
+    }
+    if bits == TAG_TRUE {
+        buf.push_str("true");
+        return;
+    }
+    if bits == TAG_FALSE {
+        buf.push_str("false");
+        return;
     }
 
-    // Determine the indent string from the space parameter
-    let space_bits = space_f64.to_bits();
-    let space_tag = space_bits & 0xFFFF_0000_0000_0000;
-    let indent: String = if space_tag == STRING_TAG {
-        // String indent (e.g. "\t")
-        let ptr = (space_bits & POINTER_MASK) as *const StringHeader;
-        let len = (*ptr).length as usize;
-        let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-        std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("").to_string()
-    } else {
-        // Numeric indent
-        let n = if space_f64.is_nan() || space_f64 <= 0.0 { 0 } else { space_f64 as usize };
-        if n == 0 { return compact; }
-        " ".repeat(n.min(10))
-    };
-
-    if indent.is_empty() {
-        return compact;
-    }
-
-    // Re-format the compact JSON with indentation using serde_json
-    let compact_len = (*compact).length as usize;
-    let compact_data = (compact as *const u8).add(std::mem::size_of::<StringHeader>());
-    let compact_bytes = std::slice::from_raw_parts(compact_data, compact_len);
-    let compact_str = std::str::from_utf8(compact_bytes).unwrap_or("");
-    match serde_json::from_str::<serde_json::Value>(compact_str) {
-        Ok(parsed) => {
-            let mut writer = Vec::new();
-            let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
-            let mut ser = serde_json::Serializer::with_formatter(&mut writer, formatter);
-            if serde_json::to_writer(&mut writer, &parsed).is_err() {
-                // Fallback: try with the formatter
-                writer.clear();
-            }
-            // Re-do with the custom formatter
-            writer.clear();
-            {
-                use std::io::Write;
-                // Manual pretty-print by re-serializing
-                let pretty_str = serde_json::to_string_pretty(&parsed).unwrap_or_default();
-                // serde_json::to_string_pretty uses 2-space indent. If indent != "  ", we need to replace.
-                let default_indent = "  ";
-                let result = if indent == default_indent {
-                    pretty_str
-                } else {
-                    // Replace each indent level
-                    let mut output = String::new();
-                    for line in pretty_str.lines() {
-                        let stripped = line.trim_start_matches(' ');
-                        let spaces = line.len() - stripped.len();
-                        let level = spaces / 2;
-                        for _ in 0..level { output.push_str(&indent); }
-                        output.push_str(stripped);
-                        output.push('\n');
-                    }
-                    if output.ends_with('\n') { output.pop(); }
-                    output
-                };
-                let _ = write!(writer, "{}", result);
-            }
-            if !writer.is_empty() {
-                return js_string_from_bytes(writer.as_ptr(), writer.len() as u32);
-            }
-            compact
+    let tag = bits & 0xFFFF_0000_0000_0000;
+    if tag == STRING_TAG {
+        let str_ptr = (bits & POINTER_MASK) as *const StringHeader;
+        if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
         }
-        Err(_) => compact,
+        return;
+    }
+
+    if tag == BIGINT_TAG {
+        let bigint_ptr = (bits & POINTER_MASK) as *const crate::BigIntHeader;
+        let str_ptr = crate::bigint::js_bigint_to_string(bigint_ptr);
+        if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+
+    if let Some(ptr) = extract_pointer(bits) {
+        if type_hint == TYPE_OBJECT || (type_hint == TYPE_UNKNOWN && is_object_pointer(ptr)) {
+            stringify_object_pretty(ptr, buf, indent, depth);
+        } else if type_hint == TYPE_ARRAY {
+            stringify_array_pretty(ptr, buf, indent, depth);
+        } else {
+            let arr = ptr as *const crate::ArrayHeader;
+            if !arr.is_null() {
+                let len = (*arr).length;
+                let cap = (*arr).capacity;
+                if len <= cap && cap > 0 && cap < 10000 && !is_object_pointer(ptr) {
+                    stringify_array_pretty(ptr, buf, indent, depth);
+                    return;
+                }
+            }
+            if is_object_pointer(ptr) {
+                stringify_object_pretty(ptr, buf, indent, depth);
+            } else {
+                let str_ptr = ptr as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            }
+        }
+        return;
+    }
+
+    write_number(buf, value);
+}
+
+unsafe fn stringify_object_pretty(ptr: *const u8, buf: &mut String, indent: &str, depth: usize) {
+    // Circular reference check
+    if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
+        let msg = "Converting circular structure to JSON";
+        let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+        // Create a TypeError error object
+        let err_ptr = crate::error::js_error_new_with_message(msg_ptr);
+        // Set the name to "TypeError"
+        let type_error_name = js_string_from_bytes(b"TypeError".as_ptr(), 9);
+        (*err_ptr).name = type_error_name;
+        crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
+    }
+    STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
+
+    // Check for toJSON method
+    if let Some(to_json_val) = object_get_to_json(ptr) {
+        STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+        stringify_value_pretty(to_json_val, TYPE_UNKNOWN, buf, indent, depth);
+        return;
+    }
+
+    let obj = ptr as *const crate::ObjectHeader;
+    let num_fields = (*obj).field_count;
+    let keys_arr = (*obj).keys_array;
+    let keys_len = (*keys_arr).length;
+    let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+    let fields_ptr = (ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
+    let actual_fields = std::cmp::min(num_fields, keys_len);
+
+    // Collect non-undefined, non-closure fields
+    let mut entries: Vec<(String, f64)> = Vec::new();
+    for f in 0..actual_fields {
+        let field_val = *fields_ptr.add(f as usize);
+        let field_bits = field_val.to_bits();
+        if field_bits == TAG_UNDEFINED || is_closure_value(field_bits) {
+            continue;
+        }
+        let key_name = if (f as u32) < keys_len {
+            let key_f64 = *keys_elements.add(f as usize);
+            let key_bits = key_f64.to_bits();
+            let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+            let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+                (key_bits & POINTER_MASK) as *const StringHeader
+            } else {
+                key_bits as *const StringHeader
+            };
+            str_from_header(key_ptr).map(|s| s.to_string()).unwrap_or_else(|| format!("field{}", f))
+        } else {
+            format!("field{}", f)
+        };
+        entries.push((key_name, field_val));
+    }
+
+    if entries.is_empty() {
+        buf.push_str("{}");
+        STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+        return;
+    }
+
+    buf.push_str("{\n");
+    let inner_indent_count = depth + 1;
+    for (i, (key_name, field_val)) in entries.iter().enumerate() {
+        for _ in 0..inner_indent_count {
+            buf.push_str(indent);
+        }
+        buf.push('"');
+        buf.push_str(&key_name);
+        buf.push_str("\": ");
+        stringify_value_pretty(*field_val, TYPE_UNKNOWN, buf, indent, inner_indent_count);
+        if i + 1 < entries.len() {
+            buf.push(',');
+        }
+        buf.push('\n');
+    }
+    for _ in 0..depth {
+        buf.push_str(indent);
+    }
+    buf.push('}');
+    STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+}
+
+unsafe fn stringify_array_pretty(ptr: *const u8, buf: &mut String, indent: &str, depth: usize) {
+    let arr = ptr as *const crate::ArrayHeader;
+    let len = (*arr).length;
+    let elements = (arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+
+    if len == 0 {
+        buf.push_str("[]");
+        return;
+    }
+
+    buf.push_str("[\n");
+    let inner_indent_count = depth + 1;
+    for i in 0..len {
+        for _ in 0..inner_indent_count {
+            buf.push_str(indent);
+        }
+        let elem = *elements.add(i as usize);
+        let elem_bits = elem.to_bits();
+        if elem_bits == TAG_UNDEFINED {
+            buf.push_str("null");
+        } else {
+            stringify_value_pretty(elem, TYPE_UNKNOWN, buf, indent, inner_indent_count);
+        }
+        if i + 1 < len {
+            buf.push(',');
+        }
+        buf.push('\n');
+    }
+    for _ in 0..depth {
+        buf.push_str(indent);
+    }
+    buf.push(']');
+}
+
+// ─── Array replacer (key whitelist) stringify ────────────────────────────────
+
+unsafe fn stringify_object_with_array_replacer(
+    ptr: *const u8,
+    allowed_keys: &[String],
+    buf: &mut String,
+    indent: &str,
+    depth: usize,
+    use_pretty: bool,
+) {
+    // Circular reference check
+    if STRINGIFY_STACK.with(|s| s.borrow().contains(&(ptr as usize))) {
+        let msg = "Converting circular structure to JSON";
+        let msg_ptr = js_string_from_bytes(msg.as_ptr(), msg.len() as u32);
+        // Create a TypeError error object
+        let err_ptr = crate::error::js_error_new_with_message(msg_ptr);
+        // Set the name to "TypeError"
+        let type_error_name = js_string_from_bytes(b"TypeError".as_ptr(), 9);
+        (*err_ptr).name = type_error_name;
+        crate::exception::js_throw(f64::from_bits(POINTER_TAG | (err_ptr as u64 & POINTER_MASK)));
+    }
+    STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
+
+    let obj = ptr as *const crate::ObjectHeader;
+    let num_fields = (*obj).field_count;
+    let keys_arr = (*obj).keys_array;
+    let keys_len = (*keys_arr).length;
+    let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+    let fields_ptr = (ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
+    let actual_fields = std::cmp::min(num_fields, keys_len);
+
+    // Build a map of key_name -> field_value for the object
+    let mut field_map: Vec<(String, f64)> = Vec::new();
+    for f in 0..actual_fields {
+        let field_val = *fields_ptr.add(f as usize);
+        let key_name = if (f as u32) < keys_len {
+            let key_f64 = *keys_elements.add(f as usize);
+            let key_bits = key_f64.to_bits();
+            let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+            let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+                (key_bits & POINTER_MASK) as *const StringHeader
+            } else {
+                key_bits as *const StringHeader
+            };
+            str_from_header(key_ptr).map(|s| s.to_string()).unwrap_or_else(|| format!("field{}", f))
+        } else {
+            format!("field{}", f)
+        };
+        field_map.push((key_name, field_val));
+    }
+
+    buf.push('{');
+    let mut first = true;
+    for allowed_key in allowed_keys {
+        if let Some((_, field_val)) = field_map.iter().find(|(k, _)| k == allowed_key) {
+            let field_bits = field_val.to_bits();
+            if field_bits == TAG_UNDEFINED || is_closure_value(field_bits) {
+                continue;
+            }
+            if !first {
+                buf.push(',');
+            }
+            first = false;
+            if use_pretty {
+                buf.push('\n');
+                let inner_indent_count = depth + 1;
+                for _ in 0..inner_indent_count {
+                    buf.push_str(indent);
+                }
+                buf.push('"');
+                buf.push_str(allowed_key);
+                buf.push_str("\": ");
+                stringify_value_pretty(*field_val, TYPE_UNKNOWN, buf, indent, inner_indent_count);
+            } else {
+                buf.push('"');
+                buf.push_str(allowed_key);
+                buf.push_str("\":");
+                stringify_value(*field_val, TYPE_UNKNOWN, buf);
+            }
+        }
+    }
+    if use_pretty && !first {
+        buf.push('\n');
+        for _ in 0..depth {
+            buf.push_str(indent);
+        }
+    }
+    buf.push('}');
+    STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+}
+
+// ─── Extract array of strings from a JSValue array ──────────────────────────
+
+unsafe fn extract_string_array(ptr: *const u8) -> Vec<String> {
+    let arr = ptr as *const crate::ArrayHeader;
+    let len = (*arr).length;
+    let elements = (arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+    let mut result = Vec::new();
+    for i in 0..len {
+        let elem = *elements.add(i as usize);
+        let elem_bits = elem.to_bits();
+        let elem_tag = elem_bits & 0xFFFF_0000_0000_0000;
+        if elem_tag == STRING_TAG {
+            let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
+            if let Some(s) = str_from_header(str_ptr) {
+                result.push(s.to_string());
+            }
+        } else if is_raw_pointer(elem_bits) {
+            let str_ptr = elem_bits as *const StringHeader;
+            if let Some(s) = str_from_header(str_ptr) {
+                result.push(s.to_string());
+            }
+        }
+    }
+    result
+}
+
+/// Detect whether a NaN-boxed value is an array (not an object).
+#[inline]
+unsafe fn is_array_value(bits: u64) -> bool {
+    if let Some(ptr) = extract_pointer(bits) {
+        if is_object_pointer(ptr) {
+            return false;
+        }
+        let arr = ptr as *const crate::ArrayHeader;
+        let len = (*arr).length;
+        let cap = (*arr).capacity;
+        len <= cap && cap > 0 && cap < 10000
+    } else {
+        false
     }
 }
 
-/// JSON.parse(text, reviver) — parse JSON then apply reviver to each key/value pair.
+// ─── Full JSON.stringify(value, replacer, spacer) ───────────────────────────
+
+/// JSON.stringify(value, replacer, spacer) — the full 3-arg form.
+///
+/// - `value`: NaN-boxed JSValue to stringify
+/// - `replacer_f64`: NaN-boxed — a closure (function replacer), array (key whitelist), or null
+/// - `spacer_f64`: NaN-boxed — a number (indent count), string (indent string), or null
+///
+/// Returns i64 JSValue bits: a NaN-boxed string pointer, or TAG_UNDEFINED when
+/// `JSON.stringify(undefined)` should return `undefined`.
 #[no_mangle]
-pub unsafe extern "C" fn js_json_parse_reviver(
-    text_ptr: *const StringHeader,
-    reviver_ptr: i64,
+pub unsafe extern "C" fn js_json_stringify_full(
+    value: f64,
+    replacer_f64: f64,
+    spacer_f64: f64,
 ) -> i64 {
-    // First parse normally — result is JSValue bits as i64
-    let result = js_json_parse(text_ptr);
-    let result_bits = {
-        // JSValue is repr(transparent) u64, so transmute is safe
-        let v: u64 = std::mem::transmute(result);
-        v
+    let value_bits = value.to_bits();
+
+    // JSON.stringify(undefined) returns undefined per spec
+    if value_bits == TAG_UNDEFINED {
+        return TAG_UNDEFINED as i64;
+    }
+
+    // If the value is a closure/function, return undefined per spec
+    if is_closure_value(value_bits) {
+        return TAG_UNDEFINED as i64;
+    }
+
+    // Determine spacer/indent
+    let indent_str: String;
+    let spacer_bits = spacer_f64.to_bits();
+    let spacer_tag = spacer_bits & 0xFFFF_0000_0000_0000;
+    if spacer_bits == TAG_NULL || spacer_bits == TAG_UNDEFINED || spacer_bits == TAG_FALSE {
+        indent_str = String::new();
+    } else if spacer_tag == STRING_TAG {
+        let sp_ptr = (spacer_bits & POINTER_MASK) as *const StringHeader;
+        indent_str = str_from_header(sp_ptr).unwrap_or("").to_string();
+    } else if spacer_bits == TAG_TRUE {
+        indent_str = String::new();
+    } else {
+        // Number — use that many spaces (clamped to 10)
+        let n = spacer_f64 as usize;
+        let n = n.min(10);
+        indent_str = " ".repeat(n);
+    }
+    let use_pretty = !indent_str.is_empty();
+
+    // Determine replacer type
+    let replacer_bits = replacer_f64.to_bits();
+    let is_null_replacer = replacer_bits == TAG_NULL || replacer_bits == TAG_UNDEFINED;
+
+    // Check if replacer is an array (key whitelist)
+    let array_replacer = if !is_null_replacer && is_array_value(replacer_bits) {
+        let arr_ptr = if (replacer_bits & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+            (replacer_bits & POINTER_MASK) as *const u8
+        } else {
+            replacer_bits as *const u8
+        };
+        Some(extract_string_array(arr_ptr))
+    } else {
+        None
     };
 
-    if result.is_undefined() || reviver_ptr == 0 {
-        return result_bits as i64;
+    // Check if replacer is a closure (function)
+    let closure_replacer = if !is_null_replacer && array_replacer.is_none() && is_closure_value(replacer_bits) {
+        let ptr = if (replacer_bits & 0xFFFF_0000_0000_0000) == POINTER_TAG {
+            (replacer_bits & POINTER_MASK) as *const crate::closure::ClosureHeader
+        } else {
+            replacer_bits as *const crate::closure::ClosureHeader
+        };
+        Some(ptr)
+    } else {
+        None
+    };
+
+    // Clear the circular detection stack
+    STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
+
+    let mut buf = String::with_capacity(4096);
+
+    if let Some(ref allowed_keys) = array_replacer {
+        // Array replacer: only applies to objects at the top level
+        if let Some(ptr) = extract_pointer(value_bits) {
+            if is_object_pointer(ptr) {
+                stringify_object_with_array_replacer(ptr, allowed_keys, &mut buf, &indent_str, 0, use_pretty);
+            } else if use_pretty {
+                stringify_value_pretty(value, TYPE_UNKNOWN, &mut buf, &indent_str, 0);
+            } else {
+                stringify_value(value, TYPE_UNKNOWN, &mut buf);
+            }
+        } else if use_pretty {
+            stringify_value_pretty(value, TYPE_UNKNOWN, &mut buf, &indent_str, 0);
+        } else {
+            stringify_value(value, TYPE_UNKNOWN, &mut buf);
+        }
+    } else if let Some(closure_ptr) = closure_replacer {
+        // Function replacer — use existing with_replacer path
+        // First call replacer with ("", root_value)
+        let empty_str = js_string_from_bytes(b"".as_ptr(), 0);
+        let empty_key_f64 = nanbox_string_f64(empty_str);
+        let replaced_root = call_replacer(closure_ptr, empty_key_f64, value);
+        let replaced_bits = replaced_root.to_bits();
+        if replaced_bits == TAG_UNDEFINED {
+            STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
+            return TAG_UNDEFINED as i64;
+        }
+        // For simplicity: when function replacer is used with pretty, we don't
+        // interleave pretty-printing (matches simple spec behavior). Serialize
+        // normally with the replacer.
+        if let Some(ptr) = extract_pointer(replaced_bits) {
+            if is_object_pointer(ptr) {
+                stringify_object_with_replacer(ptr, closure_ptr, &mut buf);
+            } else {
+                let arr = ptr as *const crate::ArrayHeader;
+                if !arr.is_null() && (*arr).length <= (*arr).capacity && (*arr).capacity > 0 && (*arr).capacity < 10000 {
+                    stringify_array_with_replacer(ptr, closure_ptr, &mut buf);
+                } else {
+                    stringify_value(replaced_root, TYPE_UNKNOWN, &mut buf);
+                }
+            }
+        } else {
+            stringify_value(replaced_root, TYPE_UNKNOWN, &mut buf);
+        }
+    } else if use_pretty {
+        // No replacer, but has spacer — pretty-print
+        stringify_value_pretty(value, TYPE_UNKNOWN, &mut buf, &indent_str, 0);
+    } else {
+        // Plain stringify
+        stringify_value(value, TYPE_UNKNOWN, &mut buf);
     }
 
-    let reviver = reviver_ptr as *const crate::ClosureHeader;
-    if reviver.is_null() {
-        return result_bits as i64;
-    }
+    STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
 
-    let result_f64 = f64::from_bits(result_bits);
+    let result_ptr = js_string_from_bytes(buf.as_ptr(), buf.len() as u32);
+    // Return as NaN-boxed string
+    (STRING_TAG | (result_ptr as u64 & POINTER_MASK)) as i64
+}
 
-    // Walk the parsed value and apply reviver to each property
-    let tag = result_bits & 0xFFFF_0000_0000_0000;
-    if tag == POINTER_TAG {
-        let obj_ptr = (result_bits & POINTER_MASK) as *mut crate::object::ObjectHeader;
-        if !obj_ptr.is_null() && (obj_ptr as usize) > 0x10000 {
-            let field_count = (*obj_ptr).field_count;
-            let keys_arr = (*obj_ptr).keys_array;
-            if !keys_arr.is_null() {
-                let keys_data = (keys_arr as *const u8).add(8) as *const f64;
-                let fields_base = (obj_ptr as *mut u8).add(std::mem::size_of::<crate::object::ObjectHeader>()) as *mut u64;
-                for i in 0..field_count as usize {
-                    let key_f64 = *keys_data.add(i);
-                    let old_val = f64::from_bits(*fields_base.add(i));
-                    let new_val = crate::closure::js_closure_call2(reviver, key_f64, old_val);
-                    *fields_base.add(i) = new_val.to_bits();
+// ─── JSON.parse with reviver ────────────────────────────────────────────────
+
+/// Apply reviver to a parsed JSON value. The reviver is called as reviver(key, value).
+/// For objects, it's called for each property; for the root, key is "".
+unsafe fn apply_reviver(value: JSValue, key_f64: f64, reviver: *const crate::closure::ClosureHeader) -> JSValue {
+    let bits = value.bits();
+
+    // If value is an object, recurse into its properties first
+    if let Some(ptr) = extract_pointer(bits) {
+        if is_object_pointer(ptr) {
+            let obj = ptr as *const crate::ObjectHeader;
+            let num_fields = (*obj).field_count;
+            let keys_arr = (*obj).keys_array;
+            let keys_len = (*keys_arr).length;
+            let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
+            let fields_ptr = (ptr as *const u8).add(std::mem::size_of::<crate::ObjectHeader>()) as *mut f64;
+            let actual_fields = std::cmp::min(num_fields, keys_len);
+
+            for f in 0..actual_fields {
+                let field_key_f64 = *keys_elements.add(f as usize);
+                let field_val_f64 = *fields_ptr.add(f as usize);
+                let child_val = JSValue::from_bits(field_val_f64.to_bits());
+                let revived_child = apply_reviver(child_val, field_key_f64, reviver);
+                // Write back the revived value
+                *fields_ptr.add(f as usize) = f64::from_bits(revived_child.bits());
+            }
+        } else {
+            // Check if it's an array
+            let arr = ptr as *const crate::ArrayHeader;
+            if !arr.is_null() {
+                let len = (*arr).length;
+                let cap = (*arr).capacity;
+                if len <= cap && cap > 0 && cap < 10000 {
+                    let elements = (arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *mut f64;
+                    for i in 0..len {
+                        let idx_str = i.to_string();
+                        let idx_ptr = js_string_from_bytes(idx_str.as_ptr(), idx_str.len() as u32);
+                        let idx_key_f64 = nanbox_string_f64(idx_ptr);
+                        let elem_f64 = *elements.add(i as usize);
+                        let child_val = JSValue::from_bits(elem_f64.to_bits());
+                        let revived_child = apply_reviver(child_val, idx_key_f64, reviver);
+                        *elements.add(i as usize) = f64::from_bits(revived_child.bits());
+                    }
                 }
             }
         }
     }
 
-    // Call reviver with ("", root) for the root value
-    let empty_str = js_string_from_bytes(b"".as_ptr(), 0);
-    let empty_key = crate::value::js_nanbox_string(empty_str as i64);
-    let final_val = crate::closure::js_closure_call2(reviver, empty_key, result_f64);
-    final_val.to_bits() as i64
+    // Now call reviver on this value
+    let value_f64 = f64::from_bits(value.bits());
+    let result = crate::js_closure_call2(reviver, key_f64, value_f64);
+    JSValue::from_bits(result.to_bits())
 }
 
+/// JSON.parse(text, reviver) — parse JSON with a reviver function.
+#[no_mangle]
+pub unsafe extern "C" fn js_json_parse_with_reviver(
+    text_ptr: *const StringHeader,
+    reviver_ptr: i64,
+) -> JSValue {
+    // First, parse normally
+    let parsed = js_json_parse(text_ptr);
+
+    let reviver = reviver_ptr as *const crate::closure::ClosureHeader;
+    if reviver.is_null() || (reviver_ptr as u64) < 0x1000 {
+        return parsed;
+    }
+
+    // Apply reviver starting from root
+    let empty_str = js_string_from_bytes(b"".as_ptr(), 0);
+    let empty_key_f64 = nanbox_string_f64(empty_str);
+    apply_reviver(parsed, empty_key_f64, reviver)
+}
