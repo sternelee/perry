@@ -377,6 +377,14 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(callback, closures, enclosing_class);
             }
+            Expr::ArrayFindLast { array, callback } | Expr::ArrayFindLastIndex { array, callback } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+                self.collect_closures_from_expr(callback, closures, enclosing_class);
+            }
+            Expr::ArrayAt { array, index } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+                self.collect_closures_from_expr(index, closures, enclosing_class);
+            }
             Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } => {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(callback, closures, enclosing_class);
@@ -1091,9 +1099,13 @@ impl crate::codegen::Compiler {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(callback, captures);
             }
-            Expr::ArrayFindIndex { array, callback } | Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } => {
+            Expr::ArrayFindIndex { array, callback } | Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } | Expr::ArrayFindLast { array, callback } | Expr::ArrayFindLastIndex { array, callback } => {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(callback, captures);
+            }
+            Expr::ArrayAt { array, index } => {
+                self.collect_mutable_captures_from_expr(array, captures);
+                self.collect_mutable_captures_from_expr(index, captures);
             }
             Expr::ArraySort { array, comparator } => {
                 self.collect_mutable_captures_from_expr(array, captures);
@@ -1310,7 +1322,7 @@ impl crate::codegen::Compiler {
             Expr::Closure { func_id, body, .. } => {
                 self.collect_func_refs_needing_wrappers_from_stmts(body, func_refs);
             }
-            Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } | Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } | Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } => {
+            Expr::ArrayForEach { array, callback } | Expr::ArrayMap { array, callback } | Expr::ArrayFilter { array, callback } | Expr::ArrayFind { array, callback } | Expr::ArrayFindIndex { array, callback } | Expr::ArrayFindLast { array, callback } | Expr::ArrayFindLastIndex { array, callback } | Expr::ArraySome { array, callback } | Expr::ArrayEvery { array, callback } | Expr::ArrayFlatMap { array, callback } => {
                 self.collect_func_refs_from_expr(array, func_refs);
                 match callback.as_ref() {
                     Expr::FuncRef(func_id) => {
@@ -1629,6 +1641,11 @@ impl crate::codegen::Compiler {
                     // Preserve type info from the original module-level variable
                     // so that array indexing, string comparison, typeof etc. work correctly
                     let orig = self.module_level_locals.get(capture_id);
+                    eprintln!("[CLOSURE DEBUG] mutable capture id={} idx={} orig_in_module_level={} orig_is_array={:?} orig_is_pointer={:?} orig_name={:?}",
+                        capture_id, i, orig.is_some(),
+                        orig.map(|o| o.is_array),
+                        orig.map(|o| o.is_pointer),
+                        orig.and_then(|o| o.name.as_ref()));
                     locals.insert(*capture_id, LocalInfo {
                         var,
                         name: None, // Captures don't have a direct name

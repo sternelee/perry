@@ -1160,6 +1160,61 @@ pub extern "C" fn js_array_findIndex(arr: *const ArrayHeader, callback: *const C
     }
 }
 
+/// findLast - like find but iterates from the end
+#[no_mangle]
+pub extern "C" fn js_array_find_last(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return f64::from_bits(crate::value::TAG_UNDEFINED); }
+    unsafe {
+        let length = (*arr).length as usize;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        for i in (0..length).rev() {
+            let element = *elements_ptr.add(i);
+            let result = js_closure_call2(callback, element, i as f64);
+            if crate::value::js_is_truthy(result) != 0 {
+                return element;
+            }
+        }
+        f64::from_bits(crate::value::TAG_UNDEFINED)
+    }
+}
+
+/// findLastIndex - like findIndex but iterates from the end
+#[no_mangle]
+pub extern "C" fn js_array_find_last_index(arr: *const ArrayHeader, callback: *const ClosureHeader) -> i32 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return -1; }
+    unsafe {
+        let length = (*arr).length as usize;
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        for i in (0..length).rev() {
+            let element = *elements_ptr.add(i);
+            let result = js_closure_call2(callback, element, i as f64);
+            if crate::value::js_is_truthy(result) != 0 {
+                return i as i32;
+            }
+        }
+        -1
+    }
+}
+
+/// at - element access supporting negative indices (arr.at(-1) = last)
+#[no_mangle]
+pub extern "C" fn js_array_at(arr: *const ArrayHeader, index: f64) -> f64 {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() { return f64::from_bits(crate::value::TAG_UNDEFINED); }
+    unsafe {
+        let length = (*arr).length as i64;
+        let mut idx = index as i64;
+        if idx < 0 { idx += length; }
+        if idx < 0 || idx >= length {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        *elements_ptr.add(idx as usize)
+    }
+}
+
 /// some - returns true if any element matches callback(element) => true
 /// Returns TAG_TRUE or TAG_FALSE as f64
 #[no_mangle]

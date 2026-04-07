@@ -3271,6 +3271,9 @@ pub(crate) fn compile_expr(
             // Update the local variable with the new pointer (in case of reallocation)
             if info.is_boxed {
                 // For boxed variables (mutable closure captures), write new pointer into the box
+                eprintln!("[CODEGEN DEBUG] ArrayPush boxed path: array_id={} name={:?} is_array={} is_pointer={} is_union={} module_data_id={:?} func={}",
+                    array_id, info.name, info.is_array, info.is_pointer, info.is_union, info.module_var_data_id,
+                    builder.func.name);
                 let box_ptr = builder.use_var(info.var);
                 let box_set_func = extern_funcs.get("js_box_set")
                     .ok_or_else(|| anyhow!("js_box_set not declared"))?;
@@ -3996,6 +3999,53 @@ pub(crate) fn compile_expr(
             let func_ref = module.declare_func_in_func(*func, builder.func);
             let call = builder.ins().call(func_ref, &[arr_f64, cb_ptr]);
             // Result is already f64 from the dynamic version
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ArrayFindLast { array, callback } => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer").ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else { arr_val };
+            let cb_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callback, this_ctx)?;
+            let cb_ptr = ensure_i64(builder, cb_val);
+            let func = extern_funcs.get("js_array_find_last").ok_or_else(|| anyhow!("js_array_find_last not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ArrayFindLastIndex { array, callback } => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer").ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else { arr_val };
+            let cb_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, callback, this_ctx)?;
+            let cb_ptr = ensure_i64(builder, cb_val);
+            let func = extern_funcs.get("js_array_find_last_index").ok_or_else(|| anyhow!("js_array_find_last_index not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr, cb_ptr]);
+            let idx_i32 = builder.inst_results(call)[0];
+            // Convert i32 to f64
+            Ok(builder.ins().fcvt_from_sint(types::F64, idx_i32))
+        }
+        Expr::ArrayAt { array, index } => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer").ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else { arr_val };
+            let idx_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, index, this_ctx)?;
+            let idx_f64 = ensure_f64(builder, idx_val);
+            let func = extern_funcs.get("js_array_at").ok_or_else(|| anyhow!("js_array_at not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr, idx_f64]);
             Ok(builder.inst_results(call)[0])
         }
         Expr::ArraySome { array, callback } => {

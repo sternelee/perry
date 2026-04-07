@@ -1251,6 +1251,36 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_array_findIndex"), func_id);
         }
 
+        // js_array_find_last(arr, callback) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_array_find_last", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_find_last"), func_id);
+        }
+
+        // js_array_find_last_index(arr, callback) -> i32
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I32));
+            let func_id = self.module.declare_function("js_array_find_last_index", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_find_last_index"), func_id);
+        }
+
+        // js_array_at(arr, index: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_array_at", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_at"), func_id);
+        }
+
         // js_dynamic_array_find(arr_value: f64, callback: *const ClosureHeader) -> f64
         // Handles both JS handle arrays and native arrays
         {
@@ -1736,6 +1766,17 @@ impl Compiler {
                 &sig,
             )?;
             self.extern_funcs.insert(Cow::Borrowed("js_number_to_fixed"), func_id);
+        }
+
+        // js_number_to_precision(value: f64, precision: f64) -> *mut StringHeader
+        // js_number_to_exponential(value: f64, decimals: f64) -> *mut StringHeader
+        for name in &["js_number_to_precision", "js_number_to_exponential"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed(name), func_id);
         }
 
         // js_jsvalue_to_string(value: f64) -> *mut StringHeader

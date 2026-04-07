@@ -1217,6 +1217,9 @@ pub enum Expr {
     ArrayFilter { array: Box<Expr>, callback: Box<Expr> },   // arr.filter(fn) -> new array
     ArrayFind { array: Box<Expr>, callback: Box<Expr> },     // arr.find(fn) -> element | undefined
     ArrayFindIndex { array: Box<Expr>, callback: Box<Expr> }, // arr.findIndex(fn) -> index | -1
+    ArrayFindLast { array: Box<Expr>, callback: Box<Expr> }, // arr.findLast(fn) -> element | undefined
+    ArrayFindLastIndex { array: Box<Expr>, callback: Box<Expr> }, // arr.findLastIndex(fn) -> index | -1
+    ArrayAt { array: Box<Expr>, index: Box<Expr> },          // arr.at(i) -> element (negative index OK)
     ArraySome { array: Box<Expr>, callback: Box<Expr> },     // arr.some(fn) -> boolean
     ArrayEvery { array: Box<Expr>, callback: Box<Expr> },    // arr.every(fn) -> boolean
     ArrayFlatMap { array: Box<Expr>, callback: Box<Expr> },  // arr.flatMap(fn) -> new array

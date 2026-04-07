@@ -4342,6 +4342,19 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::NumberIsSafeInteger(Box::new(args.into_iter().next().unwrap())));
                                             }
                                         }
+                                        "parseFloat" => {
+                                            // Number.parseFloat is the same as global parseFloat
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ParseFloat(Box::new(args.into_iter().next().unwrap())));
+                                            }
+                                        }
+                                        "parseInt" => {
+                                            // Number.parseInt is the same as global parseInt
+                                            let mut iter = args.into_iter();
+                                            let string_arg = if let Some(s) = iter.next() { Box::new(s) } else { return Err(anyhow!("Number.parseInt requires at least one argument")); };
+                                            let radix_arg = iter.next().map(Box::new);
+                                            return Ok(Expr::ParseInt { string: string_arg, radix: radix_arg });
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -4860,6 +4873,34 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::ArrayFindIndex {
                                                     array: Box::new(Expr::LocalGet(array_id)),
                                                     callback: Box::new(cb),
+                                                });
+                                            }
+                                        }
+                                        "findLast" => {
+                                            if args.len() >= 1 {
+                                                let cb = args.into_iter().next().unwrap();
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
+                                                return Ok(Expr::ArrayFindLast {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(cb),
+                                                });
+                                            }
+                                        }
+                                        "findLastIndex" => {
+                                            if args.len() >= 1 {
+                                                let cb = args.into_iter().next().unwrap();
+                                                let cb = ctx.maybe_wrap_builtin_callback(cb, &call.args[0]);
+                                                return Ok(Expr::ArrayFindLastIndex {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(cb),
+                                                });
+                                            }
+                                        }
+                                        "at" => {
+                                            if args.len() >= 1 {
+                                                return Ok(Expr::ArrayAt {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    index: Box::new(args.into_iter().next().unwrap()),
                                                 });
                                             }
                                         }

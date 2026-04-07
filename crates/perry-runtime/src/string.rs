@@ -271,6 +271,92 @@ pub extern "C" fn js_number_to_fixed(value: f64, decimals: f64) -> *mut StringHe
     js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
 }
 
+/// Format a number with a precision (Number.prototype.toPrecision).
+/// JS spec: total significant digits, switches to exponential for very small/large.
+#[no_mangle]
+pub extern "C" fn js_number_to_precision(value: f64, precision: f64) -> *mut StringHeader {
+    let s = if value.is_nan() {
+        "NaN".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+    } else {
+        let p = precision as usize;
+        if p == 0 {
+            // toPrecision() with no arg is same as toString
+            format_number_for_js(value)
+        } else if value == 0.0 {
+            // 0.toPrecision(3) = "0.00"
+            if p == 1 { "0".to_string() } else { format!("0.{}", "0".repeat(p - 1)) }
+        } else {
+            // Find the decimal exponent: floor(log10(|x|))
+            let abs = value.abs();
+            let exp = abs.log10().floor() as i32;
+            // JS uses exponential notation when exp < -6 or exp >= precision
+            if exp < -6 || exp >= p as i32 {
+                // Exponential: precision-1 digits after decimal, e+/-exp
+                let mantissa_digits = if p > 1 { p - 1 } else { 0 };
+                let formatted = format!("{:.*e}", mantissa_digits, value);
+                // Rust's "{:e}" format produces "1.23e4"; JS uses "1.23e+4"
+                fix_exponent_format(&formatted)
+            } else {
+                // Fixed: precision - exp - 1 digits after decimal
+                let dp = (p as i32 - exp - 1).max(0) as usize;
+                format!("{:.prec$}", value, prec = dp)
+            }
+        }
+    };
+    let bytes = s.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// Format a number in exponential notation (Number.prototype.toExponential).
+#[no_mangle]
+pub extern "C" fn js_number_to_exponential(value: f64, decimals: f64) -> *mut StringHeader {
+    let s = if value.is_nan() {
+        "NaN".to_string()
+    } else if value.is_infinite() {
+        if value > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() }
+    } else {
+        let dp = decimals as usize;
+        // Rust's `{:e}` produces e.g. "1.23e4"; JS expects "1.23e+4"
+        let formatted = format!("{:.*e}", dp, value);
+        fix_exponent_format(&formatted)
+    };
+    let bytes = s.as_bytes();
+    js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
+/// Convert Rust's `{:e}` exponential format to JS's: "1.23e4" -> "1.23e+4", "1.23e-4" stays.
+fn fix_exponent_format(s: &str) -> String {
+    if let Some(e_pos) = s.find('e') {
+        let (mantissa, exp_part) = s.split_at(e_pos);
+        let exp_str = &exp_part[1..]; // skip 'e'
+        if exp_str.starts_with('-') {
+            format!("{}e{}", mantissa, exp_str)
+        } else {
+            // Add explicit + sign and strip leading zeros from exponent
+            let n: i64 = exp_str.parse().unwrap_or(0);
+            format!("{}e+{}", mantissa, n)
+        }
+    } else {
+        s.to_string()
+    }
+}
+
+/// Format a number per JS toString rules (helper for toPrecision when precision=0)
+fn format_number_for_js(value: f64) -> String {
+    if value.is_nan() { return "NaN".to_string(); }
+    if value.is_infinite() {
+        return if value > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+    }
+    if value == 0.0 { return "0".to_string(); }
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else {
+        format!("{}", value)
+    }
+}
+
 /// Get a slice of a string (byte-based for now)
 /// Returns a new string from start to end (exclusive)
 #[no_mangle]

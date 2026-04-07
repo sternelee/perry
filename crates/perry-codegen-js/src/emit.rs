@@ -1614,6 +1614,24 @@ impl JsEmitter {
                 self.emit_expr(callback);
                 self.output.push(')');
             }
+            Expr::ArrayFindLast { array, callback } => {
+                self.emit_expr(array);
+                self.output.push_str(".findLast(");
+                self.emit_expr(callback);
+                self.output.push(')');
+            }
+            Expr::ArrayFindLastIndex { array, callback } => {
+                self.emit_expr(array);
+                self.output.push_str(".findLastIndex(");
+                self.emit_expr(callback);
+                self.output.push(')');
+            }
+            Expr::ArrayAt { array, index } => {
+                self.emit_expr(array);
+                self.output.push_str(".at(");
+                self.emit_expr(index);
+                self.output.push(')');
+            }
             Expr::ArraySome { array, callback } => {
                 self.emit_expr(array);
                 self.output.push_str(".some(");
