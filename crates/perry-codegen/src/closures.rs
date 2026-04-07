@@ -1690,19 +1690,16 @@ impl crate::codegen::Compiler {
                 }
             }
 
-            // Collect which module-level variables the closure body actually references.
-            // Only load those, to avoid generating unnecessary Cranelift instructions
-            // for all module-level variables in every closure.
-            let mut referenced = std::collections::HashSet::new();
-            collect_referenced_locals_stmts(body, &mut referenced);
-
-            // Load module-level variables from their global slots
-            // Only load variables that the closure body actually references
+            // Load module-level variables from their global slots.
+            //
+            // Previously we walked the closure body with collect_referenced_locals_stmts
+            // and only loaded referenced vars, but that walker covers a subset of the
+            // 276 Expr variants — any variant it misses causes LocalGet(id) in the
+            // closure body to resolve to "undefined" (production bug observed in the
+            // perry-hub build endpoint after v0.4.53's filter_module_level_captures
+            // change). Load all module vars unconditionally; Cranelift will DCE the
+            // unused ones in the compiled function.
             for (local_id, data_id) in &self.module_var_data_ids {
-                // Skip if not referenced by the closure body
-                if !referenced.contains(local_id) {
-                    continue;
-                }
                 // Skip if already in locals (e.g., passed as a capture)
                 if locals.contains_key(local_id) {
                     continue;
