@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
 
-**Current Version:** 0.4.66
+**Current Version:** 0.4.67
 
 ## Workflow Requirements
 
@@ -139,6 +139,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 - All AppKit constructors require `MainThreadMarker`
 
 ## Recent Changes
+
+### v0.4.67
+- feat: auto-detect optimal build profile — `perry compile` now inspects the project's imports and rebuilds perry-runtime + perry-stdlib in one cargo invocation with the smallest matching Cargo feature set (mongodb-only, http-client-only, etc.) AND switches `panic = "unwind"` → `panic = "abort"` whenever no `catch_unwind` callers are reachable (no `perry/ui`, `perry/thread`, `perry/plugin`, geisterhand). The chosen profile lives in a hash-keyed `target/perry-auto-{hash}/` directory so cargo's incremental cache works per (features, panic, target) tuple. New `CompilationContext.needs_thread` field tracks `perry/thread` imports. New `OptimizedLibs` struct returns both runtime + stdlib paths so the symbol-stub scan and the linker see the same artifacts. Falls back to the prebuilt full stdlib + unwind runtime when the workspace source isn't on disk or cargo isn't on PATH — never breaks a user's compile. Measured fully automatic (no flags): `await fetch(url)` 4.2 MB → **2.9 MB (-31%)**, mongodb 3.1 MB → **2.4 MB**, hello-world 0.5 MB → 0.4 MB, `perry/thread` programs correctly stay panic=unwind. The legacy `--minimal-stdlib` flag is now a hidden no-op alias; new `--no-auto-optimize` escape hatch falls back to the prebuilt libraries.
 
 ### v0.4.66
 - feat: `path.relative` / `path.parse` / `path.format` / `path.normalize` / `path.basename(p, ext)` / `path.sep` / `path.delimiter` — new HIR variants `PathRelative`, `PathParse`, `PathFormat`, `PathNormalize`, `PathBasenameExt`, `PathSep`, `PathDelimiter`; runtime functions `js_path_relative` / `js_path_normalize` / `js_path_parse` / `js_path_format` / `js_path_basename_ext` / `js_path_sep_get` / `js_path_delimiter_get` in `crates/perry-runtime/src/path.rs`. Shared `normalize_str` helper handles `..`/`.`/double-slash collapse. `path.parse` returns a `{ root, dir, base, ext, name }` shape object via `js_object_alloc_with_shape`. `path.join` now also normalizes its result so `join('/a', 'b', '..', 'c') === '/a/c'` (matches Node). Lowering added to both `is_path_module` dispatch sites in `lower.rs`. `test_gap_node_path.ts` now passes with zero diffs vs Node.

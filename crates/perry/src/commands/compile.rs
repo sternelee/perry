@@ -91,14 +91,24 @@ pub struct CompileArgs {
     #[arg(long)]
     pub geisterhand_port: Option<u16>,
 
-    /// Rebuild perry-stdlib with only the Cargo features this project's
-    /// imports actually need (databases, http server/client, crypto, …).
-    /// Drops megabytes from binaries that don't pull in mongodb / mysql /
-    /// image processing / etc. Requires a Rust toolchain and the Perry
-    /// workspace source on disk; falls back to the prebuilt full stdlib
-    /// when either is missing.
-    #[arg(long)]
+    /// Backward-compat alias — auto-optimization is on by default and
+    /// already does what this flag used to do (and more). Setting it has
+    /// no effect on the resulting binary; kept so existing scripts don't
+    /// break.
+    #[arg(long, hide = true)]
     pub minimal_stdlib: bool,
+
+    /// Disable automatic build-profile optimization for the user binary.
+    /// By default Perry inspects the project's imports and rebuilds
+    /// perry-runtime + perry-stdlib with the smallest matching Cargo
+    /// feature set, plus `panic = "abort"` when no `catch_unwind` callers
+    /// are reachable (no `perry/ui`, `perry/thread`, `perry/plugin`, or
+    /// geisterhand). The result is typically 30%+ smaller. Pass this flag
+    /// to fall back to the prebuilt full stdlib + unwind runtime, e.g.
+    /// when reproducing an old build or when the workspace source isn't
+    /// available.
+    #[arg(long)]
+    pub no_auto_optimize: bool,
 }
 
 /// Information about a JavaScript module that will be interpreted at runtime
@@ -155,6 +165,11 @@ pub struct CompilationContext {
     /// Whether any TS module calls global `fetch()` (which routes to
     /// reqwest in perry-stdlib's http-client feature).
     pub uses_fetch: bool,
+    /// Whether `perry/thread` is imported. When true, the runtime must
+    /// keep `panic = "unwind"` so that worker-thread panics translate to
+    /// promise rejections via `catch_unwind` in `perry-runtime/src/thread.rs`
+    /// instead of aborting the whole process.
+    pub needs_thread: bool,
 }
 
 impl std::fmt::Debug for CompilationContext {
@@ -189,6 +204,7 @@ impl CompilationContext {
             geisterhand_port: 7676,
             native_module_imports: BTreeSet::new(),
             uses_fetch: false,
+            needs_thread: false,
         }
     }
 }
@@ -967,59 +983,97 @@ fn build_geisterhand_libs(target: Option<&str>, format: OutputFormat) -> Result<
     Ok(())
 }
 
-/// Rebuild perry-stdlib with only the Cargo features the project's
-/// imports actually need, and return the path to the resulting
-/// `libperry_stdlib.a`. Used by `--minimal-stdlib`.
+/// A pair of (runtime, stdlib) static libraries built with the auto-mode
+/// chosen profile (custom feature set, optional `panic = "abort"`).
+#[derive(Debug, Clone)]
+pub struct OptimizedLibs {
+    /// Path to the rebuilt `libperry_runtime.a` (or `perry_runtime.lib`).
+    /// `None` means "fall back to the prebuilt one in target/release/".
+    pub runtime: Option<PathBuf>,
+    /// Path to the rebuilt `libperry_stdlib.a`. `None` means "fall back
+    /// to the prebuilt full stdlib".
+    pub stdlib: Option<PathBuf>,
+}
+
+impl OptimizedLibs {
+    fn empty() -> Self { OptimizedLibs { runtime: None, stdlib: None } }
+}
+
+/// Rebuild perry-runtime + perry-stdlib in a single cargo invocation with
+/// the chosen Cargo features and panic mode, and return paths to the
+/// resulting archives. Both halves fall back to the prebuilt libraries
+/// gracefully on any failure (no source on disk, no cargo, build error).
 ///
-/// Falls back to `find_stdlib_library` (and returns its result) when:
-///   • the Perry workspace source isn't on disk (cargo install of just
-///     the binary), or
-///   • `cargo` isn't on PATH, or
-///   • the rebuild fails for any reason — we'd rather link the prebuilt
-///     full stdlib than fail the user's compile.
-fn build_minimal_stdlib(
+/// This is the auto-mode workhorse — it lets the compile driver pick the
+/// smallest matching profile for the user's TS code without any manual
+/// flags. Cargo's incremental cache is keyed per (target dir, feature
+/// set), and we use a hash-keyed target dir so consecutive runs with the
+/// same profile are no-ops after the first build.
+fn build_optimized_libs(
     ctx: &CompilationContext,
     target: Option<&str>,
     format: OutputFormat,
-) -> Option<PathBuf> {
+) -> OptimizedLibs {
     use super::stdlib_features::{compute_required_features, features_to_cargo_arg};
 
     let features = compute_required_features(&ctx.native_module_imports, ctx.uses_fetch);
     let feature_arg = features_to_cargo_arg(&features);
 
-    // Locate the workspace. Without source we can't rebuild.
+    // panic = "abort" is safe whenever no `catch_unwind` callers are
+    // reachable. Today those live in:
+    //   - perry-runtime/src/thread.rs (perry/thread `spawn`)
+    //   - perry-ui-{macos,ios}/* (UI callback isolation)
+    //   - perry-runtime plugin host (`needs_plugins` → -rdynamic +
+    //     -force_load paths that may rely on unwind tables for plugin
+    //     dylibs)
+    //   - geisterhand registry callbacks
+    // Whenever the user binary doesn't pull any of those in, switching
+    // to `abort` saves ~12-18 % off the final binary by dropping
+    // __TEXT,__eh_frame, __TEXT,__gcc_except_tab, __TEXT,__unwind_info
+    // and the matching landing pads / Drop glue.
+    let panic_abort_safe = !ctx.needs_ui
+        && !ctx.needs_thread
+        && !ctx.needs_plugins
+        && !ctx.needs_geisterhand;
+
+    // Locate the workspace. Without source we can't rebuild — fall back
+    // to whatever's prebuilt next to perry on disk.
     let workspace_root = match find_perry_workspace_root() {
         Some(p) => p,
         None => {
             if matches!(format, OutputFormat::Text) {
                 eprintln!(
-                    "  --minimal-stdlib: Perry workspace source not found, \
-                     falling back to prebuilt libperry_stdlib.a"
+                    "  auto-optimize: Perry workspace source not found, \
+                     using prebuilt libperry_runtime.a + libperry_stdlib.a"
                 );
             }
-            return find_stdlib_library(target);
+            return OptimizedLibs::empty();
         }
     };
 
-    if matches!(format, OutputFormat::Text) {
-        if features.is_empty() {
-            println!(
-                "  --minimal-stdlib: rebuilding perry-stdlib with no optional \
-                 features (project imports nothing heavy)"
-            );
-        } else {
-            println!(
-                "  --minimal-stdlib: rebuilding perry-stdlib with features: {}",
-                feature_arg
-            );
-        }
+    // Hash the (features, panic_mode, target) tuple into the target dir
+    // name so cargo treats each combination as its own incremental cache.
+    // Cheap djb2 — no need for the SipHash overhead.
+    let target_str = target.unwrap_or("host");
+    let key_input = format!("{}|{}|{}", feature_arg, panic_abort_safe, target_str);
+    let mut hash: u64 = 5381;
+    for b in key_input.as_bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(*b as u64);
     }
+    let target_dir = workspace_root.join(format!("target/perry-auto-{:016x}", hash));
 
-    // Use a separate CARGO_TARGET_DIR so the minimal build doesn't clobber
-    // the workspace's normal `target/release/libperry_stdlib.a`. Cargo
-    // caches per (target dir, feature set), so consecutive runs with the
-    // same feature set are no-ops after the first build.
-    let target_dir = workspace_root.join("target/perry-stdlib-minimal");
+    if matches!(format, OutputFormat::Text) {
+        let panic_str = if panic_abort_safe { "abort" } else { "unwind" };
+        let feat_str = if features.is_empty() {
+            "(no optional features)".to_string()
+        } else {
+            feature_arg.clone()
+        };
+        println!(
+            "  auto-optimize: rebuilding runtime+stdlib (panic={}, features={})",
+            panic_str, feat_str
+        );
+    }
 
     let mut cargo_cmd = Command::new("cargo");
     cargo_cmd
@@ -1027,13 +1081,37 @@ fn build_minimal_stdlib(
         .env("CARGO_TARGET_DIR", &target_dir)
         .arg("build")
         .arg("--release")
+        .arg("-p").arg("perry-runtime")
         .arg("-p").arg("perry-stdlib")
         .arg("--no-default-features");
-    if !feature_arg.is_empty() {
-        cargo_cmd.arg("--features").arg(&feature_arg);
+    // Both perry-runtime and perry-stdlib accept their own feature lists.
+    // Cargo's `--features` takes `crate/feature` syntax for cross-crate
+    // selection — we always enable perry-stdlib's stdlib-side bridge so
+    // perry-runtime exports the right symbols, and the user-derived
+    // stdlib features.
+    let mut cross_features: Vec<String> = vec![
+        // perry-runtime's "full" feature gates plugin + os.hostname/homedir.
+        // Auto-mode keeps it on so existing behavior is preserved; the
+        // panic mode is what shrinks the binary.
+        "perry-runtime/full".to_string(),
+    ];
+    for f in &features {
+        cross_features.push(format!("perry-stdlib/{}", f));
+    }
+    if !cross_features.is_empty() {
+        cargo_cmd.arg("--features").arg(cross_features.join(","));
     }
     if let Some(triple) = rust_target_triple(target) {
         cargo_cmd.arg("--target").arg(triple);
+    }
+    if panic_abort_safe {
+        // Override the workspace profile's `panic = "unwind"` for the
+        // duration of this invocation. RUSTFLAGS is the only path that
+        // works without a custom cargo profile, and cargo correctly
+        // reuses incremental artifacts that were built with the same
+        // RUSTFLAGS. The hash-keyed CARGO_TARGET_DIR keeps the abort
+        // and unwind builds from clobbering each other's cache.
+        cargo_cmd.env("RUSTFLAGS", "-C panic=abort");
     }
 
     let status = match cargo_cmd.status() {
@@ -1041,57 +1119,66 @@ fn build_minimal_stdlib(
         Err(e) => {
             if matches!(format, OutputFormat::Text) {
                 eprintln!(
-                    "  --minimal-stdlib: failed to spawn cargo ({}), falling back \
-                     to prebuilt libperry_stdlib.a",
+                    "  auto-optimize: failed to spawn cargo ({}), \
+                     using prebuilt libraries",
                     e
                 );
             }
-            return find_stdlib_library(target);
+            return OptimizedLibs::empty();
         }
     };
     if !status.success() {
         if matches!(format, OutputFormat::Text) {
             eprintln!(
-                "  --minimal-stdlib: cargo build failed (exit {}), falling back \
-                 to prebuilt libperry_stdlib.a",
+                "  auto-optimize: cargo build failed (exit {}), \
+                 using prebuilt libraries",
                 status
             );
         }
-        return find_stdlib_library(target);
+        return OptimizedLibs::empty();
     }
 
-    // Locate the freshly-built archive.
-    let lib_name = match target {
+    // Resolve both archive paths.
+    let runtime_name = match target {
+        Some("windows") => "perry_runtime.lib",
+        #[cfg(target_os = "windows")]
+        None => "perry_runtime.lib",
+        _ => "libperry_runtime.a",
+    };
+    let stdlib_name = match target {
         Some("windows") => "perry_stdlib.lib",
         #[cfg(target_os = "windows")]
         None => "perry_stdlib.lib",
         _ => "libperry_stdlib.a",
     };
-    let candidate = if let Some(triple) = rust_target_triple(target) {
-        target_dir.join(triple).join("release").join(lib_name)
+    let release_dir = if let Some(triple) = rust_target_triple(target) {
+        target_dir.join(triple).join("release")
     } else {
-        target_dir.join("release").join(lib_name)
+        target_dir.join("release")
     };
-    if candidate.exists() {
-        if matches!(format, OutputFormat::Text) {
-            if let Ok(meta) = std::fs::metadata(&candidate) {
-                println!(
-                    "  --minimal-stdlib: built {} ({:.1} MB)",
-                    candidate.display(),
-                    meta.len() as f64 / (1024.0 * 1024.0)
-                );
-            }
-        }
-        Some(candidate)
-    } else {
-        if matches!(format, OutputFormat::Text) {
-            eprintln!(
-                "  --minimal-stdlib: cargo build succeeded but {} not found, \
-                 falling back to prebuilt libperry_stdlib.a",
-                candidate.display()
+    let runtime_path = release_dir.join(runtime_name);
+    let stdlib_path = release_dir.join(stdlib_name);
+
+    if matches!(format, OutputFormat::Text) {
+        if let Ok(meta) = std::fs::metadata(&runtime_path) {
+            println!(
+                "  auto-optimize: built {} ({:.1} MB)",
+                runtime_path.display(),
+                meta.len() as f64 / (1024.0 * 1024.0)
             );
         }
-        find_stdlib_library(target)
+        if let Ok(meta) = std::fs::metadata(&stdlib_path) {
+            println!(
+                "  auto-optimize: built {} ({:.1} MB)",
+                stdlib_path.display(),
+                meta.len() as f64 / (1024.0 * 1024.0)
+            );
+        }
+    }
+
+    OptimizedLibs {
+        runtime: if runtime_path.exists() { Some(runtime_path) } else { None },
+        stdlib: if stdlib_path.exists() { Some(stdlib_path) } else { None },
     }
 }
 
@@ -1942,6 +2029,12 @@ fn collect_modules(
             }
             if import.source == "perry/plugin" {
                 ctx.needs_plugins = true;
+            }
+            if import.source == "perry/thread" {
+                // perry/thread spawns OS workers and translates panics to
+                // promise rejections via `catch_unwind` — auto-mode keeps
+                // panic = "unwind" when this is set.
+                ctx.needs_thread = true;
             }
             if perry_hir::requires_stdlib(&import.source) {
                 ctx.needs_stdlib = true;
@@ -4075,21 +4168,31 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         }
     }
 
-    // Resolve the stdlib archive once so the symbol-stub scan and the
-    // final link see the same .a file. With `--minimal-stdlib` this is a
-    // freshly-built minimal archive; otherwise the prebuilt full one.
-    let stdlib_lib_resolved: Option<PathBuf> = if args.minimal_stdlib && ctx.needs_stdlib {
-        build_minimal_stdlib(&ctx, target.as_deref(), format)
+    // Auto-mode: pick the smallest matching (features, panic) profile
+    // for this binary and rebuild perry-runtime + perry-stdlib in a
+    // hash-keyed target dir. Both halves fall back to the prebuilt full
+    // libraries if the rebuild fails or the workspace source isn't on
+    // disk. `--no-auto-optimize` disables the rebuild path entirely.
+    //
+    // The legacy `--minimal-stdlib` flag is now a no-op alias for
+    // backward compat — auto-mode already does what it used to and more.
+    let optimized_libs: OptimizedLibs = if args.no_auto_optimize {
+        OptimizedLibs::empty()
     } else {
-        find_stdlib_library(target.as_deref())
+        build_optimized_libs(&ctx, target.as_deref(), format)
     };
+    let stdlib_lib_resolved: Option<PathBuf> = optimized_libs.stdlib.clone()
+        .or_else(|| find_stdlib_library(target.as_deref()));
 
     // Generate stubs for missing symbols from unresolved imports (npm packages etc.)
     {
         use std::collections::HashSet;
         let mut undefined_syms: HashSet<String> = HashSet::new();
         let mut defined_syms: HashSet<String> = HashSet::new();
-        let runtime_lib_path = find_runtime_library(target.as_deref()).ok();
+        // Prefer the auto-built runtime so the symbol-stub scan and the
+        // final link see the same artifact (panic mode + feature set).
+        let runtime_lib_path = optimized_libs.runtime.clone()
+            .or_else(|| find_runtime_library(target.as_deref()).ok());
         let stdlib_lib_path = stdlib_lib_resolved.clone();
         // Check if jsruntime will be used - if so, don't generate stubs for its symbols
         let use_jsruntime = ctx.needs_js_runtime || args.enable_js_runtime;
@@ -4344,13 +4447,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
     }
 
     // When geisterhand is enabled, prefer the geisterhand-enabled runtime
-    // (has the registry, dispatch queue, and pump functions)
+    // (has the registry, dispatch queue, and pump functions). Otherwise
+    // prefer the auto-mode rebuild (which may be panic=abort) over the
+    // prebuilt one. Auto-mode never enables panic=abort when geisterhand
+    // is on, so the geisterhand path always uses the prebuilt variant.
     let runtime_lib = if ctx.needs_geisterhand {
         if let Some(gh_rt) = find_geisterhand_runtime(target.as_deref()) {
             gh_rt
         } else {
             find_runtime_library(target.as_deref())?
         }
+    } else if let Some(auto_rt) = optimized_libs.runtime.clone() {
+        auto_rt
     } else {
         find_runtime_library(target.as_deref())?
     };
