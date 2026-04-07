@@ -335,16 +335,35 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         format!("{}: {}", name_str, message_str)
                     }
                 } else if gc_type == crate::gc::GC_TYPE_ARRAY {
-                    // Array — format as [elem1, elem2, ...]
+                    // Array — format as [ elem1, elem2, ... ] matching Node.js util.inspect
                     let maybe_arr = ptr;
                     let length = (*maybe_arr).length as usize;
                     let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
                     let mut parts: Vec<String> = Vec::with_capacity(length);
                     for i in 0..length {
                         let elem_value = *data_ptr.add(i);
-                        parts.push(format_jsvalue(elem_value, depth + 1));
+                        let elem_jsval = JSValue::from_bits(elem_value.to_bits());
+                        // Quote string elements like Node's util.inspect: 'hello'
+                        if elem_jsval.is_string() {
+                            let s = format_jsvalue(elem_value, depth + 1);
+                            parts.push(format!("'{}'", s));
+                        } else {
+                            parts.push(format_jsvalue(elem_value, depth + 1));
+                        }
                     }
-                    format!("[{}]", parts.join(", "))
+                    let inner = parts.join(", ");
+                    // Node uses multi-line for arrays with >5 elements or >72 chars
+                    if length > 5 || inner.len() > 72 {
+                        let indent = "  ";
+                        let lines: Vec<String> = parts.chunks(4).map(|chunk| {
+                            format!("{}{}", indent, chunk.join(", "))
+                        }).collect();
+                        format!("[\n{}\n]", lines.join(",\n"))
+                    } else if length == 0 {
+                        "[]".to_string()
+                    } else {
+                        format!("[ {} ]", inner)
+                    }
                 } else if gc_type == crate::gc::GC_TYPE_OBJECT {
                     // Object — check for keys_array
                     let obj_ptr = ptr as *const crate::object::ObjectHeader;
