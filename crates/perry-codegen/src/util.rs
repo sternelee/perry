@@ -66,6 +66,16 @@ thread_local! {
     /// Pending label attached to the next loop/switch statement compiled.
     /// Set when a `Labeled { label, body: loop }` stmt is seen; consumed by the inner loop's compiler.
     pub(crate) static PENDING_LABEL: RefCell<Option<String>> = RefCell::new(None);
+    /// Module-level variable data slot IDs for the module currently being compiled.
+    /// Populated by compile_module before any function/closure compilation.
+    /// Used by compile_expr's closure-construction path to handle captures of
+    /// module-level variables that aren't yet in the function's `locals` map —
+    /// e.g., a closure body references a module-level var, the HIR adds it to
+    /// `captures`, but at the construction site (which runs in the module init
+    /// or another function) the var hasn't been declared as a local yet.
+    /// Without this, those capture slots silently get a 0.0 default, leading to
+    /// NULL box pointer crashes the first time the closure tries to read them.
+    pub(crate) static MODULE_VAR_DATA_IDS: RefCell<HashMap<LocalId, cranelift_module::DataId>> = RefCell::new(HashMap::new());
 }
 
 /// Lightweight i18n table data for codegen thread-local access.

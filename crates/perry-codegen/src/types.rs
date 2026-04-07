@@ -92,9 +92,19 @@ pub(crate) struct LocalInfo {
 impl LocalInfo {
     /// Determines the Cranelift type for this variable when used as a module-level global slot.
     /// Must match the type used in the module init (stmt.rs) to ensure consistency.
-    /// Pointer types without union use I64 (raw pointer). Everything else uses F64 (NaN-boxed).
+    /// - Boxed vars (mutable captures) hold a raw box pointer → I64
+    /// - Pointer types without union → I64 (raw pointer)
+    /// - Everything else → F64 (NaN-boxed)
+    ///
+    /// The boxed-var case is critical: the module init's stmt.rs path declares
+    /// box_var as I64 and stores it to the global slot. Functions/closures/methods
+    /// that load this slot must use I64 too — otherwise they read the box pointer
+    /// bits as an f64 value, then pass an F64 to js_box_set, causing either a
+    /// Cranelift type mismatch or (after a stray bitcast) a NULL box pointer crash.
     pub fn cranelift_var_type(&self) -> cranelift::prelude::types::Type {
-        if self.is_pointer && !self.is_union {
+        if self.is_boxed {
+            cranelift::prelude::types::I64
+        } else if self.is_pointer && !self.is_union {
             cranelift::prelude::types::I64
         } else {
             cranelift::prelude::types::F64

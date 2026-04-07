@@ -1546,6 +1546,22 @@ impl Compiler {
             }
         }
 
+        // Publish module-var data IDs to a thread-local for compile_expr's
+        // closure-construction path. This must happen AFTER class capture
+        // promotion (which adds entries) and BEFORE any compile_closure /
+        // compile_function / compile_class_method / compile_init call (which
+        // can build closures whose `captures` list references module-level vars
+        // not yet bound as `locals` at the construction site). Without this,
+        // the construction silently sets the capture slot to 0.0 and the
+        // closure crashes with NULL box pointer the first time it reads it.
+        crate::util::MODULE_VAR_DATA_IDS.with(|p| {
+            let mut map = p.borrow_mut();
+            map.clear();
+            for (k, v) in &self.module_var_data_ids {
+                map.insert(*k, *v);
+            }
+        });
+
         // Now compile closures (after wrappers are created and module vars are registered)
         for (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class, is_async) in deduped_closures {
             self.compile_closure(func_id, &params, &body, &captures, &mutable_captures, captures_this, enclosing_class.as_deref(), is_async)?;
