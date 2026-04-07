@@ -1320,11 +1320,40 @@ fn widen_mutable_captures_expr(expr: &mut Expr, scope_mutable: &std::collections
             widen_mutable_captures_expr(array, scope_mutable);
             widen_mutable_captures_expr(comparator, scope_mutable);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             widen_mutable_captures_expr(array, scope_mutable);
             widen_mutable_captures_expr(callback, scope_mutable);
             if let Some(init) = initial {
                 widen_mutable_captures_expr(init, scope_mutable);
+            }
+        }
+        Expr::ArrayToReversed { array } => {
+            widen_mutable_captures_expr(array, scope_mutable);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            widen_mutable_captures_expr(array, scope_mutable);
+            if let Some(cmp) = comparator {
+                widen_mutable_captures_expr(cmp, scope_mutable);
+            }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            widen_mutable_captures_expr(array, scope_mutable);
+            widen_mutable_captures_expr(start, scope_mutable);
+            widen_mutable_captures_expr(delete_count, scope_mutable);
+            for item in items {
+                widen_mutable_captures_expr(item, scope_mutable);
+            }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            widen_mutable_captures_expr(array, scope_mutable);
+            widen_mutable_captures_expr(index, scope_mutable);
+            widen_mutable_captures_expr(value, scope_mutable);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            widen_mutable_captures_expr(target, scope_mutable);
+            widen_mutable_captures_expr(start, scope_mutable);
+            if let Some(e) = end {
+                widen_mutable_captures_expr(e, scope_mutable);
             }
         }
         Expr::NativeMethodCall { object, args, .. } => {
@@ -1532,11 +1561,40 @@ fn collect_closure_assigned_expr(expr: &Expr, out: &mut std::collections::HashSe
             collect_closure_assigned_expr(array, out);
             collect_closure_assigned_expr(comparator, out);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             collect_closure_assigned_expr(array, out);
             collect_closure_assigned_expr(callback, out);
             if let Some(init) = initial {
                 collect_closure_assigned_expr(init, out);
+            }
+        }
+        Expr::ArrayToReversed { array } => {
+            collect_closure_assigned_expr(array, out);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            collect_closure_assigned_expr(array, out);
+            if let Some(cmp) = comparator {
+                collect_closure_assigned_expr(cmp, out);
+            }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            collect_closure_assigned_expr(array, out);
+            collect_closure_assigned_expr(start, out);
+            collect_closure_assigned_expr(delete_count, out);
+            for item in items {
+                collect_closure_assigned_expr(item, out);
+            }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            collect_closure_assigned_expr(array, out);
+            collect_closure_assigned_expr(index, out);
+            collect_closure_assigned_expr(value, out);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            collect_closure_assigned_expr(target, out);
+            collect_closure_assigned_expr(start, out);
+            if let Some(e) = end {
+                collect_closure_assigned_expr(e, out);
             }
         }
         Expr::NativeMethodCall { object, args, .. } => {
@@ -1675,10 +1733,33 @@ fn collect_closure_captures_expr(expr: &Expr, out: &mut std::collections::HashSe
             collect_closure_captures_expr(array, out);
             collect_closure_captures_expr(callback, out);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             collect_closure_captures_expr(array, out);
             collect_closure_captures_expr(callback, out);
             if let Some(init) = initial { collect_closure_captures_expr(init, out); }
+        }
+        Expr::ArrayToReversed { array } => {
+            collect_closure_captures_expr(array, out);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            collect_closure_captures_expr(array, out);
+            if let Some(cmp) = comparator { collect_closure_captures_expr(cmp, out); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            collect_closure_captures_expr(array, out);
+            collect_closure_captures_expr(start, out);
+            collect_closure_captures_expr(delete_count, out);
+            for item in items { collect_closure_captures_expr(item, out); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            collect_closure_captures_expr(array, out);
+            collect_closure_captures_expr(index, out);
+            collect_closure_captures_expr(value, out);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            collect_closure_captures_expr(target, out);
+            collect_closure_captures_expr(start, out);
+            if let Some(e) = end { collect_closure_captures_expr(e, out); }
         }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object { collect_closure_captures_expr(obj, out); }
@@ -1956,12 +2037,35 @@ fn collect_closure_assigned_in_body_expr(expr: &Expr, out: &mut std::collections
             collect_closure_assigned_in_body_expr(array, out);
             collect_closure_assigned_in_body_expr(comparator, out);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             collect_closure_assigned_in_body_expr(array, out);
             collect_closure_assigned_in_body_expr(callback, out);
             if let Some(init) = initial {
                 collect_closure_assigned_in_body_expr(init, out);
             }
+        }
+        Expr::ArrayToReversed { array } => {
+            collect_closure_assigned_in_body_expr(array, out);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            collect_closure_assigned_in_body_expr(array, out);
+            if let Some(cmp) = comparator { collect_closure_assigned_in_body_expr(cmp, out); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            collect_closure_assigned_in_body_expr(array, out);
+            collect_closure_assigned_in_body_expr(start, out);
+            collect_closure_assigned_in_body_expr(delete_count, out);
+            for item in items { collect_closure_assigned_in_body_expr(item, out); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            collect_closure_assigned_in_body_expr(array, out);
+            collect_closure_assigned_in_body_expr(index, out);
+            collect_closure_assigned_in_body_expr(value, out);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            collect_closure_assigned_in_body_expr(target, out);
+            collect_closure_assigned_in_body_expr(start, out);
+            if let Some(e) = end { collect_closure_assigned_in_body_expr(e, out); }
         }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object {
@@ -4193,6 +4297,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             }
                                             return Ok(Expr::ArrayFrom(Box::new(value)));
                                         }
+                                        "of" => {
+                                            // Array.of(1,2,3) is equivalent to [1,2,3]
+                                            return Ok(Expr::Array(args));
+                                        }
                                         _ => {} // Fall through to generic handling
                                     }
                                 }
@@ -5578,6 +5686,70 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 array: Box::new(Expr::LocalGet(array_id)),
                                             });
                                         }
+                                        "reduceRight" => {
+                                            if args.len() >= 1 {
+                                                let mut args_iter = args.into_iter();
+                                                let callback = args_iter.next().unwrap();
+                                                let initial = args_iter.next().map(Box::new);
+                                                return Ok(Expr::ArrayReduceRight {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    callback: Box::new(callback),
+                                                    initial,
+                                                });
+                                            }
+                                        }
+                                        "toReversed" => {
+                                            return Ok(Expr::ArrayToReversed {
+                                                array: Box::new(Expr::LocalGet(array_id)),
+                                            });
+                                        }
+                                        "toSorted" => {
+                                            let comparator = args.into_iter().next().map(Box::new);
+                                            return Ok(Expr::ArrayToSorted {
+                                                array: Box::new(Expr::LocalGet(array_id)),
+                                                comparator,
+                                            });
+                                        }
+                                        "toSpliced" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let start = args_iter.next().unwrap();
+                                                let delete_count = args_iter.next().unwrap();
+                                                let items: Vec<Expr> = args_iter.collect();
+                                                return Ok(Expr::ArrayToSpliced {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    start: Box::new(start),
+                                                    delete_count: Box::new(delete_count),
+                                                    items,
+                                                });
+                                            }
+                                        }
+                                        "with" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let index = args_iter.next().unwrap();
+                                                let value = args_iter.next().unwrap();
+                                                return Ok(Expr::ArrayWith {
+                                                    array: Box::new(Expr::LocalGet(array_id)),
+                                                    index: Box::new(index),
+                                                    value: Box::new(value),
+                                                });
+                                            }
+                                        }
+                                        "copyWithin" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let target = args_iter.next().unwrap();
+                                                let start = args_iter.next().unwrap();
+                                                let end = args_iter.next().map(Box::new);
+                                                return Ok(Expr::ArrayCopyWithin {
+                                                    array_id,
+                                                    target: Box::new(target),
+                                                    start: Box::new(start),
+                                                    end,
+                                                });
+                                            }
+                                        }
                                         // Map methods (only apply to actual Map/Set types)
                                         "set" => {
                                             // Check if this is a Map or Set type before treating as Map.set()
@@ -5974,6 +6146,56 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                         array: Box::new(extern_ref),
                                                     });
                                                 }
+                                                "reduceRight" => {
+                                                    if args.len() >= 1 {
+                                                        let mut args_iter = args.into_iter();
+                                                        let callback = args_iter.next().unwrap();
+                                                        let initial = args_iter.next().map(Box::new);
+                                                        return Ok(Expr::ArrayReduceRight {
+                                                            array: Box::new(extern_ref),
+                                                            callback: Box::new(callback),
+                                                            initial,
+                                                        });
+                                                    }
+                                                }
+                                                "toReversed" => {
+                                                    return Ok(Expr::ArrayToReversed {
+                                                        array: Box::new(extern_ref),
+                                                    });
+                                                }
+                                                "toSorted" => {
+                                                    let comparator = args.into_iter().next().map(Box::new);
+                                                    return Ok(Expr::ArrayToSorted {
+                                                        array: Box::new(extern_ref),
+                                                        comparator,
+                                                    });
+                                                }
+                                                "toSpliced" => {
+                                                    if args.len() >= 2 {
+                                                        let mut args_iter = args.into_iter();
+                                                        let start = args_iter.next().unwrap();
+                                                        let delete_count = args_iter.next().unwrap();
+                                                        let items: Vec<Expr> = args_iter.collect();
+                                                        return Ok(Expr::ArrayToSpliced {
+                                                            array: Box::new(extern_ref),
+                                                            start: Box::new(start),
+                                                            delete_count: Box::new(delete_count),
+                                                            items,
+                                                        });
+                                                    }
+                                                }
+                                                "with" => {
+                                                    if args.len() >= 2 {
+                                                        let mut args_iter = args.into_iter();
+                                                        let index = args_iter.next().unwrap();
+                                                        let value = args_iter.next().unwrap();
+                                                        return Ok(Expr::ArrayWith {
+                                                            array: Box::new(extern_ref),
+                                                            index: Box::new(index),
+                                                            value: Box::new(value),
+                                                        });
+                                                    }
+                                                }
                                                 _ => {} // Fall through for other methods
                                             }
                                         }
@@ -6092,6 +6314,56 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             return Ok(Expr::ArrayFlat {
                                                 array: Box::new(array_expr),
                                             });
+                                        }
+                                        "reduceRight" => {
+                                            if args.len() >= 1 {
+                                                let mut args_iter = args.into_iter();
+                                                let callback = args_iter.next().unwrap();
+                                                let initial = args_iter.next().map(Box::new);
+                                                return Ok(Expr::ArrayReduceRight {
+                                                    array: Box::new(array_expr),
+                                                    callback: Box::new(callback),
+                                                    initial,
+                                                });
+                                            }
+                                        }
+                                        "toReversed" => {
+                                            return Ok(Expr::ArrayToReversed {
+                                                array: Box::new(array_expr),
+                                            });
+                                        }
+                                        "toSorted" => {
+                                            let comparator = args.into_iter().next().map(Box::new);
+                                            return Ok(Expr::ArrayToSorted {
+                                                array: Box::new(array_expr),
+                                                comparator,
+                                            });
+                                        }
+                                        "toSpliced" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let start = args_iter.next().unwrap();
+                                                let delete_count = args_iter.next().unwrap();
+                                                let items: Vec<Expr> = args_iter.collect();
+                                                return Ok(Expr::ArrayToSpliced {
+                                                    array: Box::new(array_expr),
+                                                    start: Box::new(start),
+                                                    delete_count: Box::new(delete_count),
+                                                    items,
+                                                });
+                                            }
+                                        }
+                                        "with" => {
+                                            if args.len() >= 2 {
+                                                let mut args_iter = args.into_iter();
+                                                let index = args_iter.next().unwrap();
+                                                let value = args_iter.next().unwrap();
+                                                return Ok(Expr::ArrayWith {
+                                                    array: Box::new(array_expr),
+                                                    index: Box::new(index),
+                                                    value: Box::new(value),
+                                                });
+                                            }
                                         }
                                         _ => {} // Fall through for other methods
                                     }
@@ -6307,6 +6579,55 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                         let array_expr = lower_expr(ctx, &member.obj)?;
                                         return Ok(Expr::ArrayFlat {
                                             array: Box::new(array_expr),
+                                        });
+                                    }
+                                    "reduceRight" if args.len() >= 1 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        let mut args_iter = args.into_iter();
+                                        let callback = args_iter.next().unwrap();
+                                        let initial = args_iter.next().map(Box::new);
+                                        return Ok(Expr::ArrayReduceRight {
+                                            array: Box::new(array_expr),
+                                            callback: Box::new(callback),
+                                            initial,
+                                        });
+                                    }
+                                    "toReversed" => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        return Ok(Expr::ArrayToReversed {
+                                            array: Box::new(array_expr),
+                                        });
+                                    }
+                                    "toSorted" => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        let comparator = args.into_iter().next().map(Box::new);
+                                        return Ok(Expr::ArrayToSorted {
+                                            array: Box::new(array_expr),
+                                            comparator,
+                                        });
+                                    }
+                                    "toSpliced" if args.len() >= 2 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        let mut args_iter = args.into_iter();
+                                        let start = args_iter.next().unwrap();
+                                        let delete_count = args_iter.next().unwrap();
+                                        let items: Vec<Expr> = args_iter.collect();
+                                        return Ok(Expr::ArrayToSpliced {
+                                            array: Box::new(array_expr),
+                                            start: Box::new(start),
+                                            delete_count: Box::new(delete_count),
+                                            items,
+                                        });
+                                    }
+                                    "with" if args.len() >= 2 => {
+                                        let array_expr = lower_expr(ctx, &member.obj)?;
+                                        let mut args_iter = args.into_iter();
+                                        let index = args_iter.next().unwrap();
+                                        let value = args_iter.next().unwrap();
+                                        return Ok(Expr::ArrayWith {
+                                            array: Box::new(array_expr),
+                                            index: Box::new(index),
+                                            value: Box::new(value),
                                         });
                                     }
                                     "push" if args.len() >= 1 => {

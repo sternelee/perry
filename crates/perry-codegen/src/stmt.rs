@@ -855,10 +855,13 @@ pub(crate) fn compile_stmt(
                     Some(Expr::Array(_)) | Some(Expr::ArraySpread(_)) | Some(Expr::ProcessArgv) => (None, true, true, false, false, false, false, false, false, false),
                     // Object literals return object pointers
                     Some(Expr::Object(_)) | Some(Expr::ObjectSpread { .. }) => (None, true, false, false, false, false, false, false, false, false),
-                    // ArrayMap, ArrayFilter, ArraySort, ArraySlice, and ArraySplice return arrays
+                    // ArrayMap, ArrayFilter, ArraySort, ArraySlice, ArraySplice and immutable array methods return arrays
                     Some(Expr::ArrayMap { .. }) | Some(Expr::ArrayFilter { .. }) |
                     Some(Expr::ArraySort { .. }) | Some(Expr::ArraySlice { .. }) |
-                    Some(Expr::ArraySplice { .. }) => (None, true, true, false, false, false, false, false, false, false),
+                    Some(Expr::ArraySplice { .. }) |
+                    Some(Expr::ArrayToReversed { .. }) | Some(Expr::ArrayToSorted { .. }) |
+                    Some(Expr::ArrayToSpliced { .. }) | Some(Expr::ArrayWith { .. }) |
+                    Some(Expr::ArrayCopyWithin { .. }) => (None, true, true, false, false, false, false, false, false, false),
                     // string.match(regex) / string.matchAll(regex) return arrays (or null for match).
                     // The result is NaN-boxed as F64 by the codegen, so is_pointer=false (union-style storage)
                     Some(Expr::StringMatch { .. }) | Some(Expr::StringMatchAll { .. }) =>
@@ -1299,6 +1302,8 @@ pub(crate) fn compile_stmt(
                                 // Array/Map/Set constructors may return NaN-boxed
                                 Expr::Array(_) | Expr::ArraySpread(_) | Expr::ArrayMap { .. } |
                                 Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } |
+                                Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
+                                Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } | Expr::ArrayCopyWithin { .. } |
                                 Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                                 Expr::MapEntries(_) | Expr::MapKeys(_) | Expr::MapValues(_) => true,
                                 // Map.get() returns NaN-boxed value (may be POINTER_TAG object)

@@ -1293,8 +1293,14 @@ pub enum Expr {
     ArrayFlatMap { array: Box<Expr>, callback: Box<Expr> },  // arr.flatMap(fn) -> new array
     ArraySort { array: Box<Expr>, comparator: Box<Expr> },   // arr.sort(fn) -> same array (in-place)
     ArrayReduce { array: Box<Expr>, callback: Box<Expr>, initial: Option<Box<Expr>> }, // arr.reduce(fn, init?) -> value
+    ArrayReduceRight { array: Box<Expr>, callback: Box<Expr>, initial: Option<Box<Expr>> }, // arr.reduceRight(fn, init?) -> value
     ArrayJoin { array: Box<Expr>, separator: Option<Box<Expr>> }, // arr.join(separator?) -> string
     ArrayFlat { array: Box<Expr> },                          // arr.flat() -> flattened array
+    ArrayToReversed { array: Box<Expr> },                    // arr.toReversed() -> new reversed array
+    ArrayToSorted { array: Box<Expr>, comparator: Option<Box<Expr>> }, // arr.toSorted(fn?) -> new sorted array
+    ArrayToSpliced { array: Box<Expr>, start: Box<Expr>, delete_count: Box<Expr>, items: Vec<Expr> }, // arr.toSpliced(start, deleteCount, ...items) -> new array
+    ArrayWith { array: Box<Expr>, index: Box<Expr>, value: Box<Expr> }, // arr.with(index, value) -> new array
+    ArrayCopyWithin { array_id: LocalId, target: Box<Expr>, start: Box<Expr>, end: Option<Box<Expr>> }, // arr.copyWithin(target, start, end?) -> same array
 
     // String methods
     StringSplit(Box<Expr>, Box<Expr>),  // string.split(delimiter) -> string[]

@@ -1802,6 +1802,60 @@ impl JsEmitter {
                 self.emit_expr(array);
                 self.output.push_str(".flat()");
             }
+            Expr::ArrayReduceRight { array, callback, initial } => {
+                self.emit_expr(array);
+                self.output.push_str(".reduceRight(");
+                self.emit_expr(callback);
+                if let Some(init) = initial {
+                    self.output.push_str(", ");
+                    self.emit_expr(init);
+                }
+                self.output.push(')');
+            }
+            Expr::ArrayToReversed { array } => {
+                self.emit_expr(array);
+                self.output.push_str(".toReversed()");
+            }
+            Expr::ArrayToSorted { array, comparator } => {
+                self.emit_expr(array);
+                self.output.push_str(".toSorted(");
+                if let Some(cmp) = comparator {
+                    self.emit_expr(cmp);
+                }
+                self.output.push(')');
+            }
+            Expr::ArrayToSpliced { array, start, delete_count, items } => {
+                self.emit_expr(array);
+                self.output.push_str(".toSpliced(");
+                self.emit_expr(start);
+                self.output.push_str(", ");
+                self.emit_expr(delete_count);
+                for item in items {
+                    self.output.push_str(", ");
+                    self.emit_expr(item);
+                }
+                self.output.push(')');
+            }
+            Expr::ArrayWith { array, index, value } => {
+                self.emit_expr(array);
+                self.output.push_str(".with(");
+                self.emit_expr(index);
+                self.output.push_str(", ");
+                self.emit_expr(value);
+                self.output.push(')');
+            }
+            Expr::ArrayCopyWithin { array_id, target, start, end } => {
+                let name = self.get_local_name(*array_id);
+                let _ = write!(self.output, "{}.copyWithin(", name);
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(start);
+                if let Some(e) = end {
+                    self.output.push_str(", ");
+                    self.emit_expr(e);
+                }
+                self.output.push(')');
+            }
 
             // --- String methods ---
             Expr::StringSplit(string, delimiter) => {

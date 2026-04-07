@@ -2926,12 +2926,32 @@ impl WasmModuleEmitter {
                 self.collect_strings_in_expr(array);
                 self.collect_strings_in_expr(callback);
             }
-            Expr::ArrayReduce { array, callback, initial } => {
+            Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
                 self.collect_strings_in_expr(array);
                 self.collect_strings_in_expr(callback);
                 if let Some(i) = initial { self.collect_strings_in_expr(i); }
             }
-            Expr::ArrayFlat { array } | Expr::ArrayIsArray(array) | Expr::ArrayFrom(array) => {
+            Expr::ArrayToSorted { array, comparator } => {
+                self.collect_strings_in_expr(array);
+                if let Some(c) = comparator { self.collect_strings_in_expr(c); }
+            }
+            Expr::ArrayToSpliced { array, start, delete_count, items } => {
+                self.collect_strings_in_expr(array);
+                self.collect_strings_in_expr(start);
+                self.collect_strings_in_expr(delete_count);
+                for item in items { self.collect_strings_in_expr(item); }
+            }
+            Expr::ArrayWith { array, index, value } => {
+                self.collect_strings_in_expr(array);
+                self.collect_strings_in_expr(index);
+                self.collect_strings_in_expr(value);
+            }
+            Expr::ArrayCopyWithin { target, start, end, .. } => {
+                self.collect_strings_in_expr(target);
+                self.collect_strings_in_expr(start);
+                if let Some(e) = end { self.collect_strings_in_expr(e); }
+            }
+            Expr::ArrayFlat { array } | Expr::ArrayIsArray(array) | Expr::ArrayFrom(array) | Expr::ArrayToReversed { array } => {
                 self.collect_strings_in_expr(array);
             }
             Expr::ArrayFromMapped { iterable, map_fn } => {
@@ -5453,7 +5473,8 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_store_arg(func, 1, comparator);
                 self.emit_memcall(func, "array_sort", 2);
             }
-            Expr::ArrayReduce { array, callback, initial } => {
+            Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
+                let is_right = matches!(expr, Expr::ArrayReduceRight { .. });
                 self.emit_expr(func, array);
                 self.emit_expr(func, callback);
                 if let Some(init) = initial {
@@ -5474,7 +5495,51 @@ impl<'a> FuncEmitCtx<'a> {
                 self.emit_slot_addr(func, 0);
                 func.instruction(&Instruction::LocalGet(self.temp_local));
                 func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
-                self.emit_memcall(func, "array_reduce", 3);
+                let name = if is_right { "array_reduce_right" } else { "array_reduce" };
+                self.emit_memcall(func, name, 3);
+            }
+            Expr::ArrayToReversed { array } => {
+                self.emit_store_arg(func, 0, array);
+                self.emit_memcall(func, "array_to_reversed", 1);
+            }
+            Expr::ArrayToSorted { array, comparator } => {
+                if let Some(cmp) = comparator {
+                    self.emit_store_arg(func, 0, array);
+                    self.emit_store_arg(func, 1, cmp);
+                    self.emit_memcall(func, "array_to_sorted_cmp", 2);
+                } else {
+                    self.emit_store_arg(func, 0, array);
+                    self.emit_memcall(func, "array_to_sorted", 1);
+                }
+            }
+            Expr::ArrayToSpliced { array, start, delete_count, items } => {
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, start);
+                self.emit_store_arg(func, 2, delete_count);
+                // items passed as count only for now (WASM doesn't support varargs easily)
+                self.emit_memcall(func, "array_to_spliced", 3);
+            }
+            Expr::ArrayWith { array, index, value } => {
+                self.emit_store_arg(func, 0, array);
+                self.emit_store_arg(func, 1, index);
+                self.emit_store_arg(func, 2, value);
+                self.emit_memcall(func, "array_with", 3);
+            }
+            Expr::ArrayCopyWithin { array_id, target, start, end } => {
+                // emit local get for array_id
+                func.instruction(&Instruction::LocalGet(*array_id));
+                func.instruction(&Instruction::LocalSet(self.temp_local));
+                self.emit_slot_addr(func, 0);
+                func.instruction(&Instruction::LocalGet(self.temp_local));
+                func.instruction(&Instruction::I64Store(wasm_encoder::MemArg { offset: 0, align: 3, memory_index: 0 }));
+                self.emit_store_arg(func, 1, target);
+                self.emit_store_arg(func, 2, start);
+                if let Some(e) = end {
+                    self.emit_store_arg(func, 3, e);
+                    self.emit_memcall(func, "array_copy_within", 4);
+                } else {
+                    self.emit_memcall(func, "array_copy_within", 3);
+                }
             }
 
             // --- Closure ---
@@ -7334,10 +7399,33 @@ fn collect_closures_from_expr(
             collect_closures_from_expr(array, out);
             collect_closures_from_expr(callback, out);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             collect_closures_from_expr(array, out);
             collect_closures_from_expr(callback, out);
             if let Some(i) = initial { collect_closures_from_expr(i, out); }
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            collect_closures_from_expr(array, out);
+            if let Some(c) = comparator { collect_closures_from_expr(c, out); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            collect_closures_from_expr(array, out);
+            collect_closures_from_expr(start, out);
+            collect_closures_from_expr(delete_count, out);
+            for item in items { collect_closures_from_expr(item, out); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            collect_closures_from_expr(array, out);
+            collect_closures_from_expr(index, out);
+            collect_closures_from_expr(value, out);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            collect_closures_from_expr(target, out);
+            collect_closures_from_expr(start, out);
+            if let Some(e) = end { collect_closures_from_expr(e, out); }
+        }
+        Expr::ArrayToReversed { array } => {
+            collect_closures_from_expr(array, out);
         }
         Expr::Sequence(exprs) => {
             for e in exprs { collect_closures_from_expr(e, out); }

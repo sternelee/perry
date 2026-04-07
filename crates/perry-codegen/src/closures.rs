@@ -431,7 +431,7 @@ impl crate::codegen::Compiler {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(comparator, closures, enclosing_class);
             }
-            Expr::ArrayReduce { array, callback, initial } => {
+            Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 self.collect_closures_from_expr(callback, closures, enclosing_class);
                 if let Some(init) = initial {
@@ -444,8 +444,28 @@ impl crate::codegen::Compiler {
                     self.collect_closures_from_expr(sep, closures, enclosing_class);
                 }
             }
-            Expr::ArrayFlat { array } => {
+            Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
+            }
+            Expr::ArrayToSorted { array, comparator } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+                if let Some(cmp) = comparator { self.collect_closures_from_expr(cmp, closures, enclosing_class); }
+            }
+            Expr::ArrayToSpliced { array, start, delete_count, items } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+                self.collect_closures_from_expr(start, closures, enclosing_class);
+                self.collect_closures_from_expr(delete_count, closures, enclosing_class);
+                for item in items { self.collect_closures_from_expr(item, closures, enclosing_class); }
+            }
+            Expr::ArrayWith { array, index, value } => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+                self.collect_closures_from_expr(index, closures, enclosing_class);
+                self.collect_closures_from_expr(value, closures, enclosing_class);
+            }
+            Expr::ArrayCopyWithin { target, start, end, .. } => {
+                self.collect_closures_from_expr(target, closures, enclosing_class);
+                self.collect_closures_from_expr(start, closures, enclosing_class);
+                if let Some(e) = end { self.collect_closures_from_expr(e, closures, enclosing_class); }
             }
             Expr::NativeMethodCall { object, args, .. } => {
                 // Collect closures from object (if present)
@@ -1233,7 +1253,7 @@ impl crate::codegen::Compiler {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(comparator, captures);
             }
-            Expr::ArrayReduce { array, callback, initial } => {
+            Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
                 self.collect_mutable_captures_from_expr(array, captures);
                 self.collect_mutable_captures_from_expr(callback, captures);
                 if let Some(init) = initial {
@@ -1246,8 +1266,28 @@ impl crate::codegen::Compiler {
                     self.collect_mutable_captures_from_expr(sep, captures);
                 }
             }
-            Expr::ArrayFlat { array } => {
+            Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
                 self.collect_mutable_captures_from_expr(array, captures);
+            }
+            Expr::ArrayToSorted { array, comparator } => {
+                self.collect_mutable_captures_from_expr(array, captures);
+                if let Some(cmp) = comparator { self.collect_mutable_captures_from_expr(cmp, captures); }
+            }
+            Expr::ArrayToSpliced { array, start, delete_count, items } => {
+                self.collect_mutable_captures_from_expr(array, captures);
+                self.collect_mutable_captures_from_expr(start, captures);
+                self.collect_mutable_captures_from_expr(delete_count, captures);
+                for item in items { self.collect_mutable_captures_from_expr(item, captures); }
+            }
+            Expr::ArrayWith { array, index, value } => {
+                self.collect_mutable_captures_from_expr(array, captures);
+                self.collect_mutable_captures_from_expr(index, captures);
+                self.collect_mutable_captures_from_expr(value, captures);
+            }
+            Expr::ArrayCopyWithin { target, start, end, .. } => {
+                self.collect_mutable_captures_from_expr(target, captures);
+                self.collect_mutable_captures_from_expr(start, captures);
+                if let Some(e) = end { self.collect_mutable_captures_from_expr(e, captures); }
             }
             Expr::LocalSet(_, val) | Expr::GlobalSet(_, val) => {
                 self.collect_mutable_captures_from_expr(val, captures);
@@ -1462,7 +1502,7 @@ impl crate::codegen::Compiler {
                     _ => self.collect_func_refs_from_expr(comparator, func_refs),
                 }
             }
-            Expr::ArrayReduce { array, callback, initial } => {
+            Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
                 self.collect_func_refs_from_expr(array, func_refs);
                 match callback.as_ref() {
                     Expr::FuncRef(func_id) => {
@@ -1473,6 +1513,34 @@ impl crate::codegen::Compiler {
                 if let Some(init) = initial {
                     self.collect_func_refs_from_expr(init, func_refs);
                 }
+            }
+            Expr::ArrayToReversed { array } => {
+                self.collect_func_refs_from_expr(array, func_refs);
+            }
+            Expr::ArrayToSorted { array, comparator } => {
+                self.collect_func_refs_from_expr(array, func_refs);
+                if let Some(cmp) = comparator {
+                    match cmp.as_ref() {
+                        Expr::FuncRef(func_id) => { func_refs.insert(*func_id); }
+                        _ => self.collect_func_refs_from_expr(cmp, func_refs),
+                    }
+                }
+            }
+            Expr::ArrayToSpliced { array, start, delete_count, items } => {
+                self.collect_func_refs_from_expr(array, func_refs);
+                self.collect_func_refs_from_expr(start, func_refs);
+                self.collect_func_refs_from_expr(delete_count, func_refs);
+                for item in items { self.collect_func_refs_from_expr(item, func_refs); }
+            }
+            Expr::ArrayWith { array, index, value } => {
+                self.collect_func_refs_from_expr(array, func_refs);
+                self.collect_func_refs_from_expr(index, func_refs);
+                self.collect_func_refs_from_expr(value, func_refs);
+            }
+            Expr::ArrayCopyWithin { target, start, end, .. } => {
+                self.collect_func_refs_from_expr(target, func_refs);
+                self.collect_func_refs_from_expr(start, func_refs);
+                if let Some(e) = end { self.collect_func_refs_from_expr(e, func_refs); }
             }
             _ => {}
         }

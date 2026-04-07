@@ -216,12 +216,36 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
             collect_local_refs_expr(array, refs, visited);
             collect_local_refs_expr(comparator, refs, visited);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             collect_local_refs_expr(array, refs, visited);
             collect_local_refs_expr(callback, refs, visited);
             if let Some(init) = initial {
                 collect_local_refs_expr(init, refs, visited);
             }
+        }
+        Expr::ArrayToReversed { array } => {
+            collect_local_refs_expr(array, refs, visited);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            collect_local_refs_expr(array, refs, visited);
+            if let Some(cmp) = comparator { collect_local_refs_expr(cmp, refs, visited); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            collect_local_refs_expr(array, refs, visited);
+            collect_local_refs_expr(start, refs, visited);
+            collect_local_refs_expr(delete_count, refs, visited);
+            for item in items { collect_local_refs_expr(item, refs, visited); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            collect_local_refs_expr(array, refs, visited);
+            collect_local_refs_expr(index, refs, visited);
+            collect_local_refs_expr(value, refs, visited);
+        }
+        Expr::ArrayCopyWithin { array_id, target, start, end } => {
+            refs.push(*array_id);
+            collect_local_refs_expr(target, refs, visited);
+            collect_local_refs_expr(start, refs, visited);
+            if let Some(e) = end { collect_local_refs_expr(e, refs, visited); }
         }
         Expr::ArrayJoin { array, separator } => {
             collect_local_refs_expr(array, refs, visited);
@@ -1030,12 +1054,36 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             collect_assigned_locals_expr(array, assigned);
             collect_assigned_locals_expr(comparator, assigned);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             collect_assigned_locals_expr(array, assigned);
             collect_assigned_locals_expr(callback, assigned);
             if let Some(init) = initial {
                 collect_assigned_locals_expr(init, assigned);
             }
+        }
+        Expr::ArrayToReversed { array } => {
+            collect_assigned_locals_expr(array, assigned);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            collect_assigned_locals_expr(array, assigned);
+            if let Some(cmp) = comparator { collect_assigned_locals_expr(cmp, assigned); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            collect_assigned_locals_expr(array, assigned);
+            collect_assigned_locals_expr(start, assigned);
+            collect_assigned_locals_expr(delete_count, assigned);
+            for item in items { collect_assigned_locals_expr(item, assigned); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            collect_assigned_locals_expr(array, assigned);
+            collect_assigned_locals_expr(index, assigned);
+            collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::ArrayCopyWithin { array_id, target, start, end } => {
+            assigned.push(*array_id); // copyWithin modifies array in-place
+            collect_assigned_locals_expr(target, assigned);
+            collect_assigned_locals_expr(start, assigned);
+            if let Some(e) = end { collect_assigned_locals_expr(e, assigned); }
         }
         Expr::ArrayJoin { array, separator } => {
             collect_assigned_locals_expr(array, assigned);

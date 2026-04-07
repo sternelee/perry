@@ -1430,6 +1430,111 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_array_reduce"), func_id);
         }
 
+        // js_array_reduce_right(arr, callback, has_initial, initial) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I64)); // callback closure pointer
+            sig.params.push(AbiParam::new(types::I32)); // has_initial flag
+            sig.params.push(AbiParam::new(types::F64)); // initial value
+            sig.returns.push(AbiParam::new(types::F64)); // result
+            let func_id = self.module.declare_function(
+                "js_array_reduce_right",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_reduce_right"), func_id);
+        }
+
+        // js_array_to_reversed(arr) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_to_reversed",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_to_reversed"), func_id);
+        }
+
+        // js_array_to_sorted_default(arr) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_to_sorted_default",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_to_sorted_default"), func_id);
+        }
+
+        // js_array_to_sorted_with_comparator(arr, comparator) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::I64)); // comparator closure pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_to_sorted_with_comparator",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_to_sorted_with_comparator"), func_id);
+        }
+
+        // js_array_to_spliced(arr, start, delete_count, items, items_count) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::F64)); // start
+            sig.params.push(AbiParam::new(types::F64)); // delete_count
+            sig.params.push(AbiParam::new(types::I64)); // items pointer
+            sig.params.push(AbiParam::new(types::I32)); // items_count
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_to_spliced",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_to_spliced"), func_id);
+        }
+
+        // js_array_with(arr, index, value) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::F64)); // index
+            sig.params.push(AbiParam::new(types::F64)); // value
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                "js_array_with",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_with"), func_id);
+        }
+
+        // js_array_copy_within(arr, target, start, has_end, end) -> *mut ArrayHeader
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.params.push(AbiParam::new(types::F64)); // target
+            sig.params.push(AbiParam::new(types::F64)); // start
+            sig.params.push(AbiParam::new(types::I32)); // has_end flag
+            sig.params.push(AbiParam::new(types::F64)); // end
+            sig.returns.push(AbiParam::new(types::I64)); // same array pointer
+            let func_id = self.module.declare_function(
+                "js_array_copy_within",
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Borrowed("js_array_copy_within"), func_id);
+        }
+
         // js_array_join(arr, separator) -> *mut StringHeader
         {
             let mut sig = self.module.make_signature();

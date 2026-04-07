@@ -719,7 +719,7 @@ fn transform_expr(
             transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(callback, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
             transform_expr(callback, js_imports, extern_func_to_js, local_name_to_js, tracker);
             if let Some(init) = initial {
@@ -732,8 +732,28 @@ fn transform_expr(
                 transform_expr(sep, js_imports, extern_func_to_js, local_name_to_js, tracker);
             }
         }
-        Expr::ArrayFlat { array } => {
+        Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
             transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            if let Some(cmp) = comparator { transform_expr(cmp, js_imports, extern_func_to_js, local_name_to_js, tracker); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            transform_expr(start, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            transform_expr(delete_count, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            for item in items { transform_expr(item, js_imports, extern_func_to_js, local_name_to_js, tracker); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            transform_expr(index, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            transform_expr(value, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            transform_expr(target, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            transform_expr(start, js_imports, extern_func_to_js, local_name_to_js, tracker);
+            if let Some(e) = end { transform_expr(e, js_imports, extern_func_to_js, local_name_to_js, tracker); }
         }
         Expr::StringSplit(a, b) => {
             transform_expr(a, js_imports, extern_func_to_js, local_name_to_js, tracker);

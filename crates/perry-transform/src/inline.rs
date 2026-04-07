@@ -1193,7 +1193,7 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
             substitute_locals(array, param_map, next_local_id);
             substitute_locals(callback, param_map, next_local_id);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             substitute_locals(array, param_map, next_local_id);
             substitute_locals(callback, param_map, next_local_id);
             if let Some(init) = initial {
@@ -1206,8 +1206,33 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
                 substitute_locals(sep, param_map, next_local_id);
             }
         }
-        Expr::ArrayFlat { array } => {
+        Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
             substitute_locals(array, param_map, next_local_id);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            substitute_locals(array, param_map, next_local_id);
+            if let Some(cmp) = comparator { substitute_locals(cmp, param_map, next_local_id); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(start, param_map, next_local_id);
+            substitute_locals(delete_count, param_map, next_local_id);
+            for item in items { substitute_locals(item, param_map, next_local_id); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            substitute_locals(array, param_map, next_local_id);
+            substitute_locals(index, param_map, next_local_id);
+            substitute_locals(value, param_map, next_local_id);
+        }
+        Expr::ArrayCopyWithin { array_id, target, start, end } => {
+            if let Some(replacement) = param_map.get(array_id) {
+                if let Expr::LocalGet(new_id) = replacement {
+                    *array_id = *new_id;
+                }
+            }
+            substitute_locals(target, param_map, next_local_id);
+            substitute_locals(start, param_map, next_local_id);
+            if let Some(e) = end { substitute_locals(e, param_map, next_local_id); }
         }
         Expr::Await(inner) => {
             substitute_locals(inner, param_map, next_local_id);
@@ -1608,7 +1633,7 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
             substitute_this(array, obj_id);
             substitute_this(callback, obj_id);
         }
-        Expr::ArrayReduce { array, callback, initial } => {
+        Expr::ArrayReduce { array, callback, initial } | Expr::ArrayReduceRight { array, callback, initial } => {
             substitute_this(array, obj_id);
             substitute_this(callback, obj_id);
             if let Some(init) = initial { substitute_this(init, obj_id); }
@@ -1622,8 +1647,28 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
             substitute_this(array, obj_id);
             if let Some(sep) = separator { substitute_this(sep, obj_id); }
         }
-        Expr::ArrayFlat { array } | Expr::ArrayFrom(array) => {
+        Expr::ArrayFlat { array } | Expr::ArrayFrom(array) | Expr::ArrayToReversed { array } => {
             substitute_this(array, obj_id);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            substitute_this(array, obj_id);
+            if let Some(cmp) = comparator { substitute_this(cmp, obj_id); }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            substitute_this(array, obj_id);
+            substitute_this(start, obj_id);
+            substitute_this(delete_count, obj_id);
+            for item in items { substitute_this(item, obj_id); }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            substitute_this(array, obj_id);
+            substitute_this(index, obj_id);
+            substitute_this(value, obj_id);
+        }
+        Expr::ArrayCopyWithin { target, start, end, .. } => {
+            substitute_this(target, obj_id);
+            substitute_this(start, obj_id);
+            if let Some(e) = end { substitute_this(e, obj_id); }
         }
         Expr::ArrayFromMapped { iterable, map_fn } => {
             substitute_this(iterable, obj_id);

@@ -1157,12 +1157,41 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             callback: Box::new(substitute_expr(callback, substitutions)),
             initial: initial.as_ref().map(|i| Box::new(substitute_expr(i, substitutions))),
         },
+        Expr::ArrayReduceRight { array, callback, initial } => Expr::ArrayReduceRight {
+            array: Box::new(substitute_expr(array, substitutions)),
+            callback: Box::new(substitute_expr(callback, substitutions)),
+            initial: initial.as_ref().map(|i| Box::new(substitute_expr(i, substitutions))),
+        },
         Expr::ArrayJoin { array, separator } => Expr::ArrayJoin {
             array: Box::new(substitute_expr(array, substitutions)),
             separator: separator.as_ref().map(|s| Box::new(substitute_expr(s, substitutions))),
         },
         Expr::ArrayFlat { array } => Expr::ArrayFlat {
             array: Box::new(substitute_expr(array, substitutions)),
+        },
+        Expr::ArrayToReversed { array } => Expr::ArrayToReversed {
+            array: Box::new(substitute_expr(array, substitutions)),
+        },
+        Expr::ArrayToSorted { array, comparator } => Expr::ArrayToSorted {
+            array: Box::new(substitute_expr(array, substitutions)),
+            comparator: comparator.as_ref().map(|c| Box::new(substitute_expr(c, substitutions))),
+        },
+        Expr::ArrayToSpliced { array, start, delete_count, items } => Expr::ArrayToSpliced {
+            array: Box::new(substitute_expr(array, substitutions)),
+            start: Box::new(substitute_expr(start, substitutions)),
+            delete_count: Box::new(substitute_expr(delete_count, substitutions)),
+            items: items.iter().map(|i| substitute_expr(i, substitutions)).collect(),
+        },
+        Expr::ArrayWith { array, index, value } => Expr::ArrayWith {
+            array: Box::new(substitute_expr(array, substitutions)),
+            index: Box::new(substitute_expr(index, substitutions)),
+            value: Box::new(substitute_expr(value, substitutions)),
+        },
+        Expr::ArrayCopyWithin { array_id, target, start, end } => Expr::ArrayCopyWithin {
+            array_id: *array_id,
+            target: Box::new(substitute_expr(target, substitutions)),
+            start: Box::new(substitute_expr(start, substitutions)),
+            end: end.as_ref().map(|e| Box::new(substitute_expr(e, substitutions))),
         },
 
         // String methods
