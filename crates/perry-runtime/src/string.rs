@@ -650,22 +650,21 @@ pub extern "C" fn js_string_ends_with(s: *const StringHeader, suffix: *const Str
     1
 }
 
-/// Get character code at index (returns UTF-16 code unit, or NaN if out of bounds)
+/// Get character code at index (returns UTF-16 code unit, or NaN if out of bounds).
+/// Index is in UTF-16 code units (matches JS spec). For ASCII strings this is
+/// equivalent to byte indexing; for multi-byte UTF-8 we convert to UTF-16 first.
 #[no_mangle]
 pub extern "C" fn js_string_char_code_at(s: *const StringHeader, index: i32) -> f64 {
     if !is_valid_string_ptr(s) || index < 0 {
         return f64::NAN;
     }
 
-    let len = unsafe { (*s).length };
-    if index as u32 >= len {
+    let str_data = string_as_str(s);
+    let utf16: Vec<u16> = str_data.encode_utf16().collect();
+    if index as usize >= utf16.len() {
         return f64::NAN;
     }
-
-    unsafe {
-        let data = string_data(s);
-        *data.add(index as usize) as f64
-    }
+    utf16[index as usize] as f64
 }
 
 /// Get character at index (returns single-character string, empty string if out of bounds)
