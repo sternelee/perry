@@ -43,6 +43,11 @@ pub const GC_FLAG_MARKED: u8 = 0x01;
 pub const GC_FLAG_ARENA: u8 = 0x02;
 pub const GC_FLAG_PINNED: u8 = 0x04;
 
+// Object flags stored in GcHeader._reserved (u16) for Object.freeze/seal/preventExtensions
+pub const OBJ_FLAG_FROZEN: u16 = 0x01;
+pub const OBJ_FLAG_SEALED: u16 = 0x02;
+pub const OBJ_FLAG_NO_EXTEND: u16 = 0x04;
+
 // NaN-boxing tag constants (duplicated from value.rs to avoid circular deps)
 const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
 const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;

@@ -130,49 +130,6 @@ pub fn clear_overflow_for_ptr(obj_ptr: usize) {
 /// Global class registry mapping class_id -> parent_class_id for inheritance chain lookups
 static CLASS_REGISTRY: RwLock<Option<HashMap<u32, u32>>> = RwLock::new(None);
 
-/// Global registry of class IDs that extend the built-in Error class
-/// (or extend something that extends Error). Populated via
-/// `js_register_class_extends_error` from codegen module init.
-static EXTENDS_ERROR_REGISTRY: RwLock<Option<std::collections::HashSet<u32>>> = RwLock::new(None);
-
-/// Mark a user-defined class as extending the built-in Error class.
-/// Called from class constructor codegen when the class extends Error/TypeError/etc.
-#[no_mangle]
-pub extern "C" fn js_register_class_extends_error(class_id: u32) {
-    let mut registry = EXTENDS_ERROR_REGISTRY.write().unwrap();
-    if registry.is_none() {
-        *registry = Some(std::collections::HashSet::new());
-    }
-    registry.as_mut().unwrap().insert(class_id);
-}
-
-/// Check if a class id extends the built-in Error class
-pub(crate) fn extends_builtin_error(class_id: u32) -> bool {
-    let registry = EXTENDS_ERROR_REGISTRY.read().unwrap();
-    if let Some(reg) = registry.as_ref() {
-        if reg.contains(&class_id) {
-            return true;
-        }
-        // Walk parent chain in CLASS_REGISTRY
-        let mut current = class_id;
-        let parent_reg = CLASS_REGISTRY.read().unwrap();
-        if let Some(pr) = parent_reg.as_ref() {
-            for _ in 0..32 {
-                match pr.get(&current).copied() {
-                    Some(parent) if parent != 0 => {
-                        if reg.contains(&parent) {
-                            return true;
-                        }
-                        current = parent;
-                    }
-                    _ => break,
-                }
-            }
-        }
-    }
-    false
-}
-
 // ============================================================================
 // Class method vtable registry — enables runtime dispatch for interface-typed
 // and dynamically-typed method calls.  Each class registers its methods and
@@ -902,6 +859,15 @@ pub extern "C" fn js_object_get_field_f64(obj: *const ObjectHeader, field_index:
 /// This preserves NaN-boxing for strings and other pointer types
 #[no_mangle]
 pub extern "C" fn js_object_set_field_f64(obj: *mut ObjectHeader, field_index: u32, value: f64) {
+    // Check frozen flag — frozen objects reject all writes
+    if !obj.is_null() && (obj as usize) > 0x10000 {
+        unsafe {
+            let gc = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc)._reserved & crate::gc::OBJ_FLAG_FROZEN != 0 {
+                return;
+            }
+        }
+    }
     js_object_set_field(obj, field_index, JSValue::from_bits(value.to_bits()));
 }
 
@@ -1301,6 +1267,11 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             return;
         }
 
+        // Check Object.freeze/seal/preventExtensions flags
+        let obj_flags = (*gc_header)._reserved;
+        let is_frozen = obj_flags & crate::gc::OBJ_FLAG_FROZEN != 0;
+        let is_sealed_or_no_extend = obj_flags & (crate::gc::OBJ_FLAG_SEALED | crate::gc::OBJ_FLAG_NO_EXTEND) != 0;
+
         let keys = (*obj).keys_array;
 
         // Validate keys_array is a real heap pointer or null.
@@ -1313,8 +1284,12 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             }
         }
 
-        // If no keys array exists, create one
+        // If no keys array exists, create one (adding new key)
         if keys.is_null() {
+            // Frozen or sealed/non-extensible objects reject new keys
+            if is_frozen || is_sealed_or_no_extend {
+                return;
+            }
             // Create a new keys array with the key
             let new_keys = crate::array::js_array_alloc(4);
             let new_keys = crate::array::js_array_push(new_keys, JSValue::string_ptr(key as *mut _));
@@ -1339,7 +1314,10 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             if key_val.is_string() {
                 let stored_key = key_val.as_string_ptr();
                 if crate::string::js_string_equals(key, stored_key) != 0 {
-                    // Found it - update the field
+                    // Found it - update the field (frozen objects reject writes)
+                    if is_frozen {
+                        return;
+                    }
                     if i < alloc_limit {
                         js_object_set_field(obj, i as u32, JSValue::from_bits(value.to_bits()));
                     } else {
@@ -1361,6 +1339,10 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         }
 
         // Key not found - add it to the object.
+        // Frozen/sealed/non-extensible objects reject new keys
+        if is_frozen || is_sealed_or_no_extend {
+            return;
+        }
         // CRITICAL: The keys_array may be SHARED via SHAPE_CACHE (multiple objects with
         // the same shape hash share the same keys array). We must clone it before mutating
         // to avoid corrupting other objects' keys.
@@ -1594,49 +1576,6 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
     }
 
     unsafe {
-        // Special handling for built-in Error and its subclasses.
-        // Check if this is an ErrorHeader (object_type == OBJECT_TYPE_ERROR at offset 0).
-        // Use the GC header to confirm it's a heap-allocated error before reading kind.
-        let gc_header = (obj_ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
-        let gc_type = (*gc_header).obj_type;
-        if gc_type == crate::gc::GC_TYPE_ERROR {
-            let err_ptr = obj_ptr as *const crate::error::ErrorHeader;
-            let kind = (*err_ptr).error_kind;
-            return match class_id {
-                crate::error::CLASS_ID_ERROR => true_val, // every error is-a Error
-                crate::error::CLASS_ID_TYPE_ERROR => {
-                    if kind == crate::error::ERROR_KIND_TYPE_ERROR { true_val } else { false_val }
-                }
-                crate::error::CLASS_ID_RANGE_ERROR => {
-                    if kind == crate::error::ERROR_KIND_RANGE_ERROR { true_val } else { false_val }
-                }
-                crate::error::CLASS_ID_REFERENCE_ERROR => {
-                    if kind == crate::error::ERROR_KIND_REFERENCE_ERROR { true_val } else { false_val }
-                }
-                crate::error::CLASS_ID_SYNTAX_ERROR => {
-                    if kind == crate::error::ERROR_KIND_SYNTAX_ERROR { true_val } else { false_val }
-                }
-                crate::error::CLASS_ID_AGGREGATE_ERROR => {
-                    if kind == crate::error::ERROR_KIND_AGGREGATE_ERROR { true_val } else { false_val }
-                }
-                _ => false_val,
-            };
-        }
-
-        // For user-defined classes that extend Error: when the target class_id is
-        // CLASS_ID_ERROR, walk the parent chain looking for any class whose name is "Error".
-        // Since user classes can't actually inherit from a built-in Error class_id, we
-        // approximate this by also returning true if the target is CLASS_ID_ERROR and
-        // the value is a regular object whose registered class chain includes a class
-        // marked as `extends_error`. The simpler approach: check the parent_name in
-        // the class registry.
-        if class_id == crate::error::CLASS_ID_ERROR {
-            let obj_class_id = (*obj_ptr).class_id;
-            if extends_builtin_error(obj_class_id) {
-                return true_val;
-            }
-        }
-
         // Check if the object's class_id matches directly
         let obj_class_id = (*obj_ptr).class_id;
         if obj_class_id == class_id {
@@ -2645,38 +2584,37 @@ unsafe fn dispatch_bigint_binary_method(
     }
 }
 
-/// Object.fromEntries(entries) — build an object from an array of [key, value] pairs.
-/// `entries` is an array of arrays. Returns a NaN-boxed pointer to a new object.
+/// Object.fromEntries(entries) — build an object from an array of [key, value] pairs or a Map.
+/// `entries` is an array of arrays, or a Map. Returns a NaN-boxed pointer to a new object.
 #[no_mangle]
 pub extern "C" fn js_object_from_entries(entries_value: f64) -> f64 {
-    // Get the entries array pointer — handle both arrays and Maps
-    let raw_ptr = {
-        let bits = entries_value.to_bits();
-        let tag = bits & 0xFFFF_0000_0000_0000;
-        if tag == 0x7FFD_0000_0000_0000 {
-            (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
-        } else if bits != 0 && bits <= 0x0000_FFFF_FFFF_FFFF {
-            bits as *const u8
-        } else {
-            return f64::from_bits(crate::value::TAG_UNDEFINED);
-        }
+    // Extract pointer from NaN-boxed value
+    let bits = entries_value.to_bits();
+    let raw_ptr = if (bits & 0xFFFF_0000_0000_0000) == 0x7FFD_0000_0000_0000 {
+        (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8
+    } else if bits != 0 && bits <= 0x0000_FFFF_FFFF_FFFF {
+        bits as *const u8
+    } else {
+        return f64::from_bits(crate::value::TAG_UNDEFINED);
     };
-    if raw_ptr.is_null() || (raw_ptr as usize) < 0x10000 {
+    if raw_ptr.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }
 
-    // Check if the input is a Map — if so, convert to entries array first
-    let arr_ptr = unsafe {
-        if crate::map::is_registered_map(raw_ptr as usize) {
-            crate::map::js_map_entries(raw_ptr as *const crate::map::MapHeader)
-        } else {
-            raw_ptr as *const ArrayHeader
-        }
-    };
-    if arr_ptr.is_null() {
-        return f64::from_bits(crate::value::TAG_UNDEFINED);
-    }
     unsafe {
+        // Check GcHeader to see if this is a Map
+        let gc_header = (raw_ptr).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_MAP {
+            // It's a Map — convert via js_map_entries first
+            let map_ptr = raw_ptr as *const crate::map::MapHeader;
+            let entries_arr = crate::map::js_map_entries(map_ptr);
+            // Recursively call ourselves with the entries array (NaN-boxed pointer)
+            let arr_boxed = crate::value::js_nanbox_pointer(entries_arr as i64);
+            return js_object_from_entries(arr_boxed);
+        }
+
+        // It's an array of [key, value] pairs
+        let arr_ptr = raw_ptr as *const ArrayHeader;
         let length = (*arr_ptr).length as usize;
         // Allocate empty object — class_id 0 = generic object
         let obj = js_object_alloc(0, length as u32);
@@ -2782,4 +2720,232 @@ pub extern "C" fn js_object_has_own(obj_value: f64, key_value: f64) -> f64 {
     } else {
         f64::from_bits(TAG_TRUE)
     }
+}
+
+/// Helper: extract object pointer from NaN-boxed f64. Returns null on failure.
+unsafe fn extract_obj_ptr(value: f64) -> *mut ObjectHeader {
+    let jsval = crate::JSValue::from_bits(value.to_bits());
+    if jsval.is_pointer() {
+        jsval.as_pointer::<ObjectHeader>() as *mut ObjectHeader
+    } else {
+        let bits = value.to_bits();
+        if bits != 0 && bits <= 0x0000_FFFF_FFFF_FFFF && bits > 0x10000 {
+            bits as *mut ObjectHeader
+        } else {
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Helper: get GcHeader for an object pointer
+unsafe fn gc_header_for(obj: *const ObjectHeader) -> *mut crate::gc::GcHeader {
+    (obj as *mut u8).sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader
+}
+
+/// Object.defineProperty(obj, key, descriptor) — set the value from descriptor.value on obj.
+/// Perry doesn't support writable/enumerable/configurable flags; this just sets the value.
+/// Returns the object (NaN-boxed pointer).
+#[no_mangle]
+pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, descriptor_value: f64) -> f64 {
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() {
+            return obj_value;
+        }
+        // Extract key string
+        let key_str = crate::builtins::js_string_coerce(key_value);
+        if key_str.is_null() {
+            return obj_value;
+        }
+        // Extract descriptor object
+        let desc_ptr = extract_obj_ptr(descriptor_value);
+        if desc_ptr.is_null() {
+            return obj_value;
+        }
+        // Look for "value" field in descriptor
+        let value_key = crate::string::js_string_from_bytes(b"value".as_ptr(), 5);
+        let value_field = js_object_get_field_by_name(desc_ptr as *const ObjectHeader, value_key);
+        if !value_field.is_undefined() {
+            js_object_set_field_by_name(obj, key_str, f64::from_bits(value_field.bits()));
+        }
+        // Return the object
+        obj_value
+    }
+}
+
+/// Object.getOwnPropertyDescriptor(obj, key) — returns { value, writable: true, enumerable: true, configurable: true }
+/// or TAG_UNDEFINED if the property doesn't exist.
+#[no_mangle]
+pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_value: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        // Extract key string
+        let key_str = crate::builtins::js_string_coerce(key_value);
+        if key_str.is_null() {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        // Look up the property
+        let value = js_object_get_field_by_name(obj, key_str);
+        if value.is_undefined() {
+            return f64::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        // Build descriptor: { value, writable: true, enumerable: true, configurable: true }
+        // packed_keys = "value\0writable\0enumerable\0configurable\0"
+        let packed = b"value\0writable\0enumerable\0configurable";
+        let desc = js_object_alloc_with_shape(
+            0x0D_E5_C0, // unique shape_id for property descriptors
+            4,
+            packed.as_ptr(),
+            packed.len() as u32,
+        );
+        // Set fields
+        let header_size = std::mem::size_of::<ObjectHeader>();
+        let fields = (desc as *mut u8).add(header_size) as *mut f64;
+        *fields = f64::from_bits(value.bits()); // value
+        *fields.add(1) = f64::from_bits(TAG_TRUE); // writable
+        *fields.add(2) = f64::from_bits(TAG_TRUE); // enumerable
+        *fields.add(3) = f64::from_bits(TAG_TRUE); // configurable
+        // Return NaN-boxed pointer
+        f64::from_bits((desc as u64) | 0x7FFD_0000_0000_0000)
+    }
+}
+
+/// Object.getOwnPropertyNames(obj) — returns all own property names (same as keys for now).
+/// Takes raw i64 pointer, returns raw i64 pointer to array.
+#[no_mangle]
+pub extern "C" fn js_object_get_own_property_names(obj_ptr: i64) -> i64 {
+    // Perry doesn't distinguish enumerable/non-enumerable — return all keys
+    if obj_ptr == 0 || (obj_ptr as usize) < 0x10000 {
+        return crate::array::js_array_alloc(0) as i64;
+    }
+    let obj = obj_ptr as *const ObjectHeader;
+    unsafe {
+        let keys = (*obj).keys_array;
+        if keys.is_null() {
+            return crate::array::js_array_alloc(0) as i64;
+        }
+        // Clone the keys array
+        let len = crate::array::js_array_length(keys) as usize;
+        let result = crate::array::js_array_alloc(len as u32);
+        for i in 0..len {
+            let key_val = crate::array::js_array_get(keys, i as u32);
+            crate::array::js_array_push_f64(result, f64::from_bits(key_val.bits()));
+        }
+        result as i64
+    }
+}
+
+/// Object.create(proto) — create empty object. Perry ignores prototype; Object.create(null) returns {}.
+#[no_mangle]
+pub extern "C" fn js_object_create(_proto_value: f64) -> f64 {
+    let obj = js_object_alloc(0, 0);
+    // Return NaN-boxed pointer
+    f64::from_bits((obj as u64) | 0x7FFD_0000_0000_0000)
+}
+
+/// Object.freeze(obj) — sets the frozen flag. Returns the object.
+#[no_mangle]
+pub extern "C" fn js_object_freeze(obj_value: f64) -> f64 {
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if !obj.is_null() && (obj as usize) > 0x10000 {
+            let gc = gc_header_for(obj);
+            (*gc)._reserved |= crate::gc::OBJ_FLAG_FROZEN | crate::gc::OBJ_FLAG_SEALED | crate::gc::OBJ_FLAG_NO_EXTEND;
+        }
+    }
+    obj_value
+}
+
+/// Object.seal(obj) — sets the sealed flag. Returns the object.
+#[no_mangle]
+pub extern "C" fn js_object_seal(obj_value: f64) -> f64 {
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if !obj.is_null() && (obj as usize) > 0x10000 {
+            let gc = gc_header_for(obj);
+            (*gc)._reserved |= crate::gc::OBJ_FLAG_SEALED | crate::gc::OBJ_FLAG_NO_EXTEND;
+        }
+    }
+    obj_value
+}
+
+/// Object.preventExtensions(obj) — sets the no-extend flag. Returns the object.
+#[no_mangle]
+pub extern "C" fn js_object_prevent_extensions(obj_value: f64) -> f64 {
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if !obj.is_null() && (obj as usize) > 0x10000 {
+            let gc = gc_header_for(obj);
+            (*gc)._reserved |= crate::gc::OBJ_FLAG_NO_EXTEND;
+        }
+    }
+    obj_value
+}
+
+/// Object.isFrozen(obj) — returns NaN-boxed boolean.
+#[no_mangle]
+pub extern "C" fn js_object_is_frozen(obj_value: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() || (obj as usize) <= 0x10000 {
+            return f64::from_bits(TAG_TRUE); // non-objects are vacuously frozen
+        }
+        let gc = gc_header_for(obj);
+        if (*gc)._reserved & crate::gc::OBJ_FLAG_FROZEN != 0 {
+            f64::from_bits(TAG_TRUE)
+        } else {
+            f64::from_bits(TAG_FALSE)
+        }
+    }
+}
+
+/// Object.isSealed(obj) — returns NaN-boxed boolean.
+#[no_mangle]
+pub extern "C" fn js_object_is_sealed(obj_value: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() || (obj as usize) <= 0x10000 {
+            return f64::from_bits(TAG_TRUE); // non-objects are vacuously sealed
+        }
+        let gc = gc_header_for(obj);
+        if (*gc)._reserved & crate::gc::OBJ_FLAG_SEALED != 0 {
+            f64::from_bits(TAG_TRUE)
+        } else {
+            f64::from_bits(TAG_FALSE)
+        }
+    }
+}
+
+/// Object.isExtensible(obj) — returns NaN-boxed boolean.
+#[no_mangle]
+pub extern "C" fn js_object_is_extensible(obj_value: f64) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() || (obj as usize) <= 0x10000 {
+            return f64::from_bits(TAG_FALSE); // non-objects are not extensible
+        }
+        let gc = gc_header_for(obj);
+        if (*gc)._reserved & crate::gc::OBJ_FLAG_NO_EXTEND != 0 {
+            f64::from_bits(TAG_FALSE)
+        } else {
+            f64::from_bits(TAG_TRUE)
+        }
+    }
+}
+
+/// Object.getPrototypeOf(obj) — Perry doesn't have a prototype chain, returns null.
+#[no_mangle]
+pub extern "C" fn js_object_get_prototype_of(_obj_value: f64) -> f64 {
+    const TAG_NULL: u64 = 0x7FFC_0000_0000_0002;
+    f64::from_bits(TAG_NULL)
 }
