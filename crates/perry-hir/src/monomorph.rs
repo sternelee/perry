@@ -1193,6 +1193,9 @@ fn substitute_expr(expr: &Expr, substitutions: &HashMap<String, Type>) -> Expr {
             start: Box::new(substitute_expr(start, substitutions)),
             end: end.as_ref().map(|e| Box::new(substitute_expr(e, substitutions))),
         },
+        Expr::ArrayEntries(array) => Expr::ArrayEntries(Box::new(substitute_expr(array, substitutions))),
+        Expr::ArrayKeys(array) => Expr::ArrayKeys(Box::new(substitute_expr(array, substitutions))),
+        Expr::ArrayValues(array) => Expr::ArrayValues(Box::new(substitute_expr(array, substitutions))),
 
         // String methods
         Expr::StringSplit(string, delimiter) => Expr::StringSplit(

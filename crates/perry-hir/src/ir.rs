@@ -1330,6 +1330,9 @@ pub enum Expr {
     ArrayToSpliced { array: Box<Expr>, start: Box<Expr>, delete_count: Box<Expr>, items: Vec<Expr> }, // arr.toSpliced(start, deleteCount, ...items) -> new array
     ArrayWith { array: Box<Expr>, index: Box<Expr>, value: Box<Expr> }, // arr.with(index, value) -> new array
     ArrayCopyWithin { array_id: LocalId, target: Box<Expr>, start: Box<Expr>, end: Option<Box<Expr>> }, // arr.copyWithin(target, start, end?) -> same array
+    ArrayEntries(Box<Expr>),                                 // arr.entries() -> Array<[index, value]> (eager materialization)
+    ArrayKeys(Box<Expr>),                                    // arr.keys() -> Array<index>
+    ArrayValues(Box<Expr>),                                  // arr.values() -> Array<value> (essentially clone)
 
     // String methods
     StringSplit(Box<Expr>, Box<Expr>),  // string.split(delimiter) -> string[]

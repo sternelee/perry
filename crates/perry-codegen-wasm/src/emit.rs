@@ -2954,6 +2954,9 @@ impl WasmModuleEmitter {
             Expr::ArrayFlat { array } | Expr::ArrayIsArray(array) | Expr::ArrayFrom(array) | Expr::ArrayToReversed { array } => {
                 self.collect_strings_in_expr(array);
             }
+            Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+                self.collect_strings_in_expr(array);
+            }
             Expr::ArrayFromMapped { iterable, map_fn } => {
                 self.collect_strings_in_expr(iterable);
                 self.collect_strings_in_expr(map_fn);
@@ -5541,6 +5544,18 @@ impl<'a> FuncEmitCtx<'a> {
                     self.emit_memcall(func, "array_copy_within", 3);
                 }
             }
+            Expr::ArrayEntries(array) => {
+                self.emit_store_arg(func, 0, array);
+                self.emit_memcall(func, "array_entries", 1);
+            }
+            Expr::ArrayKeys(array) => {
+                self.emit_store_arg(func, 0, array);
+                self.emit_memcall(func, "array_keys", 1);
+            }
+            Expr::ArrayValues(array) => {
+                self.emit_store_arg(func, 0, array);
+                self.emit_memcall(func, "array_values", 1);
+            }
 
             // --- Closure ---
             Expr::Closure { func_id, params, body, captures, mutable_captures, .. } => {
@@ -7425,6 +7440,9 @@ fn collect_closures_from_expr(
             if let Some(e) = end { collect_closures_from_expr(e, out); }
         }
         Expr::ArrayToReversed { array } => {
+            collect_closures_from_expr(array, out);
+        }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
             collect_closures_from_expr(array, out);
         }
         Expr::Sequence(exprs) => {

@@ -247,6 +247,9 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
             collect_local_refs_expr(start, refs, visited);
             if let Some(e) = end { collect_local_refs_expr(e, refs, visited); }
         }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            collect_local_refs_expr(array, refs, visited);
+        }
         Expr::ArrayJoin { array, separator } => {
             collect_local_refs_expr(array, refs, visited);
             if let Some(sep) = separator {
@@ -1084,6 +1087,9 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             collect_assigned_locals_expr(target, assigned);
             collect_assigned_locals_expr(start, assigned);
             if let Some(e) = end { collect_assigned_locals_expr(e, assigned); }
+        }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            collect_assigned_locals_expr(array, assigned);
         }
         Expr::ArrayJoin { array, separator } => {
             collect_assigned_locals_expr(array, assigned);

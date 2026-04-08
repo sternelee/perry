@@ -861,7 +861,8 @@ pub(crate) fn compile_stmt(
                     Some(Expr::ArraySplice { .. }) |
                     Some(Expr::ArrayToReversed { .. }) | Some(Expr::ArrayToSorted { .. }) |
                     Some(Expr::ArrayToSpliced { .. }) | Some(Expr::ArrayWith { .. }) |
-                    Some(Expr::ArrayCopyWithin { .. }) => (None, true, true, false, false, false, false, false, false, false),
+                    Some(Expr::ArrayCopyWithin { .. }) |
+                    Some(Expr::ArrayEntries(_)) | Some(Expr::ArrayKeys(_)) | Some(Expr::ArrayValues(_)) => (None, true, true, false, false, false, false, false, false, false),
                     // string.match(regex) / string.matchAll(regex) return arrays (or null for match).
                     // The result is NaN-boxed as F64 by the codegen, so is_pointer=false (union-style storage)
                     Some(Expr::StringMatch { .. }) | Some(Expr::StringMatchAll { .. }) =>
@@ -1304,6 +1305,7 @@ pub(crate) fn compile_stmt(
                                 Expr::ArrayFilter { .. } | Expr::ArraySort { .. } | Expr::ArraySlice { .. } |
                                 Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
                                 Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } | Expr::ArrayCopyWithin { .. } |
+                                Expr::ArrayEntries(_) | Expr::ArrayKeys(_) | Expr::ArrayValues(_) |
                                 Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
                                 Expr::MapEntries(_) | Expr::MapKeys(_) | Expr::MapValues(_) => true,
                                 // Map.get() returns NaN-boxed value (may be POINTER_TAG object)

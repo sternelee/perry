@@ -1209,6 +1209,9 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
         Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
             substitute_locals(array, param_map, next_local_id);
         }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            substitute_locals(array, param_map, next_local_id);
+        }
         Expr::ArrayToSorted { array, comparator } => {
             substitute_locals(array, param_map, next_local_id);
             if let Some(cmp) = comparator { substitute_locals(cmp, param_map, next_local_id); }
@@ -1648,6 +1651,9 @@ fn substitute_this(expr: &mut Expr, obj_id: LocalId) {
             if let Some(sep) = separator { substitute_this(sep, obj_id); }
         }
         Expr::ArrayFlat { array } | Expr::ArrayFrom(array) | Expr::ArrayToReversed { array } => {
+            substitute_this(array, obj_id);
+        }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
             substitute_this(array, obj_id);
         }
         Expr::ArrayToSorted { array, comparator } => {

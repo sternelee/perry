@@ -4783,6 +4783,45 @@ pub(crate) fn compile_expr(
             let call = builder.ins().call(func_ref, &[arr_ptr, target_f64, start_f64, has_end, end_f64]);
             Ok(builder.inst_results(call)[0])
         }
+        Expr::ArrayEntries(array) => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer").ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else { arr_val };
+            let func = extern_funcs.get("js_array_entries").ok_or_else(|| anyhow!("js_array_entries not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ArrayKeys(array) => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer").ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else { arr_val };
+            let func = extern_funcs.get("js_array_keys").ok_or_else(|| anyhow!("js_array_keys not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
+        Expr::ArrayValues(array) => {
+            let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;
+            let arr_ptr = if builder.func.dfg.value_type(arr_val) == types::F64 {
+                let get_ptr_func = extern_funcs.get("js_nanbox_get_pointer").ok_or_else(|| anyhow!("js_nanbox_get_pointer not declared"))?;
+                let get_ptr_ref = module.declare_func_in_func(*get_ptr_func, builder.func);
+                let call = builder.ins().call(get_ptr_ref, &[arr_val]);
+                builder.inst_results(call)[0]
+            } else { arr_val };
+            let func = extern_funcs.get("js_array_values").ok_or_else(|| anyhow!("js_array_values not declared"))?;
+            let func_ref = module.declare_func_in_func(*func, builder.func);
+            let call = builder.ins().call(func_ref, &[arr_ptr]);
+            Ok(builder.inst_results(call)[0])
+        }
         Expr::ArrayJoin { array, separator } => {
             // Compile array
             let arr_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, array, this_ctx)?;

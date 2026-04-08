@@ -911,6 +911,78 @@ pub extern "C" fn js_array_clone(src: *const ArrayHeader) -> *mut ArrayHeader {
     }
 }
 
+/// `arr.entries()` — return a new array of [index, value] pairs.
+/// Each pair is itself a 2-element array, NaN-boxed with POINTER_TAG so it
+/// reads back as an array pointer when iterated. This eagerly materializes
+/// the iterator (Perry has no generic iterator protocol yet) so a `for...of`
+/// loop over the result walks it as a normal array via `length`/`arr[i]`.
+#[no_mangle]
+pub extern "C" fn js_array_entries(arr: *const ArrayHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() {
+        return js_array_alloc(0);
+    }
+    unsafe {
+        let len = (*arr).length;
+        let result = js_array_alloc(len);
+        (*result).length = len;
+        let src_elements = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+        let dst_elements = (result as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        for i in 0..len as usize {
+            // Build a 2-element [index, value] pair as an inner array.
+            let pair = js_array_alloc(2);
+            (*pair).length = 2;
+            let pair_elems = (pair as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+            *pair_elems.add(0) = i as f64;
+            *pair_elems.add(1) = *src_elements.add(i);
+            // NaN-box the inner array pointer so the outer storage slot keeps tag info.
+            *dst_elements.add(i) = crate::value::js_nanbox_pointer(pair as i64);
+        }
+        result
+    }
+}
+
+/// `arr.keys()` — return a new array of indices [0, 1, ..., length-1].
+#[no_mangle]
+pub extern "C" fn js_array_keys(arr: *const ArrayHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() {
+        return js_array_alloc(0);
+    }
+    unsafe {
+        let len = (*arr).length;
+        let result = js_array_alloc(len);
+        (*result).length = len;
+        let dst_elements = (result as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        for i in 0..len as usize {
+            *dst_elements.add(i) = i as f64;
+        }
+        result
+    }
+}
+
+/// `arr.values()` — return a shallow copy of the array.
+/// (In JS this returns an iterator; Perry materializes it as a clone so
+/// `for...of` over the result iterates the values eagerly.)
+#[no_mangle]
+pub extern "C" fn js_array_values(arr: *const ArrayHeader) -> *mut ArrayHeader {
+    let arr = clean_arr_ptr(arr);
+    if arr.is_null() {
+        return js_array_alloc(0);
+    }
+    unsafe {
+        let len = (*arr).length;
+        let result = js_array_alloc(len);
+        if len > 0 {
+            let src_elements = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
+            let dst_elements = (result as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+            ptr::copy_nonoverlapping(src_elements, dst_elements, len as usize);
+            (*result).length = len;
+        }
+        result
+    }
+}
+
 // ============================================================================
 // Array higher-order function methods
 // These use closure pointers to call the callback function

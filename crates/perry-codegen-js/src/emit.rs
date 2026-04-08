@@ -1881,6 +1881,21 @@ impl JsEmitter {
                 }
                 self.output.push(')');
             }
+            Expr::ArrayEntries(array) => {
+                self.output.push_str("Array.from(");
+                self.emit_expr(array);
+                self.output.push_str(".entries())");
+            }
+            Expr::ArrayKeys(array) => {
+                self.output.push_str("Array.from(");
+                self.emit_expr(array);
+                self.output.push_str(".keys())");
+            }
+            Expr::ArrayValues(array) => {
+                self.output.push_str("Array.from(");
+                self.emit_expr(array);
+                self.output.push_str(".values())");
+            }
 
             // --- String methods ---
             Expr::StringSplit(string, delimiter) => {

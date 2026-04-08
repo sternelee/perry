@@ -1361,6 +1361,9 @@ fn widen_mutable_captures_expr(expr: &mut Expr, scope_mutable: &std::collections
                 widen_mutable_captures_expr(e, scope_mutable);
             }
         }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            widen_mutable_captures_expr(array, scope_mutable);
+        }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object {
                 widen_mutable_captures_expr(obj, scope_mutable);
@@ -1602,6 +1605,9 @@ fn collect_closure_assigned_expr(expr: &Expr, out: &mut std::collections::HashSe
                 collect_closure_assigned_expr(e, out);
             }
         }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            collect_closure_assigned_expr(array, out);
+        }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object {
                 collect_closure_assigned_expr(obj, out);
@@ -1765,6 +1771,9 @@ fn collect_closure_captures_expr(expr: &Expr, out: &mut std::collections::HashSe
             collect_closure_captures_expr(target, out);
             collect_closure_captures_expr(start, out);
             if let Some(e) = end { collect_closure_captures_expr(e, out); }
+        }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            collect_closure_captures_expr(array, out);
         }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object { collect_closure_captures_expr(obj, out); }
@@ -2071,6 +2080,9 @@ fn collect_closure_assigned_in_body_expr(expr: &Expr, out: &mut std::collections
             collect_closure_assigned_in_body_expr(target, out);
             collect_closure_assigned_in_body_expr(start, out);
             if let Some(e) = end { collect_closure_assigned_in_body_expr(e, out); }
+        }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            collect_closure_assigned_in_body_expr(array, out);
         }
         Expr::NativeMethodCall { object, args, .. } => {
             if let Some(obj) = object {
@@ -5898,6 +5910,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 });
                                             }
                                         }
+                                        "entries" => {
+                                            return Ok(Expr::ArrayEntries(Box::new(Expr::LocalGet(array_id))));
+                                        }
+                                        "keys" => {
+                                            return Ok(Expr::ArrayKeys(Box::new(Expr::LocalGet(array_id))));
+                                        }
+                                        "values" => {
+                                            return Ok(Expr::ArrayValues(Box::new(Expr::LocalGet(array_id))));
+                                        }
                                         // Map methods (only apply to actual Map/Set types)
                                         "set" => {
                                             // Check if this is a Map or Set type before treating as Map.set()
@@ -6344,6 +6365,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                         });
                                                     }
                                                 }
+                                                "entries" => {
+                                                    return Ok(Expr::ArrayEntries(Box::new(extern_ref)));
+                                                }
+                                                "keys" => {
+                                                    return Ok(Expr::ArrayKeys(Box::new(extern_ref)));
+                                                }
+                                                "values" => {
+                                                    return Ok(Expr::ArrayValues(Box::new(extern_ref)));
+                                                }
                                                 _ => {} // Fall through for other methods
                                             }
                                         }
@@ -6512,6 +6542,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                     value: Box::new(value),
                                                 });
                                             }
+                                        }
+                                        "entries" => {
+                                            return Ok(Expr::ArrayEntries(Box::new(array_expr)));
+                                        }
+                                        "keys" => {
+                                            return Ok(Expr::ArrayKeys(Box::new(array_expr)));
+                                        }
+                                        "values" => {
+                                            return Ok(Expr::ArrayValues(Box::new(array_expr)));
                                         }
                                         _ => {} // Fall through for other methods
                                     }
@@ -6691,6 +6730,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             Expr::ArrayFlat { .. } | Expr::StringSplit(_, _) |
                                             Expr::ArrayToReversed { .. } | Expr::ArrayToSorted { .. } |
                                             Expr::ArrayToSpliced { .. } | Expr::ArrayWith { .. } |
+                                            Expr::ArrayEntries(_) | Expr::ArrayKeys(_) | Expr::ArrayValues(_) |
                                             Expr::ObjectKeys(_) | Expr::ObjectValues(_) | Expr::ObjectEntries(_)
                                         ) {
                                             let mut args_iter = args.into_iter();

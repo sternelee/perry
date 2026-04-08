@@ -447,6 +447,9 @@ impl crate::codegen::Compiler {
             Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
             }
+            Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+                self.collect_closures_from_expr(array, closures, enclosing_class);
+            }
             Expr::ArrayToSorted { array, comparator } => {
                 self.collect_closures_from_expr(array, closures, enclosing_class);
                 if let Some(cmp) = comparator { self.collect_closures_from_expr(cmp, closures, enclosing_class); }
@@ -1283,6 +1286,9 @@ impl crate::codegen::Compiler {
             Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
                 self.collect_mutable_captures_from_expr(array, captures);
             }
+            Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+                self.collect_mutable_captures_from_expr(array, captures);
+            }
             Expr::ArrayToSorted { array, comparator } => {
                 self.collect_mutable_captures_from_expr(array, captures);
                 if let Some(cmp) = comparator { self.collect_mutable_captures_from_expr(cmp, captures); }
@@ -1529,6 +1535,9 @@ impl crate::codegen::Compiler {
                 }
             }
             Expr::ArrayToReversed { array } => {
+                self.collect_func_refs_from_expr(array, func_refs);
+            }
+            Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
                 self.collect_func_refs_from_expr(array, func_refs);
             }
             Expr::ArrayToSorted { array, comparator } => {

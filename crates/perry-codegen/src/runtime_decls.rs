@@ -1566,6 +1566,21 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_array_to_reversed"), func_id);
         }
 
+        // js_array_entries(arr) -> *mut ArrayHeader (array of [index, value] pairs)
+        // js_array_keys(arr) -> *mut ArrayHeader (array of indices)
+        // js_array_values(arr) -> *mut ArrayHeader (shallow clone)
+        for name in ["js_array_entries", "js_array_keys", "js_array_values"] {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64)); // array pointer
+            sig.returns.push(AbiParam::new(types::I64)); // new array pointer
+            let func_id = self.module.declare_function(
+                name,
+                Linkage::Import,
+                &sig,
+            )?;
+            self.extern_funcs.insert(Cow::Owned(name.to_string()), func_id);
+        }
+
         // js_array_to_sorted_default(arr) -> *mut ArrayHeader
         {
             let mut sig = self.module.make_signature();

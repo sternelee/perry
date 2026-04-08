@@ -735,6 +735,9 @@ fn transform_expr(
         Expr::ArrayFlat { array } | Expr::ArrayToReversed { array } => {
             transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
         }
+        Expr::ArrayEntries(array) | Expr::ArrayKeys(array) | Expr::ArrayValues(array) => {
+            transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
+        }
         Expr::ArrayToSorted { array, comparator } => {
             transform_expr(array, js_imports, extern_func_to_js, local_name_to_js, tracker);
             if let Some(cmp) = comparator { transform_expr(cmp, js_imports, extern_func_to_js, local_name_to_js, tracker); }
