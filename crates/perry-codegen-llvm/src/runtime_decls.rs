@@ -141,6 +141,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_closure_call4", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
     module.declare_function("js_closure_call5", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
 
+    // Phase B.16 / D follow-ups: more runtime functions discovered
+    // by the test-files sweep histogram.
+    module.declare_function("js_array_map", I64, &[I64, I64]);
+    module.declare_function("js_error_new", I64, &[]);
+    module.declare_function("js_error_new_with_message", I64, &[I64]);
+    module.declare_function("js_map_set", I64, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_map_get", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_map_has", I32, &[I64, DOUBLE]);
+
     declare_phase_b_arrays(module);
 }
 

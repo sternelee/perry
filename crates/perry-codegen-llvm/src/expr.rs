@@ -804,6 +804,105 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)))
         }
 
+        // -------- IsNaN (special variant) --------
+        // The HIR has Expr::IsNaN(operand) for `isNaN(x)` (the global
+        // function). NaN ≠ NaN by definition, so the LLVM idiom is
+        // `fcmp uno x, x` (unordered, true iff either operand is NaN).
+        Expr::IsNaN(operand) => {
+            let v = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let bit = blk.fcmp("uno", &v, &v);
+            let as_i64 = blk.zext(I1, &bit, I64);
+            Ok(blk.sitofp(I64, &as_i64, DOUBLE))
+        }
+
+        // -------- Math.pow (special variant — separate from Binary::Pow) --------
+        Expr::MathPow(base, exp) => {
+            let b = lower_expr(ctx, base)?;
+            let e = lower_expr(ctx, exp)?;
+            Ok(ctx.block().call(DOUBLE, "js_math_pow", &[(DOUBLE, &b), (DOUBLE, &e)]))
+        }
+
+        // -------- new Error() / new Error(message) --------
+        Expr::ErrorNew(opt_msg) => {
+            if let Some(msg_expr) = opt_msg {
+                let msg = lower_expr(ctx, msg_expr)?;
+                let blk = ctx.block();
+                let msg_handle = unbox_to_i64(blk, &msg);
+                let err_handle = blk.call(I64, "js_error_new_with_message", &[(I64, &msg_handle)]);
+                Ok(nanbox_pointer_inline(blk, &err_handle))
+            } else {
+                let err_handle = ctx.block().call(I64, "js_error_new", &[]);
+                Ok(nanbox_pointer_inline(ctx.block(), &err_handle))
+            }
+        }
+
+        // -------- arr.pop() / arr.shift() (special HIR variants) --------
+        // Like ArrayPush, the HIR pre-resolves these so we get the
+        // local id directly. Pop returns the removed element (NaN if
+        // empty); shift removes from the front. We currently support
+        // pop only.
+        Expr::ArrayPop(array_id) => {
+            let slot = ctx
+                .locals
+                .get(array_id)
+                .ok_or_else(|| anyhow!("ArrayPop({}): local not in scope", array_id))?
+                .clone();
+            let blk = ctx.block();
+            let arr_box = blk.load(DOUBLE, &slot);
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            Ok(blk.call(DOUBLE, "js_array_pop_f64", &[(I64, &arr_handle)]))
+        }
+
+        // -------- arr.map(callback) (special variant) --------
+        // The runtime js_array_map takes a closure header pointer and
+        // calls it for each element. The callback expression usually
+        // lowers to a NaN-boxed closure value, which we unbox to i64.
+        Expr::ArrayMap { array, callback } => {
+            let arr_box = lower_expr(ctx, array)?;
+            let cb_box = lower_expr(ctx, callback)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let result = blk.call(I64, "js_array_map", &[(I64, &arr_handle), (I64, &cb_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+
+        // -------- map.set(key, value) / .get / .has --------
+        Expr::MapSet { map, key, value } => {
+            let m_box = lower_expr(ctx, map)?;
+            let k_box = lower_expr(ctx, key)?;
+            let v_box = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let m_handle = unbox_to_i64(blk, &m_box);
+            let new_handle = blk.call(
+                I64,
+                "js_map_set",
+                &[(I64, &m_handle), (DOUBLE, &k_box), (DOUBLE, &v_box)],
+            );
+            // map.set returns the (possibly-realloc'd) map. Re-NaN-box
+            // and return. The caller may need to write this back to a
+            // local; that's the caller's problem if Map is held in a
+            // mutable variable that grows.
+            Ok(nanbox_pointer_inline(blk, &new_handle))
+        }
+        Expr::MapGet { map, key } => {
+            let m_box = lower_expr(ctx, map)?;
+            let k_box = lower_expr(ctx, key)?;
+            let blk = ctx.block();
+            let m_handle = unbox_to_i64(blk, &m_box);
+            Ok(blk.call(DOUBLE, "js_map_get", &[(I64, &m_handle), (DOUBLE, &k_box)]))
+        }
+        Expr::MapHas { map, key } => {
+            let m_box = lower_expr(ctx, map)?;
+            let k_box = lower_expr(ctx, key)?;
+            let blk = ctx.block();
+            let m_handle = unbox_to_i64(blk, &m_box);
+            let i32_v = blk.call(I32, "js_map_has", &[(I64, &m_handle), (DOUBLE, &k_box)]);
+            // i32 0/1 → 0.0/1.0 double for our boolean ABI
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
+        }
+
         // -------- Math.* unary helpers (Phase B.15) --------
         Expr::MathSqrt(operand) => {
             let v = lower_expr(ctx, operand)?;
