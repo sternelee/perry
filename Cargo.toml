@@ -25,6 +25,7 @@ members = [
     "crates/perry-codegen-glance",
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
+    "crates/perry-codegen-llvm",
     "crates/perry-ui-test",
 ]
 # Only build platform-independent crates by default.
@@ -47,6 +48,7 @@ default-members = [
     "crates/perry-codegen-glance",
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
+    "crates/perry-codegen-llvm",
 ]
 
 # Aggressive release optimizations for small, fast binaries
@@ -167,3 +169,4 @@ perry-codegen-swiftui = { path = "crates/perry-codegen-swiftui" }
 perry-codegen-glance = { path = "crates/perry-codegen-glance" }
 perry-codegen-wear-tiles = { path = "crates/perry-codegen-wear-tiles" }
 perry-codegen-wasm = { path = "crates/perry-codegen-wasm" }
+perry-codegen-llvm = { path = "crates/perry-codegen-llvm" }

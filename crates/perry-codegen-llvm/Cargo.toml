@@ -1,0 +1,14 @@
+[package]
+name = "perry-codegen-llvm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LLVM code generation backend for Perry (experimental — textual IR via clang)"
+
+[dependencies]
+perry-hir.workspace = true
+perry-types.workspace = true
+
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true

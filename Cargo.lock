@@ -4291,6 +4291,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "perry-codegen-llvm"
+version = "0.4.87"
+dependencies = [
+ "anyhow",
+ "log",
+ "perry-hir",
+ "perry-types",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "perry-codegen-swiftui"
 version = "0.4.87"
 dependencies = [
