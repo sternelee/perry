@@ -3846,6 +3846,12 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
                 );
                 return Ok("0.0".to_string());
             }
+            // console.table(data) — dedicated table renderer.
+            if property == "table" && args.len() == 1 {
+                let v = lower_expr(ctx, &args[0])?;
+                ctx.block().call_void("js_console_table", &[(DOUBLE, &v)]);
+                return Ok("0.0".to_string());
+            }
             // Single-arg fast path: just print directly.
             if args.len() == 1 {
                 let arg = &args[0];

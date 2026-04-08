@@ -191,6 +191,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_console_error_spread", VOID, &[I64]);
     module.declare_function("js_console_warn_spread", VOID, &[I64]);
     module.declare_function("js_getenv", I64, &[I64]);
+    module.declare_function("js_console_table", VOID, &[DOUBLE]);
     module.declare_function("js_object_get_class_id", I32, &[I64]);
     module.declare_function("js_object_alloc_with_parent", I64, &[I32, I32, I32]);
     module.declare_function("js_object_delete_field", I32, &[I64, I64]);
