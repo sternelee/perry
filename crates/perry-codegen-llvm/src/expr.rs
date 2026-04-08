@@ -284,18 +284,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.load(DOUBLE, &element_ptr))
         }
 
-        // `arr.length` — INLINE for typed-Number arrays. The ArrayHeader
-        // layout is `{ length: u32, capacity: u32, ... }` so length is
-        // simply `load i32, ptr arr_ptr+0`. Skipping the function call is
-        // critical for hot loops with `i < arr.length` conditions —
-        // bench_loop_only has 10M length reads in its inner loop.
-        Expr::PropertyGet { object, property } if property == "length" && is_array_expr(ctx, object) => {
-            let arr_box = lower_expr(ctx, object)?;
+        // `arr.length` / `str.length` — INLINE. Both ArrayHeader and
+        // StringHeader start with `length: u32` (`crates/perry-runtime/src
+        // /array.rs` and `string.rs`). Same pattern: unbox pointer, load
+        // u32 from offset 0, sitofp to double.
+        Expr::PropertyGet { object, property }
+            if property == "length"
+                && (is_array_expr(ctx, object) || is_string_expr(ctx, object)) =>
+        {
+            let recv_box = lower_expr(ctx, object)?;
             let blk = ctx.block();
-            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
-            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
-            // Inline load: length is at offset 0 of the ArrayHeader.
-            let len_ptr = blk.inttoptr(I64, &arr_handle);
+            let recv_bits = blk.bitcast_double_to_i64(&recv_box);
+            let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
+            let len_ptr = blk.inttoptr(I64, &recv_handle);
             let len_i32 = blk.load(I32, &len_ptr);
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
         }
