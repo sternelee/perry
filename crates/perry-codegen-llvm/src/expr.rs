@@ -16,7 +16,7 @@ use crate::block::LlBlock;
 use crate::function::LlFunction;
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
 use crate::strings::StringPool;
-use crate::types::{DOUBLE, I32, I64};
+use crate::types::{DOUBLE, I1, I32, I64};
 
 /// Per-function codegen context. Held briefly during lowering, never stored.
 pub(crate) struct FnCtx<'a> {
@@ -75,6 +75,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- Literals --------
         Expr::Integer(i) => Ok(double_literal(*i as f64)),
         Expr::Number(f) => Ok(double_literal(*f)),
+        // Booleans are NaN-boxed using TAG_TRUE/TAG_FALSE — both are
+        // double bit patterns inside the NaN range, emitted as hex
+        // literals (LLVM's `0x{16-hex}` form for non-finite doubles).
+        Expr::Bool(b) => {
+            let tag = if *b {
+                crate::nanbox::TAG_TRUE
+            } else {
+                crate::nanbox::TAG_FALSE
+            };
+            Ok(double_literal(f64::from_bits(tag)))
+        }
 
         // String literals are pre-allocated at module init via the
         // StringPool's hoisting strategy (see `crate::strings`). At the use
@@ -317,6 +328,43 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ))
         }
 
+        // -------- Ternary `cond ? a : b` (Phase B.7) --------
+        // Lowered like if-expression with phi merge — same shape as the
+        // logical operator path but with both branches always evaluated
+        // conditionally on the truthiness test.
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            lower_conditional(ctx, condition, then_expr, else_expr)
+        }
+
+        // `arr.push(x)` (Phase B.7) — special HIR variant that already
+        // tells us the array LocalId and the value. We load the array
+        // from its slot, unbox, push, NaN-box the (possibly-reallocated)
+        // pointer, and store it back into the slot so subsequent uses
+        // see the up-to-date pointer.
+        Expr::ArrayPush { array_id, value } => {
+            let slot = ctx
+                .locals
+                .get(array_id)
+                .ok_or_else(|| anyhow!("ArrayPush({}): local not in scope", array_id))?
+                .clone();
+            let v = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let arr_box = blk.load(DOUBLE, &slot);
+            let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+            let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+            let new_handle = blk.call(
+                I64,
+                "js_array_push_f64",
+                &[(I64, &arr_handle), (DOUBLE, &v)],
+            );
+            let new_box = blk.call(DOUBLE, "js_nanbox_pointer", &[(I64, &new_handle)]);
+            // Write the (possibly-reallocated) pointer back to the local
+            // slot — without this, subsequent reads would use the stale
+            // pre-realloc pointer and crash on access.
+            blk.store(DOUBLE, &new_box, &slot);
+            Ok(new_box)
+        }
+
         // -------- Logical operators (Phase B.6) --------
         // `a && b` and `a || b` short-circuit. We compile `a` first, branch
         // on its truthiness (treating 0.0 as false / non-zero as true),
@@ -404,6 +452,53 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
     )
 }
 
+/// Statically determine whether an expression evaluates to a real numeric
+/// `double` (NOT a NaN-boxed value). Used by `lower_truthy` to decide
+/// between the fast `fcmp one cond, 0.0` test and the runtime
+/// `js_is_truthy` dispatch.
+///
+/// Recognizes:
+/// - integer/number literals
+/// - LocalGet of `Number`/`Int32`-typed locals
+/// - arithmetic Binary / Compare results (always raw doubles in our model)
+/// - the value of an Update (++/--) — also a raw double
+///
+/// CRUCIALLY excludes Bool, String, Array, Object — those produce
+/// NaN-tagged doubles where `fcmp` is unsafe (NaN is unordered).
+pub(crate) fn is_numeric_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
+    match e {
+        Expr::Integer(_) | Expr::Number(_) => true,
+        Expr::LocalGet(id) => matches!(
+            ctx.local_types.get(id),
+            Some(HirType::Number) | Some(HirType::Int32)
+        ),
+        Expr::Binary { .. } | Expr::Compare { .. } | Expr::Update { .. } => true,
+        Expr::DateNow => true,
+        _ => false,
+    }
+}
+
+/// Convert a lowered condition value to an `i1` for `cond_br`.
+///
+/// Fast path: if the expression is statically a numeric double, emit
+/// `fcmp one cond, 0.0` (5-cycle ALU op).
+///
+/// Slow path: for everything else (booleans, strings, objects, unions),
+/// dispatch through `js_is_truthy(double) -> i32` which inspects the
+/// NaN tag to handle null/undefined/false correctly. The slow path is a
+/// function call but produces correct results across the entire JS
+/// truthiness table.
+pub(crate) fn lower_truthy(ctx: &mut FnCtx<'_>, cond_val: &str, cond_expr: &Expr) -> String {
+    if is_numeric_expr(ctx, cond_expr) {
+        ctx.block().fcmp("one", cond_val, "0.0")
+    } else {
+        let i32_truthy = ctx
+            .block()
+            .call(I32, "js_is_truthy", &[(DOUBLE, cond_val)]);
+        ctx.block().icmp_ne(I32, &i32_truthy, "0")
+    }
+}
+
 /// Statically determine whether an expression is a string. Conservative —
 /// returns `false` for anything that requires type information we don't
 /// track (function-call returns, dynamic property access).
@@ -421,6 +516,50 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Lower `cond ? then_expr : else_expr` to a 4-block CFG with a phi at
+/// the merge: condition → conditional cond_br → then → merge ← else.
+/// Both then and else are always lowered (no short-circuit), but only one
+/// runs at runtime depending on the condition.
+fn lower_conditional(
+    ctx: &mut FnCtx<'_>,
+    condition: &Expr,
+    then_expr: &Expr,
+    else_expr: &Expr,
+) -> Result<String> {
+    let cond = lower_expr(ctx, condition)?;
+    let cond_bool = lower_truthy(ctx, &cond, condition);
+
+    let then_idx = ctx.new_block("ternary.then");
+    let else_idx = ctx.new_block("ternary.else");
+    let merge_idx = ctx.new_block("ternary.merge");
+
+    let then_label = ctx.block_label(then_idx);
+    let else_label = ctx.block_label(else_idx);
+    let merge_label = ctx.block_label(merge_idx);
+
+    ctx.block().cond_br(&cond_bool, &then_label, &else_label);
+
+    ctx.current_block = then_idx;
+    let then_val = lower_expr(ctx, then_expr)?;
+    let then_after_label = ctx.block().label.clone();
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&merge_label);
+    }
+
+    ctx.current_block = else_idx;
+    let else_val = lower_expr(ctx, else_expr)?;
+    let else_after_label = ctx.block().label.clone();
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&merge_label);
+    }
+
+    ctx.current_block = merge_idx;
+    Ok(ctx.block().phi(
+        DOUBLE,
+        &[(&then_val, &then_after_label), (&else_val, &else_after_label)],
+    ))
 }
 
 /// Lower `a && b` / `a || b` with short-circuit evaluation.
@@ -460,7 +599,8 @@ fn lower_logical(
     // Capture the post-left block — left's lowering may have created new
     // blocks via nested control flow.
     let l_block_label = ctx.block().label.clone();
-    let l_bool = ctx.block().fcmp("one", &l, "0.0");
+    // Truthiness test: fast fcmp for numeric, js_is_truthy for NaN-boxed.
+    let l_bool = lower_truthy(ctx, &l, left);
 
     let then_idx = ctx.new_block("logical.then");
     let merge_idx = ctx.new_block("logical.merge");

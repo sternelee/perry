@@ -7,7 +7,7 @@
 use anyhow::{anyhow, bail, Result};
 use perry_hir::Stmt;
 
-use crate::expr::{lower_expr, FnCtx};
+use crate::expr::{lower_expr, lower_truthy, FnCtx};
 use crate::types::DOUBLE;
 
 /// Lower a sequence of statements into the current block of `ctx`. If any
@@ -136,7 +136,7 @@ fn lower_for(
     ctx.current_block = cond_idx;
     if let Some(cond_expr) = condition {
         let cv = lower_expr(ctx, cond_expr)?;
-        let i1 = ctx.block().fcmp("one", &cv, "0.0");
+        let i1 = lower_truthy(ctx, &cv, cond_expr);
         ctx.block().cond_br(&i1, &body_label, &exit_label);
     } else {
         // `for (;;)` — unconditional jump into the body. Without break
@@ -167,9 +167,9 @@ fn lower_for(
 
 /// If-else lowering using explicit then/else/merge blocks.
 ///
-/// We compile the condition as a `double` and treat 0.0 as false / non-zero
-/// as true — consistent with JS truthiness for typed numeric conditions.
-/// Phase 3 will add proper `js_is_truthy` when the condition is dynamic.
+/// Truthiness uses `lower_truthy` which dispatches to either an inline
+/// `fcmp one cond, 0.0` (statically-numeric conditions) or a runtime
+/// `js_is_truthy` call (NaN-boxed booleans, strings, objects, unions).
 fn lower_if(
     ctx: &mut FnCtx<'_>,
     condition: &perry_hir::Expr,
@@ -177,8 +177,7 @@ fn lower_if(
     else_branch: Option<&[Stmt]>,
 ) -> Result<()> {
     let cond_val = lower_expr(ctx, condition)?;
-    // cond_val is a double; compare to 0.0 to produce an i1.
-    let i1 = ctx.block().fcmp("one", &cond_val, "0.0");
+    let i1 = lower_truthy(ctx, &cond_val, condition);
 
     let then_idx = ctx.new_block("if.then");
     let else_idx = ctx.new_block("if.else");
