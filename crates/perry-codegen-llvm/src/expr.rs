@@ -3349,6 +3349,29 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         Expr::Binary { op: BinaryOp::Add, left, right } => {
             is_string_expr(ctx, left) && is_string_expr(ctx, right)
         }
+        // String coerce, JSON.stringify, ArrayJoin, etc. all return
+        // strings.
+        Expr::StringCoerce(_)
+        | Expr::ArrayJoin { .. }
+        | Expr::JsonStringifyFull(..)
+        | Expr::PathJoin(..)
+        | Expr::PathDirname(_)
+        | Expr::PathBasename(_) => true,
+        // PropertyGet on a known class field with declared type String.
+        Expr::PropertyGet { object, property } => {
+            let Some(class_name) = receiver_class_name(ctx, object) else {
+                return false;
+            };
+            let Some(class) = ctx.classes.get(&class_name) else {
+                return false;
+            };
+            class
+                .fields
+                .iter()
+                .find(|f| f.name == *property)
+                .map(|f| matches!(f.ty, HirType::String))
+                .unwrap_or(false)
+        }
         _ => false,
     }
 }
