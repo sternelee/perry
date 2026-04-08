@@ -54,9 +54,22 @@ pub struct CompileOptions {
     /// Target triple override. `None` uses the host default.
     pub target: Option<String>,
     /// Whether this module is the program entry point. When true, codegen
-    /// emits a `main` function that calls `js_gc_init` and then the module's
-    /// top-level statements.
+    /// emits a `main` function that calls `js_gc_init`, the string pool
+    /// init, every non-entry module's `<prefix>__init`, then the entry
+    /// module's own top-level statements.
     pub is_entry_module: bool,
+    /// Prefixes of every non-entry module in the program. Only consulted
+    /// when `is_entry_module = true` — `main` calls `<prefix>__init` for
+    /// each one in order before running its own init statements. The
+    /// order matches Perry's existing topological sort (set up by the
+    /// CLI driver in `crates/perry/src/commands/compile.rs`).
+    pub non_entry_module_prefixes: Vec<String>,
+    /// For each imported function name in this module, the prefix of the
+    /// source module that exports it. Used by `ExternFuncRef` lowering
+    /// in `lower_call` to generate the correct cross-module call to
+    /// `perry_fn_<source_prefix>__<funcname>`. Built by the CLI driver
+    /// from each module's `hir.imports` table.
+    pub import_function_prefixes: std::collections::HashMap<String, String>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -66,22 +79,24 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     let mut llmod = LlModule::new(&triple);
     runtime_decls::declare_phase1(&mut llmod);
 
-    // Phase A still only supports single-file entry modules — multi-module
-    // imports land in Phase F.
-    if !opts.is_entry_module {
-        return Err(anyhow!(
-            "perry-codegen-llvm Phase A only supports the entry module; \
-             non-entry module '{}' is not yet supported",
-            hir.name
-        ));
-    }
-    if !hir.imports.is_empty() {
-        return Err(anyhow!(
-            "perry-codegen-llvm Phase A does not support imports; module '{}' has {} imports",
-            hir.name,
-            hir.imports.len()
-        ));
-    }
+    // Phase F.1: derive a per-module symbol prefix from the HIR module
+    // name. Mirrors `perry-codegen` (Cranelift):
+    //
+    //     self.module_symbol_prefix = hir.name.replace(|c: char|
+    //         !c.is_alphanumeric() && c != '_', "_");
+    //
+    // Every emitted symbol that could collide across modules
+    // (user functions, class methods, string pool globals, handle slots,
+    // module-level globals) gets prefixed with this. The entry module's
+    // `main` is the only globally-named symbol — non-entry modules emit
+    // `<prefix>__init` instead.
+    let module_prefix = sanitize(&hir.name);
+
+    // Imports are no longer a hard error — Phase F.1 supports multi-
+    // module compilation. Cross-module function CALLS via ExternFuncRef
+    // still land in Phase F.2; for now they'll error at the use site
+    // with a specific message.
+
     // Phase C.2: classes (and inheritance!) are supported. Perry's HIR
     // lowering aggressively pre-resolves both methods and super calls
     // into inline statements at the constructor/method body, so the
@@ -93,8 +108,10 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // Module-wide string literal pool. Owned by the codegen so that
     // `compile_function` and `compile_main` can take split borrows of
     // (&mut LlFunction, &mut StringPool) without confusing the borrow
-    // checker — the pool lives outside LlModule.
-    let mut strings = StringPool::new();
+    // checker — the pool lives outside LlModule. The module prefix
+    // becomes part of every emitted global so multi-module programs
+    // don't collide on `.str.0.handle`.
+    let mut strings = StringPool::with_prefix(module_prefix.clone());
 
     // Class lookup table for `Expr::New`. Indexed by class name —
     // the HIR has unique names per module.
@@ -153,7 +170,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     for s in &hir.init {
         if let perry_hir::Stmt::Let { id, .. } = s {
             if referenced_from_fn.contains(id) {
-                let name = format!("perry_global_{}", id);
+                let name = format!("perry_global_{}__{}", module_prefix, id);
                 llmod.add_internal_global(&name, DOUBLE, "0.0");
                 module_globals.insert(*id, name);
             }
@@ -162,16 +179,18 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Method registry: (class_name, method_name) → LLVM function name.
     // Built from `class.methods` so the dispatch in `lower_call` knows
-    // which mangled function name to call for `obj.method(args)`.
+    // which mangled function name to call for `obj.method(args)`. Method
+    // names are also scoped by module prefix.
     let method_names: HashMap<(String, String), String> = hir
         .classes
         .iter()
         .flat_map(|c| {
+            let prefix = module_prefix.clone();
             c.methods
                 .iter()
                 .map(move |m| {
                     let key = (c.name.clone(), m.name.clone());
-                    let val = format!("perry_method_{}_{}", sanitize(&c.name), sanitize(&m.name));
+                    let val = scoped_method_name(&prefix, &c.name, &m.name);
                     (key, val)
                 })
         })
@@ -179,38 +198,87 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Resolve user function names up-front so body lowering can emit
     // forward/recursive calls without worrying about emission order.
+    // Names are scoped by module prefix to avoid cross-module collisions.
     let mut func_names: HashMap<u32, String> = HashMap::new();
     for f in &hir.functions {
-        func_names.insert(f.id, llvm_fn_name(&f.name));
+        func_names.insert(f.id, scoped_fn_name(&module_prefix, &f.name));
+    }
+
+    // Pre-declare each imported function as an extern. Cross-module
+    // calls in lower_call need a `declare` line at the top of the IR
+    // for the symbol to be referenceable; without this, clang errors
+    // with "use of undefined value @perry_fn_<src>__<name>".
+    //
+    // We walk hir.functions/methods/init for `Expr::ExternFuncRef` and
+    // for each unique (name, source_prefix) emit a declare with the
+    // right number of double parameters from the carried param_types.
+    {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut collected: Vec<(String, usize)> = Vec::new();
+        for f in &hir.functions {
+            collect_extern_func_refs_in_stmts(&f.body, &mut seen, &mut collected);
+        }
+        for c in &hir.classes {
+            for m in &c.methods {
+                collect_extern_func_refs_in_stmts(&m.body, &mut seen, &mut collected);
+            }
+            if let Some(ctor) = &c.constructor {
+                collect_extern_func_refs_in_stmts(&ctor.body, &mut seen, &mut collected);
+            }
+        }
+        collect_extern_func_refs_in_stmts(&hir.init, &mut seen, &mut collected);
+
+        for (name, param_count) in collected {
+            if let Some(source_prefix) = opts.import_function_prefixes.get(&name) {
+                let llvm_name = format!("perry_fn_{}__{}", source_prefix, name);
+                let param_types: Vec<crate::types::LlvmType> =
+                    std::iter::repeat(DOUBLE).take(param_count).collect();
+                llmod.declare_function(&llvm_name, DOUBLE, &param_types);
+            }
+        }
     }
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
-    // Lower each class method as `perry_method_<class>_<name>(this_box,
-    // arg0, arg1, ...) -> double`. Methods are emitted as standalone
-    // LLVM functions; the dispatch in `lower_call` calls them directly.
+    // Lower each class method as `perry_method_<modprefix>__<class>__<name>(
+    // this_box, arg0, arg1, ...) -> double`. Methods are emitted as
+    // standalone LLVM functions; the dispatch in `lower_call` calls
+    // them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
     }
 
-    // Emit `int main()` that bootstraps GC, runs the string-pool init,
-    // then runs init statements.
-    compile_main(&mut llmod, hir, &func_names, &mut strings, &class_table, &method_names, &module_globals)
-        .with_context(|| format!("lowering main of module '{}'", hir.name))?;
+    // Emit either `int main()` (entry module) or `void <prefix>__init()`
+    // (non-entry module). The entry main calls each non-entry init in
+    // order before running its own statements.
+    compile_module_entry(
+        &mut llmod,
+        hir,
+        &func_names,
+        &mut strings,
+        &class_table,
+        &method_names,
+        &module_globals,
+        &opts.import_function_prefixes,
+        &module_prefix,
+        opts.is_entry_module,
+        &opts.non_entry_module_prefixes,
+    )
+    .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
     // After all user code is lowered, the string pool's contents are final.
-    // Emit the bytes globals, handle globals, and the `__perry_init_strings`
-    // function that runs once at startup. We do this AFTER `compile_main`
-    // so the string pool sees every literal — including those in init
-    // statements and inside the main function body.
-    emit_string_pool(&mut llmod, &strings);
+    // Emit the bytes globals, handle globals, and the
+    // `__perry_init_strings_<prefix>` function that runs once at startup.
+    // The function name is scoped by module prefix so multiple modules
+    // can each have their own string-pool init without colliding.
+    emit_string_pool(&mut llmod, &strings, &module_prefix);
 
     let ll_text = llmod.to_ir();
     log::debug!(
@@ -231,6 +299,7 @@ fn compile_function(
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -284,6 +353,7 @@ fn compile_function(
         class_stack: Vec::new(),
         methods,
         module_globals,
+        import_function_prefixes,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -311,6 +381,7 @@ fn compile_method(
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
 ) -> Result<()> {
     let llvm_name = methods
         .get(&(class.name.clone(), method.name.clone()))
@@ -367,6 +438,7 @@ fn compile_method(
         class_stack: vec![class.name.clone()],
         methods,
         module_globals,
+        import_function_prefixes,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -378,14 +450,22 @@ fn compile_method(
     Ok(())
 }
 
-/// Emit `int main() { js_gc_init(); __perry_init_strings(); <init stmts>; return 0; }`.
+/// Emit the module's entry function.
 ///
-/// The `__perry_init_strings()` call is added unconditionally — if there
-/// are no string literals in the program, `emit_string_pool` will skip
-/// emitting the init function entirely and the call here would dangle.
-/// To handle that, we defer the call insertion until AFTER the string pool
-/// is finalized: see `emit_string_pool` for the patch logic.
-fn compile_main(
+/// For the **entry module**: emits `int main()` that bootstraps GC, runs
+/// the entry module's own string pool init, then calls every non-entry
+/// module's `<prefix>__init` function in order, then runs the entry
+/// module's top-level statements, then `return 0`.
+///
+/// For **non-entry modules**: emits `void <prefix>__init()` that runs the
+/// non-entry module's string pool init followed by its top-level
+/// statements. The entry module's main calls these via the
+/// `non_entry_module_prefixes` list.
+///
+/// Each module gets its OWN string pool init function
+/// (`__perry_init_strings_<prefix>`) so multiple modules in the same
+/// program don't collide on the symbol name.
+fn compile_module_entry(
     llmod: &mut LlModule,
     hir: &HirModule,
     func_names: &HashMap<u32, String>,
@@ -393,71 +473,115 @@ fn compile_main(
     classes: &HashMap<String, &perry_hir::Class>,
     methods: &HashMap<(String, String), String>,
     module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    module_prefix: &str,
+    is_entry: bool,
+    non_entry_module_prefixes: &[String],
 ) -> Result<()> {
-    let main = llmod.define_function("main", I32, vec![]);
-    let _ = main.create_block("entry");
-    {
-        let blk = main.block_mut(0).unwrap();
-        blk.call_void("js_gc_init", &[]);
-        // String-pool init call — see `emit_string_pool`. We always emit
-        // the call; if the pool turns out to be empty, `emit_string_pool`
-        // emits an empty `__perry_init_strings()` body which clang -O2
-        // collapses to nothing.
-        blk.call_void("__perry_init_strings", &[]);
-    }
+    let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
 
-    let mut ctx = FnCtx {
-        func: main,
-        locals: HashMap::new(),
-        local_types: HashMap::new(),
-        current_block: 0,
-        func_names,
-        strings,
-        loop_targets: Vec::new(),
-        classes,
-        this_stack: Vec::new(),
-        class_stack: Vec::new(),
-        methods,
-        module_globals,
-    };
-    stmt::lower_stmts(&mut ctx, &hir.init)
-        .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
+    if is_entry {
+        // Pre-declare each non-entry module's init function as an
+        // extern so the entry main can call them. The actual definition
+        // lives in the OTHER module's compiled .o file; the linker
+        // resolves the symbols at link time.
+        for prefix in non_entry_module_prefixes {
+            llmod.declare_function(&format!("{}__init", prefix), VOID, &[]);
+        }
 
-    // `main` returns i32, but stmt lowering emits `ret double` for explicit
-    // returns. Phase A doesn't allow explicit returns at top level, so we
-    // just append `ret i32 0` if the block didn't terminate.
-    if !ctx.block().is_terminated() {
-        ctx.block().ret(I32, "0");
+        let main = llmod.define_function("main", I32, vec![]);
+        let _ = main.create_block("entry");
+        {
+            let blk = main.block_mut(0).unwrap();
+            blk.call_void("js_gc_init", &[]);
+            // Entry module's own string pool first.
+            blk.call_void(&strings_init_name, &[]);
+            // Then every non-entry module's init in order. Each
+            // non-entry module's `<prefix>__init` runs its own string
+            // pool init internally before its top-level statements.
+            for prefix in non_entry_module_prefixes {
+                blk.call_void(&format!("{}__init", prefix), &[]);
+            }
+        }
+
+        let mut ctx = FnCtx {
+            func: main,
+            locals: HashMap::new(),
+            local_types: HashMap::new(),
+            current_block: 0,
+            func_names,
+            strings,
+            loop_targets: Vec::new(),
+            classes,
+            this_stack: Vec::new(),
+            class_stack: Vec::new(),
+            methods,
+            module_globals,
+            import_function_prefixes,
+        };
+        stmt::lower_stmts(&mut ctx, &hir.init)
+            .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
+
+        if !ctx.block().is_terminated() {
+            ctx.block().ret(I32, "0");
+        }
+    } else {
+        let init_name = format!("{}__init", module_prefix);
+        let init_fn = llmod.define_function(&init_name, VOID, vec![]);
+        let _ = init_fn.create_block("entry");
+        {
+            let blk = init_fn.block_mut(0).unwrap();
+            // Each non-entry module runs its own string pool init at
+            // the start of its module init function. The entry main
+            // calls each module init in order (after running its own
+            // strings init), so by the time user code in any module
+            // executes, every module's strings are alive.
+            blk.call_void(&strings_init_name, &[]);
+        }
+
+        let mut ctx = FnCtx {
+            func: init_fn,
+            locals: HashMap::new(),
+            local_types: HashMap::new(),
+            current_block: 0,
+            func_names,
+            strings,
+            loop_targets: Vec::new(),
+            classes,
+            this_stack: Vec::new(),
+            class_stack: Vec::new(),
+            methods,
+            module_globals,
+            import_function_prefixes,
+        };
+        stmt::lower_stmts(&mut ctx, &hir.init)
+            .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;
+
+        if !ctx.block().is_terminated() {
+            ctx.block().ret_void();
+        }
     }
     Ok(())
 }
 
 /// Emit the string pool into the module: byte-array constants, handle
-/// globals, and the `__perry_init_strings()` function that allocates +
-/// NaN-boxes + GC-roots each handle exactly once at startup.
+/// globals, and the `__perry_init_strings_<prefix>` function that
+/// allocates + NaN-boxes + GC-roots each handle exactly once at startup.
 ///
-/// Always emits `__perry_init_strings`, even when the pool is empty —
-/// `compile_main` already injected the unconditional call, and removing
-/// the call after the fact is awkward. An empty body (`ret void`) costs
-/// nothing at runtime and clang -O2 inlines/dead-strips the empty call.
-fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool) {
-    // Emit per-literal globals.
+/// The string pool was constructed with a `module_prefix`, so every
+/// `entry.bytes_global` / `entry.handle_global` is already prefixed.
+/// Emission uses those names directly — no extra prefixing here.
+fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool, module_prefix: &str) {
     for entry in strings.iter() {
         // .rodata bytes — `[N+1 x i8]` because we include the null terminator.
-        llmod.add_named_string_constant(
-            &entry.bytes_global,
-            entry.byte_len + 1,
-            &entry.escaped_ir,
-        );
+        llmod.add_named_string_constant(&entry.bytes_global, entry.byte_len + 1, &entry.escaped_ir);
         // Mutable handle global initialized to 0.0; populated by
-        // __perry_init_strings.
+        // __perry_init_strings_<prefix>.
         llmod.add_internal_global(&entry.handle_global, DOUBLE, "0.0");
     }
 
-    // Build __perry_init_strings function. One block, straight-line code:
-    // for each entry, allocate via js_string_from_bytes, NaN-box, store
-    // into the handle global, register as GC root.
-    let init_fn = llmod.define_function("__perry_init_strings", VOID, vec![]);
+    let init_name = format!("__perry_init_strings_{}", module_prefix);
+    let init_fn = llmod.define_function(&init_name, VOID, vec![]);
     let _ = init_fn.create_block("entry");
     let blk = init_fn.block_mut(0).unwrap();
 
@@ -466,23 +590,144 @@ fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool) {
         let handle_ref = format!("@{}", entry.handle_global);
         let len_str = entry.byte_len.to_string();
 
-        // %h = call i64 @js_string_from_bytes(ptr @.str.N.bytes, i32 N)
         let handle = blk.call(
             I64,
             "js_string_from_bytes",
             &[(PTR, &bytes_ref), (I32, &len_str)],
         );
-        // %b = call double @js_nanbox_string(i64 %h)
         let nanboxed = blk.call(DOUBLE, "js_nanbox_string", &[(I64, &handle)]);
-        // store double %b, ptr @.str.N.handle
         blk.store(DOUBLE, &nanboxed, &handle_ref);
-        // %addr = ptrtoint ptr @.str.N.handle to i64
         let addr_i64 = blk.ptrtoint(&handle_ref, I64);
-        // call void @js_gc_register_global_root(i64 %addr)
         blk.call_void("js_gc_register_global_root", &[(I64, &addr_i64)]);
     }
 
     blk.ret_void();
+}
+
+/// Walk a sequence of statements and collect every Call to an
+/// `Expr::ExternFuncRef`. Used by `compile_module` to pre-declare
+/// every imported function as an LLVM extern at the top of the IR.
+///
+/// The output is `(function_name, param_count)`. Param count comes from
+/// the call's args.len() — using args.len() rather than the
+/// `ExternFuncRef.param_types` is more permissive (the import metadata
+/// can carry an outdated count after Perry's lowering).
+fn collect_extern_func_refs_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<(String, usize)>,
+) {
+    for s in stmts {
+        match s {
+            perry_hir::Stmt::Expr(e) | perry_hir::Stmt::Throw(e) => {
+                collect_extern_func_refs_in_expr(e, seen, out);
+            }
+            perry_hir::Stmt::Return(opt) => {
+                if let Some(e) = opt {
+                    collect_extern_func_refs_in_expr(e, seen, out);
+                }
+            }
+            perry_hir::Stmt::Let { init, .. } => {
+                if let Some(e) = init {
+                    collect_extern_func_refs_in_expr(e, seen, out);
+                }
+            }
+            perry_hir::Stmt::If { condition, then_branch, else_branch } => {
+                collect_extern_func_refs_in_expr(condition, seen, out);
+                collect_extern_func_refs_in_stmts(then_branch, seen, out);
+                if let Some(eb) = else_branch {
+                    collect_extern_func_refs_in_stmts(eb, seen, out);
+                }
+            }
+            perry_hir::Stmt::While { condition, body } => {
+                collect_extern_func_refs_in_expr(condition, seen, out);
+                collect_extern_func_refs_in_stmts(body, seen, out);
+            }
+            perry_hir::Stmt::DoWhile { body, condition } => {
+                collect_extern_func_refs_in_stmts(body, seen, out);
+                collect_extern_func_refs_in_expr(condition, seen, out);
+            }
+            perry_hir::Stmt::For { init, condition, update, body } => {
+                if let Some(init_stmt) = init {
+                    collect_extern_func_refs_in_stmts(std::slice::from_ref(init_stmt), seen, out);
+                }
+                if let Some(cond) = condition {
+                    collect_extern_func_refs_in_expr(cond, seen, out);
+                }
+                if let Some(upd) = update {
+                    collect_extern_func_refs_in_expr(upd, seen, out);
+                }
+                collect_extern_func_refs_in_stmts(body, seen, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_extern_func_refs_in_expr(
+    e: &perry_hir::Expr,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<(String, usize)>,
+) {
+    use perry_hir::Expr;
+    match e {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::ExternFuncRef { name, .. } = callee.as_ref() {
+                if seen.insert(name.clone()) {
+                    out.push((name.clone(), args.len()));
+                }
+            }
+            collect_extern_func_refs_in_expr(callee, seen, out);
+            for a in args {
+                collect_extern_func_refs_in_expr(a, seen, out);
+            }
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            collect_extern_func_refs_in_expr(left, seen, out);
+            collect_extern_func_refs_in_expr(right, seen, out);
+        }
+        Expr::Unary { operand, .. } | Expr::Void(operand) | Expr::TypeOf(operand) => {
+            collect_extern_func_refs_in_expr(operand, seen, out);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_extern_func_refs_in_expr(condition, seen, out);
+            collect_extern_func_refs_in_expr(then_expr, seen, out);
+            collect_extern_func_refs_in_expr(else_expr, seen, out);
+        }
+        Expr::PropertyGet { object, .. } => collect_extern_func_refs_in_expr(object, seen, out),
+        Expr::PropertySet { object, value, .. } => {
+            collect_extern_func_refs_in_expr(object, seen, out);
+            collect_extern_func_refs_in_expr(value, seen, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_extern_func_refs_in_expr(object, seen, out);
+            collect_extern_func_refs_in_expr(index, seen, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_extern_func_refs_in_expr(object, seen, out);
+            collect_extern_func_refs_in_expr(index, seen, out);
+            collect_extern_func_refs_in_expr(value, seen, out);
+        }
+        Expr::Array(elements) => {
+            for el in elements {
+                collect_extern_func_refs_in_expr(el, seen, out);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_extern_func_refs_in_expr(v, seen, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_extern_func_refs_in_expr(a, seen, out);
+            }
+        }
+        Expr::LocalSet(_, value) => collect_extern_func_refs_in_expr(value, seen, out),
+        _ => {}
+    }
 }
 
 /// Walk a sequence of statements and collect all LocalIds defined by
@@ -634,13 +879,27 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut std::collections::Hash
     }
 }
 
-/// Mangle a HIR function name into an LLVM symbol.
+/// Mangle a HIR function name into an LLVM symbol, scoped by module prefix.
 ///
-/// We prefix with `perry_fn_` to avoid colliding with runtime symbols like
-/// `main`, `js_console_log_*`, or the C stdlib. Non-alphanumeric characters
-/// are replaced with underscores because LLVM symbol names are restrictive.
-fn llvm_fn_name(hir_name: &str) -> String {
-    format!("perry_fn_{}", sanitize(hir_name))
+/// `perry_fn_<modprefix>__<funcname>`. The double-underscore between
+/// module prefix and function name is the delimiter — picked because
+/// JS identifiers can't contain `__` in user-visible code, so it can't
+/// collide with sanitized user names.
+fn scoped_fn_name(module_prefix: &str, hir_name: &str) -> String {
+    format!("perry_fn_{}__{}", module_prefix, sanitize(hir_name))
+}
+
+/// Mangle a class method name into an LLVM symbol, scoped by module
+/// prefix and class name.
+///
+/// `perry_method_<modprefix>__<class>__<method>`.
+fn scoped_method_name(module_prefix: &str, class_name: &str, method_name: &str) -> String {
+    format!(
+        "perry_method_{}__{}__{}",
+        module_prefix,
+        sanitize(class_name),
+        sanitize(method_name)
+    )
 }
 
 /// Sanitize a name for use in an LLVM symbol — replace anything that isn't

@@ -4025,9 +4025,72 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // later phases need them.
             if use_llvm_backend {
                 let is_entry = path == &entry_path;
+                // Compute the prefix list of non-entry modules so the
+                // entry main can call each `<prefix>__init` in order.
+                // The prefix derivation must match what
+                // `perry_codegen_llvm::compile_module` does internally
+                // (sanitize(hir.name)) so the symbols match.
+                let sanitize_name = |s: &str| -> String {
+                    s.chars()
+                        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+                        .collect()
+                };
+                let non_entry_module_prefixes: Vec<String> = if is_entry {
+                    ctx.native_modules
+                        .iter()
+                        .filter_map(|(p, m)| {
+                            if p == &entry_path {
+                                None
+                            } else {
+                                Some(sanitize_name(&m.name))
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                // Build import → source-prefix table for cross-module
+                // ExternFuncRef calls. For each Named import in this
+                // module, look up the source module's HIR by resolved
+                // path and capture its name. The LLVM codegen uses this
+                // to generate `perry_fn_<source_prefix>__<name>`.
+                let mut import_function_prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                for import in &hir_module.imports {
+                    if import.module_kind != perry_hir::ModuleKind::NativeCompiled {
+                        continue;
+                    }
+                    let resolved_path = match &import.resolved_path {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let source_module = ctx
+                        .native_modules
+                        .iter()
+                        .find(|(p, _)| p.to_string_lossy() == *resolved_path)
+                        .map(|(_, m)| m);
+                    let source_prefix = match source_module {
+                        Some(m) => sanitize_name(&m.name),
+                        None => continue,
+                    };
+                    for spec in &import.specifiers {
+                        match spec {
+                            perry_hir::ImportSpecifier::Named { imported, local: _ } => {
+                                import_function_prefixes
+                                    .insert(imported.clone(), source_prefix.clone());
+                            }
+                            perry_hir::ImportSpecifier::Default { local } => {
+                                import_function_prefixes
+                                    .insert(local.clone(), source_prefix.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 let opts = perry_codegen_llvm::CompileOptions {
                     target: target.clone(),
                     is_entry_module: is_entry,
+                    non_entry_module_prefixes,
+                    import_function_prefixes,
                 };
                 let object_code = perry_codegen_llvm::compile_module(hir_module, opts)
                     .map_err(|e| format!(

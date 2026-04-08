@@ -98,6 +98,10 @@ pub(crate) struct FnCtx<'a> {
     /// value is visible to all functions in the module (essential for
     /// patterns like `let failures = 0; function eq() { failures++; }`).
     pub module_globals: &'a std::collections::HashMap<u32, String>,
+    /// Imported function name → source module's symbol prefix. Used by
+    /// `ExternFuncRef` lowering in `lower_call` to generate scoped
+    /// cross-module calls.
+    pub import_function_prefixes: &'a std::collections::HashMap<String, String>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -748,6 +752,34 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         let arg_slices: Vec<(crate::types::LlvmType, &str)> =
             lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
 
+        return Ok(ctx.block().call(DOUBLE, &fname, &arg_slices));
+    }
+
+    // Cross-module function call via ExternFuncRef. The HIR carries the
+    // function name; we look up the source module's prefix in
+    // `import_function_prefixes` (built by the CLI from hir.imports) and
+    // generate `perry_fn_<source_prefix>__<name>`. The function is
+    // declared in the OTHER module's compilation; here we just emit a
+    // direct LLVM call to its scoped name and the system linker
+    // resolves the symbol when the .o files are linked together.
+    if let Expr::ExternFuncRef { name, .. } = callee {
+        let source_prefix = ctx
+            .import_function_prefixes
+            .get(name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "ExternFuncRef '{}': source module's prefix not in import_function_prefixes \
+                     map (CLI didn't register this import)",
+                    name
+                )
+            })?;
+        let fname = format!("perry_fn_{}__{}", source_prefix, name);
+        let mut lowered: Vec<String> = Vec::with_capacity(args.len());
+        for a in args {
+            lowered.push(lower_expr(ctx, a)?);
+        }
+        let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+            lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
         return Ok(ctx.block().call(DOUBLE, &fname, &arg_slices));
     }
 

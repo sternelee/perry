@@ -67,6 +67,11 @@
 use std::collections::HashMap;
 
 pub struct StringPool {
+    /// Module symbol prefix used in every emitted global name. Set at
+    /// construction time so the pool's `bytes_global`/`handle_global`
+    /// names match what `emit_string_pool` generates and the codegen
+    /// use sites can reference them directly.
+    module_prefix: String,
     /// `value → interned index`. Identical literals share an entry.
     interned: HashMap<String, u32>,
     /// Ordered list of unique entries; the index in this Vec is the
@@ -89,10 +94,23 @@ pub struct StringEntry {
 
 impl StringPool {
     pub fn new() -> Self {
+        Self::with_prefix(String::new())
+    }
+
+    /// Construct a pool whose emitted global names will be prefixed with
+    /// `module_prefix`. The codegen passes the per-module prefix so that
+    /// multiple modules in the same link can each have their own pool
+    /// without colliding on `.str.0.handle` etc.
+    pub fn with_prefix(module_prefix: String) -> Self {
         Self {
+            module_prefix,
             interned: HashMap::new(),
             entries: Vec::new(),
         }
+    }
+
+    pub fn module_prefix(&self) -> &str {
+        &self.module_prefix
     }
 
     /// Intern a string literal. Returns the interned index, stable for the
@@ -104,13 +122,23 @@ impl StringPool {
         let idx = self.entries.len() as u32;
         let byte_len = value.len(); // UTF-8 byte length, what js_string_from_bytes expects
         let escaped_ir = escape_for_llvm_ir(value.as_bytes());
+        let bytes_global = if self.module_prefix.is_empty() {
+            format!(".str.{}.bytes", idx)
+        } else {
+            format!("{}_.str.{}.bytes", self.module_prefix, idx)
+        };
+        let handle_global = if self.module_prefix.is_empty() {
+            format!(".str.{}.handle", idx)
+        } else {
+            format!("{}_.str.{}.handle", self.module_prefix, idx)
+        };
         let entry = StringEntry {
             idx,
             value: value.to_string(),
             byte_len,
             escaped_ir,
-            bytes_global: format!(".str.{}.bytes", idx),
-            handle_global: format!(".str.{}.handle", idx),
+            bytes_global,
+            handle_global,
         };
         self.entries.push(entry);
         self.interned.insert(value.to_string(), idx);
