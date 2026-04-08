@@ -1770,12 +1770,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- arr.includes(value) -> boolean --------
-        // No dedicated runtime fn — we approximate with a loop later
-        // or just stub. For now: always return false.
         Expr::ArrayIncludes { array, value } => {
-            let _ = lower_expr(ctx, array)?;
-            let _ = lower_expr(ctx, value)?;
-            Ok(double_literal(0.0))
+            let arr_box = lower_expr(ctx, array)?;
+            let v = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let i32_v = blk.call(
+                I32,
+                "js_array_includes_f64",
+                &[(I64, &arr_handle), (DOUBLE, &v)],
+            );
+            // Convert i32 boolean to NaN-tagged TAG_TRUE/FALSE so
+            // console.log prints "true"/"false".
+            let bit = blk.icmp_ne(I32, &i32_v, "0");
+            let tagged = blk.select(
+                crate::types::I1,
+                &bit,
+                I64,
+                crate::nanbox::TAG_TRUE_I64,
+                crate::nanbox::TAG_FALSE_I64,
+            );
+            Ok(blk.bitcast_i64_to_double(&tagged))
         }
 
         // -------- arr.splice(start, deleteCount?, ...items) stub --------
@@ -2110,11 +2125,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
-        // -------- arr.indexOf(value) -> number stub (returns -1) --------
+        // -------- arr.indexOf(value) -> number --------
         Expr::ArrayIndexOf { array, value } => {
-            let _ = lower_expr(ctx, array)?;
-            let _ = lower_expr(ctx, value)?;
-            Ok(double_literal(-1.0))
+            let arr_box = lower_expr(ctx, array)?;
+            let v = lower_expr(ctx, value)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let i32_v = blk.call(
+                I32,
+                "js_array_indexOf_f64",
+                &[(I64, &arr_handle), (DOUBLE, &v)],
+            );
+            Ok(blk.sitofp(I32, &i32_v, DOUBLE))
         }
 
         // -------- arr.forEach(callback) — invoke callback for side effects --------
