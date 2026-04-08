@@ -23783,6 +23783,50 @@ pub(crate) fn compile_expr(
                         }
                         _ => arg_vals.clone()
                     }
+                } else if native_module == "node-cron" {
+                    // node-cron module functions
+                    match method.as_str() {
+                        "schedule" => {
+                            // schedule(expr, callback): expr is a NaN-boxed string,
+                            // callback is a closure pointer. The runtime needs both
+                            // arguments as raw i64 — extracting the string pointer for
+                            // expr and the raw closure pointer for callback. Without
+                            // this branch, the default arg-conversion path passed
+                            // callback as f64 (NaN-boxed) and the runtime cast it
+                            // numerically (`as u64`), producing 0 for the closure
+                            // pointer and silently dropping every callback invocation.
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let expr_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[expr_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            if arg_vals.len() >= 2 {
+                                // Callback closure: extract raw i64 pointer.
+                                args.push(ensure_i64(builder, arg_vals[1]));
+                            } else {
+                                args.push(builder.ins().iconst(types::I64, 0));
+                            }
+                            args
+                        }
+                        "validate" | "describe" => {
+                            // (expr) -> result. Single string argument; extract raw pointer.
+                            let mut args = Vec::new();
+                            if !arg_vals.is_empty() {
+                                let expr_f64 = ensure_f64(builder, arg_vals[0]);
+                                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                let call = builder.ins().call(get_str_ref, &[expr_f64]);
+                                args.push(builder.inst_results(call)[0]);
+                            }
+                            args
+                        }
+                        _ => arg_vals.clone()
+                    }
                 } else if native_module == "fastify" {
                     // fastify module functions
                     match method.as_str() {

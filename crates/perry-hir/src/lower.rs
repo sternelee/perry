@@ -2309,6 +2309,14 @@ fn lower_module_decl(
                                                         ("mysql2" | "mysql2/promise", "createConnection") => Some("Connection"),
                                                         ("pg", "connect") => Some("Client"),
                                                         ("http" | "https", "request" | "get") => Some("ClientRequest"),
+                                                        // node-cron's `cron.schedule(expr, cb)` returns a job
+                                                        // handle whose `start()`/`stop()`/`isRunning()` etc.
+                                                        // dispatch via the ("node-cron", true, METHOD) entries
+                                                        // in expr.rs's native_module dispatch table. Without
+                                                        // registering the handle as a "CronJob" native instance,
+                                                        // `job.stop()` falls through to dynamic dispatch and the
+                                                        // stop never reaches js_cron_job_stop.
+                                                        ("node-cron", "schedule") => Some("CronJob"),
                                                         _ => None,
                                                     };
                                                     if let Some(class_name) = class_name {

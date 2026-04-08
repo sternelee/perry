@@ -32,6 +32,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     // Database native libraries
     "mongodb",
     "better-sqlite3",
+    // Job scheduler
+    "node-cron",
     // Node.js built-ins
     "http",
     "https",

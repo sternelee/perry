@@ -77,6 +77,8 @@
 #[no_mangle] pub extern "C" fn js_cron_set_interval() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_cron_set_timeout() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_cron_validate() -> i64 { 0 }
+#[no_mangle] pub extern "C" fn js_cron_timer_tick() -> i32 { 0 }
+#[no_mangle] pub extern "C" fn js_cron_timer_has_pending() -> i32 { 0 }
 #[no_mangle] pub extern "C" fn js_crypto_aes256_decrypt() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_crypto_aes256_encrypt() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn js_crypto_hmac_sha256() -> i64 { 0 }

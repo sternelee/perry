@@ -7466,14 +7466,36 @@ impl Compiler {
             self.extern_funcs.insert(Cow::Borrowed("js_cron_validate"), func_id);
         }
 
-        // js_cron_schedule(expr: i64, callback_id: f64) -> i64 (handle)
+        // js_cron_schedule(expr: i64, callback: i64) -> i64 (handle)
+        // The second arg is a raw closure pointer (i64), not a NaN-boxed f64.
+        // The matching codegen branch in expr.rs ensures the callback argument
+        // is passed as an i64 closure pointer. Without this, the runtime
+        // received a NaN value for the closure address (NaN as u64 truncates
+        // to 0) and the callback never fired.
         {
             let mut sig = self.module.make_signature();
             sig.params.push(AbiParam::new(types::I64)); // expression
-            sig.params.push(AbiParam::new(types::F64)); // callback_id
+            sig.params.push(AbiParam::new(types::I64)); // callback closure pointer
             sig.returns.push(AbiParam::new(types::I64)); // job handle
             let func_id = self.module.declare_function("js_cron_schedule", Linkage::Import, &sig)?;
             self.extern_funcs.insert(Cow::Borrowed("js_cron_schedule"), func_id);
+        }
+
+        // js_cron_timer_tick() -> i32  (returns count of callbacks fired)
+        // js_cron_timer_has_pending() -> i32  (1 if any cron job is scheduled)
+        // Both are pumped from the CLI event loop in module_init.rs alongside
+        // js_callback_timer_tick / js_interval_timer_tick. Only declared when
+        // stdlib is being linked — in runtime-only builds the symbols don't
+        // exist (they live in `crates/perry-stdlib/src/cron.rs`) and the
+        // matching event-loop wiring in module_init.rs guards the call site
+        // with `cron_tick_id.map(|id| ...)` so it's a no-op when missing.
+        if self.needs_stdlib {
+            for name in &["js_cron_timer_tick", "js_cron_timer_has_pending"] {
+                let mut sig = self.module.make_signature();
+                sig.returns.push(AbiParam::new(types::I32));
+                let func_id = self.module.declare_function(name, Linkage::Import, &sig)?;
+                self.extern_funcs.insert(Cow::Borrowed(*name), func_id);
+            }
         }
 
         // Cron job control (handle: i64)

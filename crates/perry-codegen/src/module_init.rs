@@ -781,9 +781,10 @@ impl crate::codegen::Compiler {
             }
 
             // For CLI entry modules, emit an event loop that keeps the process alive
-            // while there are pending setInterval/setTimeout callback timers. Without
-            // this, the process exits as soon as the init statements finish, causing
-            // setInterval/setTimeout-based services to die after the first tick.
+            // while there are pending setInterval/setTimeout callback timers OR
+            // pending node-cron jobs. Without this, the process exits as soon as the
+            // init statements finish, causing setInterval/setTimeout/cron-based
+            // services to die after the first tick.
             // Skipped for dylibs (no main() exit) and iOS game loop (runtime manages).
             if self.is_entry_module && !is_dylib && !ios_game_loop {
                 let current_block = builder.current_block().unwrap();
@@ -793,6 +794,11 @@ impl crate::codegen::Compiler {
                     let interval_pending_id = self.extern_funcs.get("js_interval_timer_has_pending").copied();
                     let callback_pending_id = self.extern_funcs.get("js_callback_timer_has_pending").copied();
                     let sleep_id = self.extern_funcs.get("js_sleep_ms").copied();
+                    // Cron timer ticks are pumped from the same loop. The decls are
+                    // unconditionally added by runtime_decls.rs so the .map() below
+                    // is just defensive — the symbols are always materialised.
+                    let cron_tick_id = self.extern_funcs.get("js_cron_timer_tick").copied();
+                    let cron_pending_id = self.extern_funcs.get("js_cron_timer_has_pending").copied();
 
                     if let (Some(int_tick), Some(cb_tick), Some(int_pend), Some(cb_pend), Some(sleep_fn)) =
                         (interval_tick_id, callback_tick_id, interval_pending_id, callback_pending_id, sleep_id)
@@ -802,6 +808,8 @@ impl crate::codegen::Compiler {
                         let int_pend_ref = self.module.declare_func_in_func(int_pend, builder.func);
                         let cb_pend_ref = self.module.declare_func_in_func(cb_pend, builder.func);
                         let sleep_ref = self.module.declare_func_in_func(sleep_fn, builder.func);
+                        let cron_tick_ref = cron_tick_id.map(|id| self.module.declare_func_in_func(id, builder.func));
+                        let cron_pend_ref = cron_pending_id.map(|id| self.module.declare_func_in_func(id, builder.func));
 
                         let loop_header = builder.create_block();
                         let loop_body = builder.create_block();
@@ -820,16 +828,26 @@ impl crate::codegen::Compiler {
                             let call = builder.ins().call(cb_pend_ref, &[]);
                             builder.inst_results(call)[0]
                         };
-                        let any_pending = builder.ins().bor(int_has, cb_has);
+                        let mut any_pending = builder.ins().bor(int_has, cb_has);
+                        if let Some(pend_ref) = cron_pend_ref {
+                            let cron_has = {
+                                let call = builder.ins().call(pend_ref, &[]);
+                                builder.inst_results(call)[0]
+                            };
+                            any_pending = builder.ins().bor(any_pending, cron_has);
+                        }
                         let zero_i32 = builder.ins().iconst(types::I32, 0);
                         let has_work = builder.ins().icmp(IntCC::NotEqual, any_pending, zero_i32);
                         builder.ins().brif(has_work, loop_body, &[], loop_exit, &[]);
 
-                        // loop_body: tick both timer queues, then GC, sleep 10ms, jump back
+                        // loop_body: tick all timer queues, then GC, sleep 10ms, jump back
                         builder.switch_to_block(loop_body);
                         builder.seal_block(loop_body);
                         builder.ins().call(int_tick_ref, &[]);
                         builder.ins().call(cb_tick_ref, &[]);
+                        if let Some(tick_ref) = cron_tick_ref {
+                            builder.ins().call(tick_ref, &[]);
+                        }
 
                         // GC safe point: timer callbacks have returned, so all live JS values
                         // are stored in module globals, closure boxes, or timer root lists —
