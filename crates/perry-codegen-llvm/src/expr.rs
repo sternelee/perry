@@ -3304,13 +3304,16 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         //      calling its concrete method, default falls through to
         //      the static fallback.
         // Interface / dynamic dispatch fallback: when the static
-        // class is unknown but the property name corresponds to a
-        // method defined on at least one class in the registry,
+        // class is unknown OR resolves to an interface name not in
+        // the class registry, BUT the property name corresponds to
+        // a method defined on at least one class in the registry,
         // emit a switch on class_id over all classes that have that
-        // method. This handles `(f: Formatter).format(...)` where
-        // Formatter is an interface and `f` could be any concrete
-        // implementor.
-        if receiver_class_name(ctx, object).is_none() {
+        // method.
+        let needs_dynamic_dispatch = match receiver_class_name(ctx, object) {
+            None => true,
+            Some(name) => !ctx.classes.contains_key(&name),
+        };
+        if needs_dynamic_dispatch {
             // Find all (class, method_name → fn_name) where the
             // method is defined directly on a class.
             let mut implementors: Vec<(u32, String)> = Vec::new();
