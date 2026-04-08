@@ -3383,7 +3383,7 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         Expr::String(_) => true,
         Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::String)),
         Expr::Binary { op: BinaryOp::Add, left, right } => {
-            is_string_expr(ctx, left) && is_string_expr(ctx, right)
+            is_string_expr(ctx, left) || is_string_expr(ctx, right)
         }
         // String coerce, JSON.stringify, ArrayJoin, etc. all return
         // strings.
@@ -3393,6 +3393,17 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         | Expr::PathJoin(..)
         | Expr::PathDirname(_)
         | Expr::PathBasename(_) => true,
+        // `obj.toString()` always returns a string. Recognize the
+        // call shape so chained concat detects it.
+        Expr::Call { callee, args, .. }
+            if args.is_empty()
+                && matches!(
+                    callee.as_ref(),
+                    Expr::PropertyGet { property, .. } if property == "toString"
+                ) =>
+        {
+            true
+        }
         // PropertyGet on a known class field with declared type String.
         Expr::PropertyGet { object, property } => {
             let Some(class_name) = receiver_class_name(ctx, object) else {
