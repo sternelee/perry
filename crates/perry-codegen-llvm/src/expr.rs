@@ -3065,6 +3065,21 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
     // dispatch (Phase C.2). For PropertyGet receivers, dispatch based
     // on the receiver's static type.
     if let Expr::PropertyGet { object, property } = callee {
+        // Universal `.toString()` — works for any JS value via the
+        // runtime's js_jsvalue_to_string dispatch (numbers print as
+        // their decimal form, strings as themselves, objects as
+        // [object Object], etc.).
+        if property == "toString" && args.is_empty() {
+            // Don't intercept when the receiver is a string already —
+            // string.toString() is a no-op fast path that should
+            // route through the existing string-method dispatch.
+            if !is_string_expr(ctx, object) && !is_array_expr(ctx, object) {
+                let v = lower_expr(ctx, object)?;
+                let blk = ctx.block();
+                let handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &v)]);
+                return Ok(nanbox_string_inline(blk, &handle));
+            }
+        }
         if is_string_expr(ctx, object) {
             return lower_string_method(ctx, object, property, args);
         }
