@@ -3992,6 +3992,19 @@ fn receiver_class_name(ctx: &FnCtx<'_>, e: &Expr) -> Option<String> {
         // at the top of class_stack (for inlined constructors) or comes
         // from the enclosing method's owning class.
         Expr::This => ctx.class_stack.last().cloned(),
+        // `arr[i]` where `arr: ClassFoo[]` — the element type is the
+        // array's parameter. Lets `items[2].display()` resolve the
+        // method dispatch.
+        Expr::IndexGet { object, .. } => {
+            if let Expr::LocalGet(arr_id) = object.as_ref() {
+                if let Some(HirType::Array(elem)) = ctx.local_types.get(arr_id) {
+                    if let HirType::Named(name) = elem.as_ref() {
+                        return Some(name.clone());
+                    }
+                }
+            }
+            None
+        }
         // `this.field` or `obj.field` where the field's declared type
         // is a class. Walk the class definition to find the field's
         // type. Honors the parent inheritance chain.
