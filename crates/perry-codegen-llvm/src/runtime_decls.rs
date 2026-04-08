@@ -73,6 +73,10 @@ pub fn declare_phase_a_strings(module: &mut LlModule) {
 /// result with `js_nanbox_string`.
 pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_concat", I64, &[I64, I64]);
+    // Dynamic string coercion: takes any NaN-boxed JSValue and returns a
+    // raw string handle, formatting numbers via the same codegen path
+    // Cranelift uses (`crates/perry-runtime/src/value.rs:813`).
+    module.declare_function("js_jsvalue_to_string", I64, &[DOUBLE]);
 
     declare_phase_b_arrays(module);
 }
@@ -95,6 +99,9 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     module.declare_function("js_array_push_f64", I64, &[I64, DOUBLE]);
     module.declare_function("js_array_get_f64", DOUBLE, &[I64, I32]);
     module.declare_function("js_array_set_f64", VOID, &[I64, I32, DOUBLE]);
+    // Extending variant: returns a possibly-realloc'd pointer that the
+    // caller must write back to the local slot.
+    module.declare_function("js_array_set_f64_extend", I64, &[I64, I32, DOUBLE]);
     module.declare_function("js_array_length", I32, &[I64]);
 
     declare_phase_b_objects(module);

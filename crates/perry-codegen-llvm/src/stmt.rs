@@ -75,8 +75,14 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             body,
         } => lower_for(ctx, init.as_deref(), condition.as_ref(), update.as_ref(), body),
 
+        // `while (cond) { body }` — same CFG as for-loop without init/update.
+        Stmt::While { condition, body } => lower_while(ctx, condition, body),
+
+        // `do { body } while (cond)` — body runs at least once, then cond.
+        Stmt::DoWhile { body, condition } => lower_do_while(ctx, body, condition),
+
         other => bail!(
-            "perry-codegen-llvm Phase 2: Stmt {} not yet supported",
+            "perry-codegen-llvm Phase B.8: Stmt {} not yet supported",
             stmt_variant_name(other)
         ),
     }
@@ -161,6 +167,81 @@ fn lower_for(
     }
 
     // Exit block — subsequent statements continue here.
+    ctx.current_block = exit_idx;
+    Ok(())
+}
+
+/// `while (cond) { body }` — classic 3-block CFG (cond / body / exit).
+///
+/// ```text
+///   <current>:
+///     br cond
+///   while.cond:
+///     <condition>
+///     truthy → body, falsey → exit
+///   while.body:
+///     <body>
+///     br cond                 ; if not already terminated
+///   while.exit:
+///     <continues here>
+/// ```
+///
+/// No break/continue support yet — body must fall through to the next
+/// loop iteration. Same limitation as `for`.
+fn lower_while(ctx: &mut FnCtx<'_>, condition: &perry_hir::Expr, body: &[Stmt]) -> Result<()> {
+    let cond_idx = ctx.new_block("while.cond");
+    let body_idx = ctx.new_block("while.body");
+    let exit_idx = ctx.new_block("while.exit");
+
+    let cond_label = ctx.block_label(cond_idx);
+    let body_label = ctx.block_label(body_idx);
+    let exit_label = ctx.block_label(exit_idx);
+
+    ctx.block().br(&cond_label);
+
+    ctx.current_block = cond_idx;
+    let cv = lower_expr(ctx, condition)?;
+    let i1 = lower_truthy(ctx, &cv, condition);
+    ctx.block().cond_br(&i1, &body_label, &exit_label);
+
+    ctx.current_block = body_idx;
+    lower_stmts(ctx, body)?;
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&cond_label);
+    }
+
+    ctx.current_block = exit_idx;
+    Ok(())
+}
+
+/// `do { body } while (cond)` — body runs at least once. Same blocks as
+/// `while`, but the initial branch goes to body, not cond.
+fn lower_do_while(
+    ctx: &mut FnCtx<'_>,
+    body: &[Stmt],
+    condition: &perry_hir::Expr,
+) -> Result<()> {
+    let body_idx = ctx.new_block("dowhile.body");
+    let cond_idx = ctx.new_block("dowhile.cond");
+    let exit_idx = ctx.new_block("dowhile.exit");
+
+    let body_label = ctx.block_label(body_idx);
+    let cond_label = ctx.block_label(cond_idx);
+    let exit_label = ctx.block_label(exit_idx);
+
+    ctx.block().br(&body_label);
+
+    ctx.current_block = body_idx;
+    lower_stmts(ctx, body)?;
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&cond_label);
+    }
+
+    ctx.current_block = cond_idx;
+    let cv = lower_expr(ctx, condition)?;
+    let i1 = lower_truthy(ctx, &cv, condition);
+    ctx.block().cond_br(&i1, &body_label, &exit_label);
+
     ctx.current_block = exit_idx;
     Ok(())
 }

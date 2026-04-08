@@ -14,9 +14,34 @@ use perry_types::Type as HirType;
 
 use crate::block::LlBlock;
 use crate::function::LlFunction;
-use crate::nanbox::{double_literal, POINTER_MASK_I64};
+use crate::nanbox::{double_literal, POINTER_MASK_I64, POINTER_TAG_I64, STRING_TAG_I64};
 use crate::strings::StringPool;
 use crate::types::{DOUBLE, I1, I32, I64};
+
+/// Inline NaN-box of a raw heap pointer with `POINTER_TAG`.
+///
+/// Equivalent to `js_nanbox_pointer(ptr)` for the common case where the
+/// pointer is non-null and not already NaN-tagged. The runtime function
+/// (`crates/perry-runtime/src/value.rs:405`) has extra guards (null →
+/// TAG_NULL, already-tagged → preserve) that we don't need in the array/
+/// object hot paths because those always return fresh heap pointers from
+/// `js_array_alloc` / `js_array_push_f64` / `js_array_set_f64_extend` /
+/// `js_object_alloc`. Replacing the function call with two SSA ops
+/// (`or` + `bitcast`) eliminates ~200ms of call overhead per
+/// bench_array_ops run.
+fn nanbox_pointer_inline(blk: &mut LlBlock, ptr_i64: &str) -> String {
+    let tagged = blk.or(I64, ptr_i64, POINTER_TAG_I64);
+    blk.bitcast_i64_to_double(&tagged)
+}
+
+/// Inline NaN-box of a raw string handle with `STRING_TAG`. Same rationale
+/// as `nanbox_pointer_inline` — string handles from `js_string_from_bytes`
+/// / `js_string_concat` are always non-null heap pointers, so the runtime
+/// `js_nanbox_string` guards are never hit in our hot paths.
+fn nanbox_string_inline(blk: &mut LlBlock, ptr_i64: &str) -> String {
+    let tagged = blk.or(I64, ptr_i64, STRING_TAG_I64);
+    blk.bitcast_i64_to_double(&tagged)
+}
 
 /// Per-function codegen context. Held briefly during lowering, never stored.
 pub(crate) struct FnCtx<'a> {
@@ -152,16 +177,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::DateNow => Ok(ctx.block().call(DOUBLE, "js_date_now", &[])),
 
         // -------- Arithmetic --------
-        // String concatenation (Phase B): if Add receives two operands that
-        // are statically known to be strings, route through `js_string_concat`
-        // instead of fadd. Type detection consults `ctx.local_types` for
-        // LocalGet operands and recurses through nested Adds.
+        // String concatenation (Phase B): if Add receives operands where
+        // either side is statically a string, route through string concat.
+        // - both strings → `lower_string_concat` (inline bitcast+and unbox)
+        // - one string + one non-string → `lower_string_coerce_concat`
+        //   (the non-string side passes through `js_jsvalue_to_string`
+        //   which dispatches on the NaN tag at runtime)
         Expr::Binary { op, left, right } => {
-            if matches!(op, BinaryOp::Add)
-                && is_string_expr(ctx, left)
-                && is_string_expr(ctx, right)
-            {
-                return lower_string_concat(ctx, left, right);
+            if matches!(op, BinaryOp::Add) {
+                let l_is_str = is_string_expr(ctx, left);
+                let r_is_str = is_string_expr(ctx, right);
+                if l_is_str && r_is_str {
+                    return lower_string_concat(ctx, left, right);
+                }
+                if l_is_str || r_is_str {
+                    return lower_string_coerce_concat(ctx, left, right, l_is_str, r_is_str);
+                }
             }
             let l = lower_expr(ctx, left)?;
             let r = lower_expr(ctx, right)?;
@@ -257,24 +288,66 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // `arr[i] = v` — typed-Number array element write.
+        //
+        // When the receiver is a LocalGet (the common case `arr[i] = v`),
+        // we use `js_array_set_f64_extend` which auto-grows the array if
+        // `i >= length`. The extend variant returns a possibly-realloc'd
+        // pointer that we must store back to the local slot — without
+        // the store-back, subsequent reads would dangle on the freed
+        // pre-realloc pointer.
+        //
+        // For non-LocalGet receivers (e.g. a function call result), we
+        // use the bounds-checked `js_array_set_f64` since there's no
+        // local to write the new pointer back to.
         Expr::IndexSet { object, index, value } => {
             if !is_array_expr(ctx, object) {
                 bail!(
-                    "perry-codegen-llvm Phase B.5: IndexSet receiver must be a known array (got {})",
+                    "perry-codegen-llvm Phase B.8: IndexSet receiver must be a known array (got {})",
                     variant_name(object)
                 );
             }
             let arr_box = lower_expr(ctx, object)?;
             let idx_double = lower_expr(ctx, index)?;
             let val_double = lower_expr(ctx, value)?;
+
+            // If the object is a LocalGet, capture the local id so we can
+            // write the new pointer back after the extending call. Doing
+            // this BEFORE the borrow of `ctx.block()` keeps the borrow
+            // checker happy.
+            let local_id = if let Expr::LocalGet(id) = object.as_ref() {
+                Some(*id)
+            } else {
+                None
+            };
+
             let blk = ctx.block();
             let arr_bits = blk.bitcast_double_to_i64(&arr_box);
             let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
             let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
-            blk.call_void(
-                "js_array_set_f64",
-                &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
-            );
+
+            if let Some(id) = local_id {
+                let new_handle = blk.call(
+                    I64,
+                    "js_array_set_f64_extend",
+                    &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+                );
+                // Inline `or POINTER_TAG_I64; bitcast i64→double` instead of
+                // calling js_nanbox_pointer — `set_f64_extend` always
+                // returns a real heap pointer.
+                let new_box = nanbox_pointer_inline(blk, &new_handle);
+                let slot = ctx
+                    .locals
+                    .get(&id)
+                    .ok_or_else(|| anyhow!("IndexSet: local {} not in scope", id))?
+                    .clone();
+                ctx.block().store(DOUBLE, &new_box, &slot);
+            } else {
+                // Non-LocalGet receiver: in-bounds write only.
+                blk.call_void(
+                    "js_array_set_f64",
+                    &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+                );
+            }
             // Assignment expressions evaluate to the assigned value.
             Ok(val_double)
         }
@@ -357,7 +430,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "js_array_push_f64",
                 &[(I64, &arr_handle), (DOUBLE, &v)],
             );
-            let new_box = blk.call(DOUBLE, "js_nanbox_pointer", &[(I64, &new_handle)]);
+            // Inline nanbox_pointer — push always returns a real heap ptr.
+            let new_box = nanbox_pointer_inline(blk, &new_handle);
             // Write the (possibly-reallocated) pointer back to the local
             // slot — without this, subsequent reads would use the stale
             // pre-realloc pointer and crash on access.
@@ -694,10 +768,8 @@ fn lower_object_literal(ctx: &mut FnCtx<'_>, props: &[(String, Expr)]) -> Result
         );
     }
 
-    // NaN-box the final pointer with POINTER_TAG.
-    Ok(ctx
-        .block()
-        .call(DOUBLE, "js_nanbox_pointer", &[(I64, &obj_handle)]))
+    // Inline NaN-box (POINTER_TAG).
+    Ok(nanbox_pointer_inline(ctx.block(), &obj_handle))
 }
 
 /// Lower an array literal `[a, b, c, …]`.
@@ -737,10 +809,51 @@ fn lower_array_literal(ctx: &mut FnCtx<'_>, elements: &[Expr]) -> Result<String>
         );
     }
 
-    // NaN-box the final pointer with POINTER_TAG via js_nanbox_pointer.
-    Ok(ctx
-        .block()
-        .call(DOUBLE, "js_nanbox_pointer", &[(I64, &current_arr)]))
+    // Inline NaN-box (POINTER_TAG) — alloc always returns a real heap ptr.
+    Ok(nanbox_pointer_inline(ctx.block(), &current_arr))
+}
+
+/// Lower `string + non_string` (or vice versa) concat with runtime
+/// coercion of the non-string side. The non-string operand passes through
+/// `js_jsvalue_to_string` which inspects its NaN tag and produces the
+/// canonical JS string form (numbers via the formatter at
+/// `crates/perry-runtime/src/value.rs:825`, booleans → `"true"`/`"false"`,
+/// objects → `"[object Object]"`, etc.).
+///
+/// The string-typed side still uses the fast inline `bitcast double → i64;
+/// and POINTER_MASK_I64` unbox; only the non-string side pays the function
+/// call. Both operand handles then feed `js_string_concat`.
+fn lower_string_coerce_concat(
+    ctx: &mut FnCtx<'_>,
+    left: &Expr,
+    right: &Expr,
+    l_is_string: bool,
+    r_is_string: bool,
+) -> Result<String> {
+    let l_box = lower_expr(ctx, left)?;
+    let r_box = lower_expr(ctx, right)?;
+    let blk = ctx.block();
+
+    let l_handle = if l_is_string {
+        let bits = blk.bitcast_double_to_i64(&l_box);
+        blk.and(I64, &bits, POINTER_MASK_I64)
+    } else {
+        blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &l_box)])
+    };
+
+    let r_handle = if r_is_string {
+        let bits = blk.bitcast_double_to_i64(&r_box);
+        blk.and(I64, &bits, POINTER_MASK_I64)
+    } else {
+        blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &r_box)])
+    };
+
+    let result_handle = blk.call(
+        I64,
+        "js_string_concat",
+        &[(I64, &l_handle), (I64, &r_handle)],
+    );
+    Ok(nanbox_string_inline(blk, &result_handle))
 }
 
 /// Lower a static `s1 + s2` string concatenation. Both operands must
@@ -774,8 +887,8 @@ fn lower_string_concat(ctx: &mut FnCtx<'_>, left: &Expr, right: &Expr) -> Result
         "js_string_concat",
         &[(I64, &l_handle), (I64, &r_handle)],
     );
-    let result_box = blk.call(DOUBLE, "js_nanbox_string", &[(I64, &result_handle)]);
-    Ok(result_box)
+    // Inline NaN-box (STRING_TAG) — concat always returns a real heap ptr.
+    Ok(nanbox_string_inline(blk, &result_handle))
 }
 
 pub(crate) fn variant_name(e: &Expr) -> &'static str {
