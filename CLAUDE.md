@@ -10,6 +10,41 @@ Perry is a native TypeScript compiler written in Rust that compiles TypeScript s
 
 **Current Version:** 0.4.87
 
+## TypeScript Parity Status
+
+Tracked via the gap test suite (`test-files/test_gap_*.ts`, 22 tests). Each test exercises a feature cluster and is compared byte-for-byte against `node --experimental-strip-types`. Run via `/tmp/run_gap_tests.sh` after `cargo build --release -p perry-runtime -p perry-stdlib -p perry`.
+
+**Last sweep (post-v0.4.87):** **8/22 passing**, **347 total diff lines**.
+
+| Status | Test | Diffs |
+|--------|------|-------|
+| ✅ PASS | `date_methods` | 0 |
+| ✅ PASS | `encoding_timers` | 0 |
+| ✅ PASS | `error_extensions` | 0 |
+| ✅ PASS | `fetch_response` | 0 |
+| ✅ PASS | `json_advanced` | 0 |
+| ✅ PASS | `node_path` | 0 |
+| ✅ PASS | `node_process` | 0 |
+| ✅ PASS | `weakref_finalization` | 0 |
+| 🟡 close | `regexp_advanced` | 2 (lookbehind only) |
+| 🟡 close | `generators` | 3 |
+| 🟡 close | `number_math` | 4 |
+| 🟡 close | `string_methods` | 8 (UTF-16 length) |
+| 🟡 mid | `class_advanced` | 18 |
+| 🟡 mid | `proxy_reflect` | 27 (segfault) |
+| 🟡 mid | `object_methods` | 28 |
+| 🟡 mid | `node_fs` | 30 |
+| 🟡 mid | `global_apis` | 30 |
+| 🔴 work | `symbols` | 31 (segfault) |
+| 🔴 work | `async_advanced` | 35 (segfault) |
+| 🔴 work | `console_methods` | 40 |
+| 🔴 work | `array_methods` | 45 |
+| 🔴 work | `node_crypto_buffer` | 46 |
+
+**Known categorical gaps**: lookbehind regex (Rust `regex` crate limitation), `String.length` returns byte count instead of UTF-16 code units, `Proxy`/`Reflect` not implemented, `Symbol(...)` returns garbage, `Object.getPrototypeOf` returns wrong sentinel, `console.dir` formatting differs from Node, `console.group*` doesn't indent, `console.table` works for the standard shapes.
+
+**Next-impact targets** (biggest single-commit wins): `console.dir` formatting + `console.group` indent (~15 lines), `Promise.withResolvers` + segfault fix (~35 lines), `URL`/`Blob`/`AbortController` extensions (~15 lines), `Proxy` identity stub (~10 lines), `Symbol` sentinel stub (~10 lines).
+
 ## Workflow Requirements
 
 **IMPORTANT:** Follow these practices for every code change:
