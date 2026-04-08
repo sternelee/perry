@@ -238,10 +238,48 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
     }
 
+    // Pre-walk for closures: every `Expr::Closure` in the program needs
+    // its body emitted as a top-level LLVM function so the closure
+    // creation site can take its address. Collect them all first, then
+    // emit each via `compile_closure` (Phase D.1).
+    let mut closures: Vec<(perry_types::FuncId, perry_hir::Expr)> = Vec::new();
+    {
+        let mut seen: std::collections::HashSet<perry_types::FuncId> = std::collections::HashSet::new();
+        for f in &hir.functions {
+            collect_closures_in_stmts(&f.body, &mut seen, &mut closures);
+        }
+        for c in &hir.classes {
+            for m in &c.methods {
+                collect_closures_in_stmts(&m.body, &mut seen, &mut closures);
+            }
+            if let Some(ctor) = &c.constructor {
+                collect_closures_in_stmts(&ctor.body, &mut seen, &mut closures);
+            }
+        }
+        collect_closures_in_stmts(&hir.init, &mut seen, &mut closures);
+    }
+
     // Lower each user function into the module.
     for f in &hir.functions {
         compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes)
             .with_context(|| format!("lowering function '{}'", f.name))?;
+    }
+
+    // Lower each closure body as a top-level LLVM function.
+    for (func_id, closure_expr) in &closures {
+        compile_closure(
+            &mut llmod,
+            *func_id,
+            closure_expr,
+            &func_names,
+            &mut strings,
+            &class_table,
+            &method_names,
+            &module_globals,
+            &opts.import_function_prefixes,
+            &module_prefix,
+        )
+        .with_context(|| format!("lowering closure func_id={}", func_id))?;
     }
 
     // Lower each class method as `perry_method_<modprefix>__<class>__<name>(
@@ -354,6 +392,8 @@ fn compile_function(
         methods,
         module_globals,
         import_function_prefixes,
+        closure_captures: HashMap::new(),
+        current_closure_ptr: None,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -361,6 +401,105 @@ fn compile_function(
     // Defensive: a well-typed numeric function always returns via an
     // explicit `return`, but we emit `ret double 0.0` as a fallback so
     // the LLVM verifier doesn't reject a missing terminator.
+    if !ctx.block().is_terminated() {
+        ctx.block().ret(DOUBLE, "0.0");
+    }
+    Ok(())
+}
+
+/// Compile a closure body as a top-level LLVM function.
+///
+/// Signature: `double perry_closure_<modprefix>__<func_id>(i64 this_closure,
+/// double arg0, double arg1, …)`. The first parameter is the closure
+/// pointer (raw i64); the remaining params are the closure's own
+/// declared parameters.
+///
+/// Inside the body, captured variables (`closure.captures`) are mapped
+/// to capture indices and accessed via the runtime
+/// `js_closure_get/set_capture_f64(this_closure, idx)` calls. The
+/// `closure_captures` field on `FnCtx` carries the LocalId → capture
+/// index map; `current_closure_ptr` carries the closure pointer SSA
+/// value name.
+fn compile_closure(
+    llmod: &mut LlModule,
+    func_id: perry_types::FuncId,
+    closure_expr: &perry_hir::Expr,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    module_prefix: &str,
+) -> Result<()> {
+    // Destructure the closure expression. We trust that the caller
+    // passes only `Expr::Closure` here (from `collect_closures_*`).
+    let (params, body, captures) = match closure_expr {
+        perry_hir::Expr::Closure { params, body, captures, .. } => (params, body, captures),
+        _ => return Err(anyhow!("compile_closure: expected Expr::Closure")),
+    };
+
+    let llvm_name = format!("perry_closure_{}__{}", module_prefix, func_id);
+
+    // Param list: i64 this_closure, then each param as double.
+    let mut llvm_params: Vec<(LlvmType, String)> =
+        Vec::with_capacity(params.len() + 1);
+    llvm_params.push((I64, "%this_closure".to_string()));
+    for p in params {
+        llvm_params.push((DOUBLE, format!("%arg{}", p.id)));
+    }
+
+    let lf = llmod.define_function(&llvm_name, DOUBLE, llvm_params);
+    let _ = lf.create_block("entry");
+
+    // Allocate slots for the closure's own params (captures don't get
+    // alloca slots — they're accessed via the runtime).
+    let locals: HashMap<u32, String> = {
+        let blk = lf.block_mut(0).unwrap();
+        let mut map = HashMap::new();
+        for p in params {
+            let slot = blk.alloca(DOUBLE);
+            blk.store(DOUBLE, &format!("%arg{}", p.id), &slot);
+            map.insert(p.id, slot);
+        }
+        map
+    };
+
+    let local_types: HashMap<u32, perry_types::Type> = params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+
+    // Build the capture map: each captured LocalId gets the index it
+    // occupies in the closure's capture array (matching the order they
+    // were stored at the creation site).
+    let closure_captures: HashMap<u32, u32> = captures
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, i as u32))
+        .collect();
+
+    let mut ctx = FnCtx {
+        func: lf,
+        locals,
+        local_types,
+        current_block: 0,
+        func_names,
+        strings,
+        loop_targets: Vec::new(),
+        classes,
+        this_stack: Vec::new(),
+        class_stack: Vec::new(),
+        methods,
+        module_globals,
+        import_function_prefixes,
+        closure_captures,
+        current_closure_ptr: Some("%this_closure".to_string()),
+    };
+
+    stmt::lower_stmts(&mut ctx, body)
+        .with_context(|| format!("lowering closure body func_id={}", func_id))?;
+
     if !ctx.block().is_terminated() {
         ctx.block().ret(DOUBLE, "0.0");
     }
@@ -439,6 +578,8 @@ fn compile_method(
         methods,
         module_globals,
         import_function_prefixes,
+        closure_captures: HashMap::new(),
+        current_closure_ptr: None,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -518,6 +659,8 @@ fn compile_module_entry(
             methods,
             module_globals,
             import_function_prefixes,
+            closure_captures: HashMap::new(),
+            current_closure_ptr: None,
         };
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
@@ -553,6 +696,8 @@ fn compile_module_entry(
             methods,
             module_globals,
             import_function_prefixes,
+            closure_captures: HashMap::new(),
+            current_closure_ptr: None,
         };
         stmt::lower_stmts(&mut ctx, &hir.init)
             .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;
@@ -602,6 +747,132 @@ fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool, module_prefix: &
     }
 
     blk.ret_void();
+}
+
+/// Walk for `Expr::Closure` instances and collect each one along with
+/// its `func_id` so the codegen can emit the body as a top-level
+/// function. Each closure expression is captured by clone (it's the
+/// load-bearing data; the rest of the function context lives in
+/// `compile_closure`).
+fn collect_closures_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    seen: &mut std::collections::HashSet<perry_types::FuncId>,
+    out: &mut Vec<(perry_types::FuncId, perry_hir::Expr)>,
+) {
+    for s in stmts {
+        match s {
+            perry_hir::Stmt::Expr(e) | perry_hir::Stmt::Throw(e) => {
+                collect_closures_in_expr(e, seen, out);
+            }
+            perry_hir::Stmt::Return(opt) => {
+                if let Some(e) = opt {
+                    collect_closures_in_expr(e, seen, out);
+                }
+            }
+            perry_hir::Stmt::Let { init, .. } => {
+                if let Some(e) = init {
+                    collect_closures_in_expr(e, seen, out);
+                }
+            }
+            perry_hir::Stmt::If { condition, then_branch, else_branch } => {
+                collect_closures_in_expr(condition, seen, out);
+                collect_closures_in_stmts(then_branch, seen, out);
+                if let Some(eb) = else_branch {
+                    collect_closures_in_stmts(eb, seen, out);
+                }
+            }
+            perry_hir::Stmt::While { condition, body } => {
+                collect_closures_in_expr(condition, seen, out);
+                collect_closures_in_stmts(body, seen, out);
+            }
+            perry_hir::Stmt::DoWhile { body, condition } => {
+                collect_closures_in_stmts(body, seen, out);
+                collect_closures_in_expr(condition, seen, out);
+            }
+            perry_hir::Stmt::For { init, condition, update, body } => {
+                if let Some(init_stmt) = init {
+                    collect_closures_in_stmts(std::slice::from_ref(init_stmt), seen, out);
+                }
+                if let Some(cond) = condition {
+                    collect_closures_in_expr(cond, seen, out);
+                }
+                if let Some(upd) = update {
+                    collect_closures_in_expr(upd, seen, out);
+                }
+                collect_closures_in_stmts(body, seen, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_closures_in_expr(
+    e: &perry_hir::Expr,
+    seen: &mut std::collections::HashSet<perry_types::FuncId>,
+    out: &mut Vec<(perry_types::FuncId, perry_hir::Expr)>,
+) {
+    use perry_hir::Expr;
+    match e {
+        Expr::Closure { func_id, body, .. } => {
+            if seen.insert(*func_id) {
+                out.push((*func_id, e.clone()));
+            }
+            // Recurse into the closure body so nested closures are
+            // collected too.
+            collect_closures_in_stmts(body, seen, out);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            collect_closures_in_expr(left, seen, out);
+            collect_closures_in_expr(right, seen, out);
+        }
+        Expr::Unary { operand, .. } | Expr::Void(operand) | Expr::TypeOf(operand) => {
+            collect_closures_in_expr(operand, seen, out);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_closures_in_expr(condition, seen, out);
+            collect_closures_in_expr(then_expr, seen, out);
+            collect_closures_in_expr(else_expr, seen, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_closures_in_expr(callee, seen, out);
+            for a in args {
+                collect_closures_in_expr(a, seen, out);
+            }
+        }
+        Expr::PropertyGet { object, .. } => collect_closures_in_expr(object, seen, out),
+        Expr::PropertySet { object, value, .. } => {
+            collect_closures_in_expr(object, seen, out);
+            collect_closures_in_expr(value, seen, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_closures_in_expr(object, seen, out);
+            collect_closures_in_expr(index, seen, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_closures_in_expr(object, seen, out);
+            collect_closures_in_expr(index, seen, out);
+            collect_closures_in_expr(value, seen, out);
+        }
+        Expr::LocalSet(_, value) => collect_closures_in_expr(value, seen, out),
+        Expr::Array(elements) => {
+            for el in elements {
+                collect_closures_in_expr(el, seen, out);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_closures_in_expr(v, seen, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_closures_in_expr(a, seen, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Walk a sequence of statements and collect every Call to an

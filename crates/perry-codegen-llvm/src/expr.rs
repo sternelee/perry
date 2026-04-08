@@ -16,7 +16,7 @@ use crate::block::LlBlock;
 use crate::function::LlFunction;
 use crate::nanbox::{double_literal, POINTER_MASK_I64, POINTER_TAG_I64, STRING_TAG_I64};
 use crate::strings::StringPool;
-use crate::types::{DOUBLE, I1, I32, I64};
+use crate::types::{DOUBLE, I1, I32, I64, PTR};
 
 /// Inline NaN-box of a raw heap pointer with `POINTER_TAG`.
 ///
@@ -102,6 +102,16 @@ pub(crate) struct FnCtx<'a> {
     /// `ExternFuncRef` lowering in `lower_call` to generate scoped
     /// cross-module calls.
     pub import_function_prefixes: &'a std::collections::HashMap<String, String>,
+    /// Closure capture map: when lowering inside a closure body, this
+    /// holds `LocalId → capture_index`. `LocalGet`/`LocalSet`/`Update`
+    /// of an id in this map routes through the runtime
+    /// `js_closure_get/set_capture_f64(this_closure, idx)` calls
+    /// instead of an alloca slot.
+    pub closure_captures: std::collections::HashMap<u32, u32>,
+    /// Inside a closure body, the LLVM SSA value name for the current
+    /// closure pointer (`%this_closure`). `Expr::LocalGet` of a captured
+    /// id uses this as the first arg to `js_closure_get_capture_f64`.
+    pub current_closure_ptr: Option<String>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -186,12 +196,28 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- Variables --------
-        // LocalGet checks function-local alloca slots first, then falls
-        // back to module-level globals. This lets functions read
-        // module-scope `let` variables (the ones in `hir.init` at the
-        // top level).
+        // LocalGet lookup order:
+        //   1. Closure captures (when lowering inside a closure body) →
+        //      runtime js_closure_get_capture_f64(this_closure, idx)
+        //   2. Function-local alloca slots
+        //   3. Module-level globals
+        //
+        // This lets closures read captured outer variables, regular
+        // functions read their own params/lets, and any function read
+        // module-scope `let`s (the ones in `hir.init` at top level).
         Expr::LocalGet(id) => {
-            if let Some(slot) = ctx.locals.get(id).cloned() {
+            if let Some(&capture_idx) = ctx.closure_captures.get(id) {
+                let closure_ptr = ctx
+                    .current_closure_ptr
+                    .clone()
+                    .ok_or_else(|| anyhow!("captured local but no current_closure_ptr"))?;
+                let idx_str = capture_idx.to_string();
+                Ok(ctx.block().call(
+                    DOUBLE,
+                    "js_closure_get_capture_f64",
+                    &[(I64, &closure_ptr), (I32, &idx_str)],
+                ))
+            } else if let Some(slot) = ctx.locals.get(id).cloned() {
                 Ok(ctx.block().load(DOUBLE, &slot))
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
                 let g_ref = format!("@{}", global_name);
@@ -224,8 +250,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             }
             let v = lower_expr(ctx, value)?;
-            // Locals first, then module globals.
-            if let Some(slot) = ctx.locals.get(id).cloned() {
+            // Closure captures first (write through the runtime), then
+            // locals, then module globals.
+            if let Some(&capture_idx) = ctx.closure_captures.get(id) {
+                let closure_ptr = ctx
+                    .current_closure_ptr
+                    .clone()
+                    .ok_or_else(|| anyhow!("captured local set but no current_closure_ptr"))?;
+                let idx_str = capture_idx.to_string();
+                ctx.block().call_void(
+                    "js_closure_set_capture_f64",
+                    &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &v)],
+                );
+            } else if let Some(slot) = ctx.locals.get(id).cloned() {
                 ctx.block().store(DOUBLE, &v, &slot);
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
                 let g_ref = format!("@{}", global_name);
@@ -237,8 +274,32 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // `i++` / `++i` / `i--` / `--i`. Postfix returns the OLD value,
-        // prefix returns the NEW value. Locals first, then module globals.
+        // prefix returns the NEW value. Closure captures, locals, then
+        // module globals.
         Expr::Update { id, op, prefix } => {
+            // Closure capture path: runtime get + add/sub + runtime set.
+            if let Some(&capture_idx) = ctx.closure_captures.get(id) {
+                let closure_ptr = ctx
+                    .current_closure_ptr
+                    .clone()
+                    .ok_or_else(|| anyhow!("captured local update but no current_closure_ptr"))?;
+                let idx_str = capture_idx.to_string();
+                let old = ctx.block().call(
+                    DOUBLE,
+                    "js_closure_get_capture_f64",
+                    &[(I64, &closure_ptr), (I32, &idx_str)],
+                );
+                let blk = ctx.block();
+                let new = match op {
+                    UpdateOp::Increment => blk.fadd(&old, "1.0"),
+                    UpdateOp::Decrement => blk.fsub(&old, "1.0"),
+                };
+                blk.call_void(
+                    "js_closure_set_capture_f64",
+                    &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &new)],
+                );
+                return Ok(if *prefix { new } else { old });
+            }
             let storage = if let Some(slot) = ctx.locals.get(id).cloned() {
                 slot
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
@@ -580,6 +641,78 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(new_box)
         }
 
+        // -------- Closures (Phase D.1) --------
+        // `function() { ... }` / `(x) => { ... }` — allocate a closure
+        // object pointing at a pre-emitted function body, populate
+        // capture slots, return the NaN-boxed pointer.
+        //
+        // The closure body is emitted as a top-level LLVM function
+        // (`perry_closure_<modprefix>__<func_id>`) earlier in
+        // `compile_module` via the `compile_closure` pass.
+        Expr::Closure {
+            func_id,
+            captures,
+            mutable_captures,
+            captures_this,
+            is_async,
+            ..
+        } => {
+            if *captures_this {
+                bail!("perry-codegen-llvm Phase D.1: arrow-function `this` capture not yet supported");
+            }
+            if *is_async {
+                bail!("perry-codegen-llvm Phase D.1: async closures not yet supported");
+            }
+            // mutable_captures uses the same get/set runtime path —
+            // they work as long as the outer scope doesn't also access
+            // the captured variable after the closure is created.
+            let _ = mutable_captures;
+
+            // Lower each captured value from the OUTER scope (this is
+            // an outer-scope access, NOT a closure capture access — at
+            // closure creation we're still outside the closure body).
+            // Each capture's value gets stored into the closure's slot
+            // via js_closure_set_capture_f64.
+            let mut captured_values: Vec<String> = Vec::with_capacity(captures.len());
+            for cap_id in captures {
+                let v = lower_expr(ctx, &Expr::LocalGet(*cap_id))?;
+                captured_values.push(v);
+            }
+
+            // Compute the closure function name BEFORE taking the
+            // mutable block borrow — `ctx.strings.module_prefix()` is
+            // an immutable borrow on ctx.strings, but `ctx.block()` is
+            // a mutable borrow on ctx.func; the borrow checker treats
+            // them as overlapping borrows on `*ctx`.
+            let func_name = format!(
+                "perry_closure_{}__{}",
+                ctx.strings.module_prefix(),
+                func_id
+            );
+
+            let blk = ctx.block();
+            // js_closure_alloc(func_ptr, capture_count) → i64
+            // The function pointer is the address of the closure body,
+            // which we emit as `perry_closure_<modprefix>__<func_id>`.
+            let func_ref = format!("@{}", func_name);
+            let cap_count = captures.len().to_string();
+            let closure_handle = blk.call(
+                I64,
+                "js_closure_alloc",
+                &[(PTR, &func_ref), (I32, &cap_count)],
+            );
+            // Set each capture slot.
+            for (idx, val) in captured_values.iter().enumerate() {
+                let idx_str = idx.to_string();
+                blk.call_void(
+                    "js_closure_set_capture_f64",
+                    &[(I64, &closure_handle), (I32, &idx_str), (DOUBLE, val)],
+                );
+            }
+            // NaN-box the closure pointer with POINTER_TAG.
+            Ok(nanbox_pointer_inline(blk, &closure_handle))
+        }
+
         // -------- Classes (Phase C.1) --------
         // `new ClassName(args...)` — allocate an anonymous object,
         // inline-execute the constructor body with `this` bound to the
@@ -736,6 +869,36 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 /// 2. `console.log(expr)` where `expr` lowers to a double — emits a
 ///    `js_console_log_number` call and returns `0.0` as the statement value.
 fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<String> {
+    // Closure-typed local call: `counter()` where `counter` is a
+    // local of `Type::Function(...)`. Dispatch through the runtime
+    // `js_closure_call<N>` family — the runtime extracts the function
+    // pointer from the closure header and invokes it with the closure
+    // as the first arg followed by the user args.
+    if let Expr::LocalGet(id) = callee {
+        if matches!(ctx.local_types.get(id), Some(HirType::Function(_))) {
+            let recv_box = lower_expr(ctx, callee)?;
+            let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                lowered_args.push(lower_expr(ctx, a)?);
+            }
+            if args.len() > 5 {
+                bail!(
+                    "perry-codegen-llvm Phase D.1: closure call with {} args (max 5)",
+                    args.len()
+                );
+            }
+            let blk = ctx.block();
+            let closure_handle = unbox_to_i64(blk, &recv_box);
+            let runtime_fn = format!("js_closure_call{}", args.len());
+            let mut call_args: Vec<(crate::types::LlvmType, &str)> =
+                vec![(I64, &closure_handle)];
+            for v in &lowered_args {
+                call_args.push((DOUBLE, v.as_str()));
+            }
+            return Ok(blk.call(DOUBLE, &runtime_fn, &call_args));
+        }
+    }
+
     // User function call via FuncRef.
     if let Expr::FuncRef(fid) = callee {
         let fname = ctx
@@ -850,9 +1013,35 @@ fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> Result<Strin
         }
     }
 
+    // Fallthrough: assume the callee evaluates to a closure value at
+    // runtime and dispatch through `js_closure_call<N>`. This catches:
+    //   - LocalGet of an `: any`-typed local that the static check missed
+    //   - Nested calls like `curry(1)(2)(3)` where the callee is itself
+    //     a Call returning a function
+    //   - PropertyGet on a class instance whose property is a closure
+    //
+    // The runtime checks the closure header on its own — if the value
+    // isn't actually a closure, js_closure_call<N> handles the error.
+    if args.len() <= 5 {
+        let recv_box = lower_expr(ctx, callee)?;
+        let mut lowered_args: Vec<String> = Vec::with_capacity(args.len());
+        for a in args {
+            lowered_args.push(lower_expr(ctx, a)?);
+        }
+        let blk = ctx.block();
+        let closure_handle = unbox_to_i64(blk, &recv_box);
+        let runtime_fn = format!("js_closure_call{}", args.len());
+        let mut call_args: Vec<(crate::types::LlvmType, &str)> = vec![(I64, &closure_handle)];
+        for v in &lowered_args {
+            call_args.push((DOUBLE, v.as_str()));
+        }
+        return Ok(blk.call(DOUBLE, &runtime_fn, &call_args));
+    }
+
     bail!(
-        "perry-codegen-llvm Phase 2: Call callee shape not supported ({})",
-        variant_name(callee)
+        "perry-codegen-llvm: Call callee shape not supported ({}) with {} args",
+        variant_name(callee),
+        args.len()
     )
 }
 

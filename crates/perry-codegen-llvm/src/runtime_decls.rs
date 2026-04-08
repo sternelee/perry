@@ -120,6 +120,27 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_string_starts_with", I32, &[I64, I64]);
     module.declare_function("js_string_ends_with", I32, &[I64, I64]);
 
+    // Closure / function-as-value primitives (Phase D).
+    //
+    // - js_closure_alloc(func_ptr, capture_count) -> *mut ClosureHeader
+    //     Allocates a closure object pointing at the given function with
+    //     space for `capture_count` captured-value slots.
+    // - js_closure_set/get_capture_f64(closure, idx, value)
+    //     Read/write a captured value (NaN-boxed double) at slot `idx`.
+    // - js_closure_call0..call5(closure, args…) -> double
+    //     Invoke the closure with N args. The runtime extracts the
+    //     function pointer from the closure header and calls it with
+    //     the closure as the first argument followed by the user args.
+    module.declare_function("js_closure_alloc", I64, &[PTR, I32]);
+    module.declare_function("js_closure_set_capture_f64", VOID, &[I64, I32, DOUBLE]);
+    module.declare_function("js_closure_get_capture_f64", DOUBLE, &[I64, I32]);
+    module.declare_function("js_closure_call0", DOUBLE, &[I64]);
+    module.declare_function("js_closure_call1", DOUBLE, &[I64, DOUBLE]);
+    module.declare_function("js_closure_call2", DOUBLE, &[I64, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call3", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call4", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+    module.declare_function("js_closure_call5", DOUBLE, &[I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE]);
+
     declare_phase_b_arrays(module);
 }
 
