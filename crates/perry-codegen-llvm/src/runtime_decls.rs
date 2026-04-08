@@ -187,6 +187,9 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_object_get_class_id", I32, &[I64]);
     module.declare_function("js_object_alloc_with_parent", I64, &[I32, I32, I32]);
     module.declare_function("js_object_delete_field", I32, &[I64, I64]);
+    // js_eq takes JSValue (#[repr(transparent)] u64) for both
+    // params + return — i64 in the ABI, not double.
+    module.declare_function("js_eq", I64, &[I64, I64]);
     module.declare_function("js_array_indexOf_f64", I32, &[I64, DOUBLE]);
     module.declare_function("js_array_includes_f64", I32, &[I64, DOUBLE]);
     module.declare_function("js_map_size", I32, &[I64]);

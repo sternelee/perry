@@ -604,6 +604,47 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 );
                 return Ok(blk.bitcast_i64_to_double(&tagged));
             }
+            // Generic equality fallback: when neither operand is
+            // statically numeric, dispatch through js_eq which
+            // handles strings, booleans, objects, null, undefined
+            // via NaN-tag inspection. Used by `eq` helpers in tests
+            // that take `any` and pass NaN-tagged values.
+            let either_non_numeric = !is_numeric_expr(ctx, left) && !is_numeric_expr(ctx, right);
+            let only_eq = matches!(op, CompareOp::Eq | CompareOp::LooseEq | CompareOp::Ne | CompareOp::LooseNe);
+            // We still let the more specific paths below win for
+            // statically-typed string/bool operands; this fallback
+            // only handles the truly-Any case.
+            let unknown_l = !is_numeric_expr(ctx, left)
+                && !is_string_expr(ctx, left)
+                && !is_bool_expr(ctx, left);
+            let unknown_r = !is_numeric_expr(ctx, right)
+                && !is_string_expr(ctx, right)
+                && !is_bool_expr(ctx, right);
+            if either_non_numeric && only_eq && unknown_l && unknown_r {
+                let l = lower_expr(ctx, left)?;
+                let r = lower_expr(ctx, right)?;
+                let blk = ctx.block();
+                // js_eq has u64 ABI for both args + return (JSValue
+                // is #[repr(transparent)] u64). Bitcast both ways.
+                let l_bits = blk.bitcast_double_to_i64(&l);
+                let r_bits = blk.bitcast_double_to_i64(&r);
+                let result_bits = blk.call(I64, "js_eq", &[(I64, &l_bits), (I64, &r_bits)]);
+                let result = blk.bitcast_i64_to_double(&result_bits);
+                if matches!(op, CompareOp::Ne | CompareOp::LooseNe) {
+                    let cmp = blk.icmp_eq(I64, &result_bits, crate::nanbox::TAG_TRUE_I64);
+                    let inv = blk.xor(crate::types::I1, &cmp, "true");
+                    let tagged = blk.select(
+                        crate::types::I1,
+                        &inv,
+                        I64,
+                        crate::nanbox::TAG_TRUE_I64,
+                        crate::nanbox::TAG_FALSE_I64,
+                    );
+                    return Ok(blk.bitcast_i64_to_double(&tagged));
+                }
+                return Ok(result);
+            }
+
             // String equality fast path: fcmp doesn't work on
             // NaN-tagged string pointers (NaN comparisons are
             // unordered → always false). When both operands are
