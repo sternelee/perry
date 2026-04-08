@@ -5441,6 +5441,159 @@ impl Compiler {
         }
 
         // ========================================================================
+        // Web Fetch API: Headers / Response / Request
+        // ========================================================================
+
+        // js_headers_new() -> f64 (handle as numeric f64)
+        {
+            let mut sig = self.module.make_signature();
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_headers_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_headers_new"), func_id);
+        }
+        // js_headers_set(handle: f64, key: i64 StringHeader*, value: i64 StringHeader*) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_headers_set", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_headers_set"), func_id);
+        }
+        // js_headers_get(handle: f64, key: i64) -> i64 StringHeader* (nullable)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_headers_get", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_headers_get"), func_id);
+        }
+        // js_headers_has(handle: f64, key: i64) -> f64 (NaN-boxed bool)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_headers_has", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_headers_has"), func_id);
+        }
+        // js_headers_delete(handle: f64, key: i64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_headers_delete", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_headers_delete"), func_id);
+        }
+        // js_headers_for_each(handle: f64, callback: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_headers_for_each", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_headers_for_each"), func_id);
+        }
+        // js_response_new(body: i64, status: f64, status_text: i64, headers_handle: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_response_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_response_new"), func_id);
+        }
+        // js_response_get_headers(handle: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_response_get_headers", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_response_get_headers"), func_id);
+        }
+        // js_response_clone(handle: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_response_clone", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_response_clone"), func_id);
+        }
+        // js_response_array_buffer(handle: f64) -> i64 (Promise ptr)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_response_array_buffer", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_response_array_buffer"), func_id);
+        }
+        // js_response_blob(handle: f64) -> i64 (Promise ptr)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_response_blob", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_response_blob"), func_id);
+        }
+        // js_response_static_json(value: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_response_static_json", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_response_static_json"), func_id);
+        }
+        // js_response_static_redirect(url: i64, status: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_response_static_redirect", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_response_static_redirect"), func_id);
+        }
+        // js_request_new(url: i64, method: i64, body: i64, headers: f64) -> f64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_request_new", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_request_new"), func_id);
+        }
+        // js_request_get_url(handle: f64) -> i64 (StringHeader ptr)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_request_get_url", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_request_get_url"), func_id);
+        }
+        // js_request_get_method(handle: f64) -> i64
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::I64));
+            let func_id = self.module.declare_function("js_request_get_method", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_request_get_method"), func_id);
+        }
+        // js_request_get_body(handle: f64) -> f64 (NaN-boxed string or null)
+        {
+            let mut sig = self.module.make_signature();
+            sig.params.push(AbiParam::new(types::F64));
+            sig.returns.push(AbiParam::new(types::F64));
+            let func_id = self.module.declare_function("js_request_get_body", Linkage::Import, &sig)?;
+            self.extern_funcs.insert(Cow::Borrowed("js_request_get_body"), func_id);
+        }
+
+        // ========================================================================
         // HTTP/HTTPS Client Functions (http, https)
         // ========================================================================
 

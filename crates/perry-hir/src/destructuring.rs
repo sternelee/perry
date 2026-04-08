@@ -1291,6 +1291,69 @@ pub(crate) fn lower_var_decl_with_destructuring(
                         ctx.register_native_instance(name.clone(), module.to_string(), "Response".to_string());
                     }
                 }
+
+                // Web Fetch API: new Response(...) / new Headers(...) / new Request(...)
+                // Also handle Response.json(...) and Response.redirect(...) static factories.
+                if let ast::Expr::New(new_expr) = init_expr.as_ref() {
+                    if let ast::Expr::Ident(class_ident) = new_expr.callee.as_ref() {
+                        match class_ident.sym.as_ref() {
+                            "Response" => {
+                                ctx.register_native_instance(name.clone(), "fetch".to_string(), "Response".to_string());
+                                ctx.uses_fetch = true;
+                            }
+                            "Headers" => {
+                                ctx.register_native_instance(name.clone(), "Headers".to_string(), "Headers".to_string());
+                                ctx.uses_fetch = true;
+                            }
+                            "Request" => {
+                                ctx.register_native_instance(name.clone(), "Request".to_string(), "Request".to_string());
+                                ctx.uses_fetch = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Response.json(...) / Response.redirect(...) static factories
+                if let ast::Expr::Call(call_expr) = init_expr.as_ref() {
+                    if let ast::Callee::Expr(callee) = &call_expr.callee {
+                        if let ast::Expr::Member(member) = callee.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                if obj_ident.sym.as_ref() == "Response" {
+                                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                                        match prop_ident.sym.as_ref() {
+                                            "json" | "redirect" | "error" => {
+                                                ctx.register_native_instance(name.clone(), "fetch".to_string(), "Response".to_string());
+                                                ctx.uses_fetch = true;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Response.clone() — for: const r5clone = r5.clone();
+                // The result is a new Response. Detect by checking if the receiver is already
+                // a fetch::Response native instance.
+                if let ast::Expr::Call(call_expr) = init_expr.as_ref() {
+                    if let ast::Callee::Expr(callee) = &call_expr.callee {
+                        if let ast::Expr::Member(member) = callee.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                                    if prop_ident.sym.as_ref() == "clone" {
+                                        if let Some((m, c)) = ctx.lookup_native_instance(obj_ident.sym.as_ref()) {
+                                            if c == "Response" {
+                                                let m = m.to_string();
+                                                ctx.register_native_instance(name.clone(), m, "Response".to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Check if calling a function whose return type is a native module type

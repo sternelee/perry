@@ -11647,6 +11647,121 @@ pub(crate) fn compile_expr(
                         }
                     }
 
+                    // ========================================================
+                    // Web Fetch chained calls: r.headers.get/set/has/forEach
+                    // The inner NativeMethodCall returns a Headers handle (f64);
+                    // we route the outer .get(...) etc through the Headers FFI.
+                    // Same for Response chained calls: r.clone().text(), etc.
+                    // ========================================================
+                    if let Expr::NativeMethodCall { module: chain_mod, method: chain_method, .. } = object.as_ref() {
+                        // r2.headers.get/set/has/forEach — chain_mod="fetch", chain_method="headers"
+                        let inner_returns_headers = chain_mod == "fetch" && chain_method == "headers";
+                        // h.X where h itself is from new Headers() (not chained)
+                        // — handled by the regular ("Headers", true, X) dispatch in the main match
+                        if inner_returns_headers && matches!(property.as_str(), "get" | "set" | "has" | "delete" | "forEach") {
+                            // Compile inner: returns f64 Headers handle
+                            let h_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let h_f64 = ensure_f64(builder, h_val);
+
+                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+
+                            // Compile args
+                            let arg_vals: Vec<Value> = args.iter()
+                                .map(|a| compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, a, this_ctx))
+                                .collect::<Result<_>>()?;
+
+                            match property.as_str() {
+                                "get" => {
+                                    let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                                    let key_ptr = builder.inst_results(kcall)[0];
+                                    let f = extern_funcs.get("js_headers_get").ok_or_else(|| anyhow!("js_headers_get not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_f64, key_ptr]);
+                                    let str_ptr = builder.inst_results(call)[0];
+                                    return Ok(inline_nanbox_string(builder, str_ptr));
+                                }
+                                "set" => {
+                                    let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let val_f64 = ensure_f64(builder, arg_vals[1]);
+                                    let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                                    let key_ptr = builder.inst_results(kcall)[0];
+                                    let vcall = builder.ins().call(get_str_ref, &[val_f64]);
+                                    let val_ptr = builder.inst_results(vcall)[0];
+                                    let f = extern_funcs.get("js_headers_set").ok_or_else(|| anyhow!("js_headers_set not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_f64, key_ptr, val_ptr]);
+                                    return Ok(builder.inst_results(call)[0]);
+                                }
+                                "has" => {
+                                    let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                                    let key_ptr = builder.inst_results(kcall)[0];
+                                    let f = extern_funcs.get("js_headers_has").ok_or_else(|| anyhow!("js_headers_has not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_f64, key_ptr]);
+                                    return Ok(builder.inst_results(call)[0]);
+                                }
+                                "delete" => {
+                                    let key_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                                    let key_ptr = builder.inst_results(kcall)[0];
+                                    let f = extern_funcs.get("js_headers_delete").ok_or_else(|| anyhow!("js_headers_delete not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_f64, key_ptr]);
+                                    return Ok(builder.inst_results(call)[0]);
+                                }
+                                "forEach" => {
+                                    let cb_f64 = ensure_f64(builder, arg_vals[0]);
+                                    let f = extern_funcs.get("js_headers_for_each").ok_or_else(|| anyhow!("js_headers_for_each not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_f64, cb_f64]);
+                                    return Ok(builder.inst_results(call)[0]);
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Response.clone().text() / Response.clone().status etc — chain_mod="fetch", chain_method="clone"
+                        if chain_mod == "fetch" && chain_method == "clone" && matches!(property.as_str(), "text" | "json" | "status" | "ok" | "statusText") {
+                            // Compile inner: returns f64 numeric handle
+                            let h_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object, this_ctx)?;
+                            let h_f64 = ensure_f64(builder, h_val);
+                            let h_i64 = builder.ins().fcvt_to_sint_sat(types::I64, h_f64);
+                            match property.as_str() {
+                                "text" => {
+                                    let f = extern_funcs.get("js_fetch_response_text").ok_or_else(|| anyhow!("js_fetch_response_text not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_i64]);
+                                    let promise_ptr = builder.inst_results(call)[0];
+                                    return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                                }
+                                "json" => {
+                                    let f = extern_funcs.get("js_fetch_response_json").ok_or_else(|| anyhow!("js_fetch_response_json not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_i64]);
+                                    let promise_ptr = builder.inst_results(call)[0];
+                                    return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                                }
+                                "status" => {
+                                    let f = extern_funcs.get("js_fetch_response_status").ok_or_else(|| anyhow!("js_fetch_response_status not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_i64]);
+                                    return Ok(builder.inst_results(call)[0]);
+                                }
+                                "statusText" => {
+                                    let f = extern_funcs.get("js_fetch_response_status_text").ok_or_else(|| anyhow!("js_fetch_response_status_text not declared"))?;
+                                    let fr = module.declare_func_in_func(*f, builder.func);
+                                    let call = builder.ins().call(fr, &[h_i64]);
+                                    let str_ptr = builder.inst_results(call)[0];
+                                    return Ok(inline_nanbox_string(builder, str_ptr));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
                     // Handle method chaining on NativeMethodCall results
                     // e.g., cmd.name("app").description("desc").parse()
                     if let Expr::NativeMethodCall { module: native_module, method: native_method, .. } = object.as_ref() {
@@ -15002,6 +15117,201 @@ pub(crate) fn compile_expr(
                 let call = builder.ins().call(func_ref, &[pattern_val, flags_val]);
                 let regexp_ptr = builder.inst_results(call)[0];
                 return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), regexp_ptr));
+            }
+
+            // ============================================================
+            // Web Fetch API: new Headers() / new Response(...) / new Request(...)
+            // ============================================================
+            if class_name == "Headers" && !classes.contains_key("Headers") {
+                let new_func = extern_funcs.get("js_headers_new")
+                    .ok_or_else(|| anyhow!("js_headers_new not declared"))?;
+                let func_ref = module.declare_func_in_func(*new_func, builder.func);
+                let call = builder.ins().call(func_ref, &[]);
+                // Returns f64 numeric handle
+                return Ok(builder.inst_results(call)[0]);
+            }
+
+            if class_name == "Response" && !classes.contains_key("Response") {
+                // new Response(body?, init?)
+                // body is a string (or undefined → ""); init is { status?, statusText?, headers? }
+                let new_func = extern_funcs.get("js_response_new")
+                    .ok_or_else(|| anyhow!("js_response_new not declared"))?;
+                let func_ref = module.declare_func_in_func(*new_func, builder.func);
+
+                // Body string pointer
+                let body_ptr = if !args.is_empty() {
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                    let val_f64 = ensure_f64(builder, val);
+                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                    let call = builder.ins().call(get_str_ref, &[val_f64]);
+                    builder.inst_results(call)[0]
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                };
+
+                // Parse init options if provided
+                let mut status_val = builder.ins().f64const(200.0);
+                let mut status_text_ptr = builder.ins().iconst(types::I64, 0);
+                let mut headers_handle = builder.ins().f64const(0.0);
+                if args.len() >= 2 {
+                    if let Expr::Object(props) = &args[1] {
+                        for (key, val_expr) in props {
+                            match key.as_str() {
+                                "status" => {
+                                    let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val_expr, this_ctx)?;
+                                    status_val = ensure_f64(builder, v);
+                                }
+                                "statusText" => {
+                                    let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val_expr, this_ctx)?;
+                                    let v_f64 = ensure_f64(builder, v);
+                                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                    let call = builder.ins().call(get_str_ref, &[v_f64]);
+                                    status_text_ptr = builder.inst_results(call)[0];
+                                }
+                                "headers" => {
+                                    // headers can be: a Headers handle (number), an object literal, or an array of pairs
+                                    // For inline object literals we need to build a Headers handle.
+                                    if let Expr::Object(hprops) = val_expr {
+                                        // Build Headers via js_headers_new + repeated js_headers_set
+                                        let new_headers_func = extern_funcs.get("js_headers_new")
+                                            .ok_or_else(|| anyhow!("js_headers_new not declared"))?;
+                                        let new_headers_ref = module.declare_func_in_func(*new_headers_func, builder.func);
+                                        let nh_call = builder.ins().call(new_headers_ref, &[]);
+                                        let h_handle = builder.inst_results(nh_call)[0]; // f64
+
+                                        let set_func = extern_funcs.get("js_headers_set")
+                                            .ok_or_else(|| anyhow!("js_headers_set not declared"))?;
+                                        let set_ref = module.declare_func_in_func(*set_func, builder.func);
+
+                                        for (hkey, hval_expr) in hprops {
+                                            // Compile key as a String literal expression, then extract its raw pointer.
+                                            let key_expr = Expr::String(hkey.clone());
+                                            let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &key_expr, this_ctx)?;
+                                            let key_f64 = ensure_f64(builder, key_val);
+                                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                            let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                                            let key_str_ptr = builder.inst_results(kcall)[0];
+
+                                            // Compile value, extract string ptr
+                                            let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, hval_expr, this_ctx)?;
+                                            let v_f64 = ensure_f64(builder, v);
+                                            let get_str_ref2 = module.declare_func_in_func(*get_str_func, builder.func);
+                                            let vcall = builder.ins().call(get_str_ref2, &[v_f64]);
+                                            let val_str_ptr = builder.inst_results(vcall)[0];
+
+                                            builder.ins().call(set_ref, &[h_handle, key_str_ptr, val_str_ptr]);
+                                        }
+                                        headers_handle = h_handle;
+                                    } else {
+                                        // Treat as Headers handle (numeric)
+                                        let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val_expr, this_ctx)?;
+                                        headers_handle = ensure_f64(builder, v);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                let call = builder.ins().call(func_ref, &[body_ptr, status_val, status_text_ptr, headers_handle]);
+                return Ok(builder.inst_results(call)[0]);
+            }
+
+            if class_name == "Request" && !classes.contains_key("Request") {
+                // new Request(url, init?)
+                let new_func = extern_funcs.get("js_request_new")
+                    .ok_or_else(|| anyhow!("js_request_new not declared"))?;
+                let func_ref = module.declare_func_in_func(*new_func, builder.func);
+
+                // URL string ptr
+                let url_ptr = if !args.is_empty() {
+                    let val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &args[0], this_ctx)?;
+                    let val_f64 = ensure_f64(builder, val);
+                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                    let call = builder.ins().call(get_str_ref, &[val_f64]);
+                    builder.inst_results(call)[0]
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                };
+
+                let mut method_ptr = builder.ins().iconst(types::I64, 0);
+                let mut body_ptr_v = builder.ins().iconst(types::I64, 0);
+                let mut headers_handle = builder.ins().f64const(0.0);
+                if args.len() >= 2 {
+                    if let Expr::Object(props) = &args[1] {
+                        for (key, val_expr) in props {
+                            match key.as_str() {
+                                "method" => {
+                                    let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val_expr, this_ctx)?;
+                                    let v_f64 = ensure_f64(builder, v);
+                                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                    let call = builder.ins().call(get_str_ref, &[v_f64]);
+                                    method_ptr = builder.inst_results(call)[0];
+                                }
+                                "body" => {
+                                    let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val_expr, this_ctx)?;
+                                    let v_f64 = ensure_f64(builder, v);
+                                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                    let call = builder.ins().call(get_str_ref, &[v_f64]);
+                                    body_ptr_v = builder.inst_results(call)[0];
+                                }
+                                "headers" => {
+                                    if let Expr::Object(hprops) = val_expr {
+                                        let new_headers_func = extern_funcs.get("js_headers_new")
+                                            .ok_or_else(|| anyhow!("js_headers_new not declared"))?;
+                                        let new_headers_ref = module.declare_func_in_func(*new_headers_func, builder.func);
+                                        let nh_call = builder.ins().call(new_headers_ref, &[]);
+                                        let h_handle = builder.inst_results(nh_call)[0];
+
+                                        let set_func = extern_funcs.get("js_headers_set")
+                                            .ok_or_else(|| anyhow!("js_headers_set not declared"))?;
+                                        let set_ref = module.declare_func_in_func(*set_func, builder.func);
+
+                                        for (hkey, hval_expr) in hprops {
+                                            let key_expr = Expr::String(hkey.clone());
+                                            let key_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, &key_expr, this_ctx)?;
+                                            let key_f64 = ensure_f64(builder, key_val);
+                                            let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                                                .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                                            let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                                            let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                                            let key_str_ptr = builder.inst_results(kcall)[0];
+
+                                            let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, hval_expr, this_ctx)?;
+                                            let v_f64 = ensure_f64(builder, v);
+                                            let get_str_ref2 = module.declare_func_in_func(*get_str_func, builder.func);
+                                            let vcall = builder.ins().call(get_str_ref2, &[v_f64]);
+                                            let val_str_ptr = builder.inst_results(vcall)[0];
+
+                                            builder.ins().call(set_ref, &[h_handle, key_str_ptr, val_str_ptr]);
+                                        }
+                                        headers_handle = h_handle;
+                                    } else {
+                                        let v = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, val_expr, this_ctx)?;
+                                        headers_handle = ensure_f64(builder, v);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                let call = builder.ins().call(func_ref, &[url_ptr, method_ptr, body_ptr_v, headers_handle]);
+                return Ok(builder.inst_results(call)[0]);
             }
 
             // new LRUCache({ max: number }) - call js_lru_cache_new(max_size)
@@ -21319,6 +21629,178 @@ pub(crate) fn compile_expr(
                 }
             }
 
+            // ================================================================
+            // Web Fetch API: Headers / Request / Response method dispatch
+            // Handles run as numeric f64 IDs, NOT bitcast pointers, so we
+            // intercept here BEFORE the generic dispatch table that would
+            // fcvt_to_sint_sat the f64 to i64.
+            // ================================================================
+            if native_module == "Headers" && object.is_some() {
+                // Compute the handle f64 from the object expression
+                let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object.as_ref().unwrap(), this_ctx)?;
+                let handle_f64 = ensure_f64(builder, obj_val);
+
+                let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                    .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+
+                match method.as_str() {
+                    "set" => {
+                        let key_f64 = ensure_f64(builder, arg_vals[0]);
+                        let val_f64 = ensure_f64(builder, arg_vals[1]);
+                        let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                        let key_ptr = builder.inst_results(kcall)[0];
+                        let vcall = builder.ins().call(get_str_ref, &[val_f64]);
+                        let val_ptr = builder.inst_results(vcall)[0];
+                        let f = extern_funcs.get("js_headers_set").ok_or_else(|| anyhow!("js_headers_set not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64, key_ptr, val_ptr]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "get" => {
+                        let key_f64 = ensure_f64(builder, arg_vals[0]);
+                        let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                        let key_ptr = builder.inst_results(kcall)[0];
+                        let f = extern_funcs.get("js_headers_get").ok_or_else(|| anyhow!("js_headers_get not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64, key_ptr]);
+                        let str_ptr = builder.inst_results(call)[0];
+                        // Returns *mut StringHeader (i64). NaN-box as string for proper type.
+                        return Ok(inline_nanbox_string(builder, str_ptr));
+                    }
+                    "has" => {
+                        let key_f64 = ensure_f64(builder, arg_vals[0]);
+                        let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                        let key_ptr = builder.inst_results(kcall)[0];
+                        let f = extern_funcs.get("js_headers_has").ok_or_else(|| anyhow!("js_headers_has not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64, key_ptr]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "delete" => {
+                        let key_f64 = ensure_f64(builder, arg_vals[0]);
+                        let kcall = builder.ins().call(get_str_ref, &[key_f64]);
+                        let key_ptr = builder.inst_results(kcall)[0];
+                        let f = extern_funcs.get("js_headers_delete").ok_or_else(|| anyhow!("js_headers_delete not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64, key_ptr]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "forEach" => {
+                        let cb_f64 = ensure_f64(builder, arg_vals[0]);
+                        let f = extern_funcs.get("js_headers_for_each").ok_or_else(|| anyhow!("js_headers_for_each not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64, cb_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    _ => {}
+                }
+            }
+
+            if native_module == "Request" && object.is_some() {
+                let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object.as_ref().unwrap(), this_ctx)?;
+                let handle_f64 = ensure_f64(builder, obj_val);
+                match method.as_str() {
+                    "url" => {
+                        let f = extern_funcs.get("js_request_get_url").ok_or_else(|| anyhow!("js_request_get_url not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64]);
+                        let str_ptr = builder.inst_results(call)[0];
+                        return Ok(inline_nanbox_string(builder, str_ptr));
+                    }
+                    "method" => {
+                        let f = extern_funcs.get("js_request_get_method").ok_or_else(|| anyhow!("js_request_get_method not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64]);
+                        let str_ptr = builder.inst_results(call)[0];
+                        return Ok(inline_nanbox_string(builder, str_ptr));
+                    }
+                    "body" => {
+                        let f = extern_funcs.get("js_request_get_body").ok_or_else(|| anyhow!("js_request_get_body not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    _ => {}
+                }
+            }
+
+            // fetch::Response extra methods (headers/clone/arrayBuffer/blob and ok/statusText/headers as f64)
+            // These extend the existing dispatch table by routing through f64 handles instead of i64.
+            if native_module == "fetch" && object.is_some() && matches!(method.as_str(), "headers" | "clone" | "arrayBuffer" | "blob" | "ok") {
+                let obj_val = compile_expr(builder, module, func_ids, closure_func_ids, func_wrapper_ids, extern_funcs, async_func_ids, classes, enums, func_param_types, func_union_params, func_return_types, func_hir_return_types, func_rest_param_index, imported_func_param_counts, locals, object.as_ref().unwrap(), this_ctx)?;
+                let handle_f64 = ensure_f64(builder, obj_val);
+                match method.as_str() {
+                    "headers" => {
+                        let f = extern_funcs.get("js_response_get_headers").ok_or_else(|| anyhow!("js_response_get_headers not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "clone" => {
+                        let f = extern_funcs.get("js_response_clone").ok_or_else(|| anyhow!("js_response_clone not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64]);
+                        return Ok(builder.inst_results(call)[0]);
+                    }
+                    "arrayBuffer" => {
+                        let f = extern_funcs.get("js_response_array_buffer").ok_or_else(|| anyhow!("js_response_array_buffer not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64]);
+                        let promise_ptr = builder.inst_results(call)[0];
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                    }
+                    "blob" => {
+                        let f = extern_funcs.get("js_response_blob").ok_or_else(|| anyhow!("js_response_blob not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_f64]);
+                        let promise_ptr = builder.inst_results(call)[0];
+                        return Ok(builder.ins().bitcast(types::F64, MemFlags::new(), promise_ptr));
+                    }
+                    "ok" => {
+                        // Compute handle as i64 and call existing js_fetch_response_ok which returns f64.
+                        // But re-implement here so it matches NaN-boxed bool.
+                        // The current js_fetch_response_ok returns 1.0/0.0 as plain f64. Convert to NaN-boxed bool.
+                        let handle_i64 = builder.ins().fcvt_to_sint_sat(types::I64, handle_f64);
+                        let f = extern_funcs.get("js_fetch_response_ok").ok_or_else(|| anyhow!("js_fetch_response_ok not declared"))?;
+                        let fr = module.declare_func_in_func(*f, builder.func);
+                        let call = builder.ins().call(fr, &[handle_i64]);
+                        let raw_bool = builder.inst_results(call)[0]; // f64 0.0 or 1.0
+                        // Convert to NaN-boxed bool: 1.0 → TAG_TRUE, 0.0 → TAG_FALSE
+                        let one = builder.ins().f64const(1.0);
+                        let is_true = builder.ins().fcmp(FloatCC::Equal, raw_bool, one);
+                        let true_const = builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0004));
+                        let false_const = builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0003));
+                        return Ok(builder.ins().select(is_true, true_const, false_const));
+                    }
+                    _ => unreachable!()
+                }
+            }
+
+            // Static Response factories: Response.json(value) / Response.redirect(url, status?)
+            if native_module == "fetch" && object.is_none() && (method == "static_json" || method == "static_redirect") {
+                if method == "static_json" {
+                    let val_f64 = if !arg_vals.is_empty() { ensure_f64(builder, arg_vals[0]) } else { builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)) };
+                    let f = extern_funcs.get("js_response_static_json").ok_or_else(|| anyhow!("js_response_static_json not declared"))?;
+                    let fr = module.declare_func_in_func(*f, builder.func);
+                    let call = builder.ins().call(fr, &[val_f64]);
+                    return Ok(builder.inst_results(call)[0]);
+                } else {
+                    // static_redirect
+                    let url_f64 = if !arg_vals.is_empty() { ensure_f64(builder, arg_vals[0]) } else { builder.ins().f64const(f64::from_bits(0x7FFC_0000_0000_0001)) };
+                    let get_str_func = extern_funcs.get("js_get_string_pointer_unified")
+                        .ok_or_else(|| anyhow!("js_get_string_pointer_unified not declared"))?;
+                    let get_str_ref = module.declare_func_in_func(*get_str_func, builder.func);
+                    let url_call = builder.ins().call(get_str_ref, &[url_f64]);
+                    let url_ptr = builder.inst_results(url_call)[0];
+                    let status_f64 = if arg_vals.len() > 1 { ensure_f64(builder, arg_vals[1]) } else { builder.ins().f64const(302.0) };
+                    let f = extern_funcs.get("js_response_static_redirect").ok_or_else(|| anyhow!("js_response_static_redirect not declared"))?;
+                    let fr = module.declare_func_in_func(*f, builder.func);
+                    let call = builder.ins().call(fr, &[url_ptr, status_f64]);
+                    return Ok(builder.inst_results(call)[0]);
+                }
+            }
+
             // Determine which FFI function to call based on module, class, and method
             let mut func_name = match (native_module.as_str(), object.is_some(), method.as_str()) {
                 // mysql2 module functions (no object)
@@ -24388,6 +24870,9 @@ pub(crate) fn compile_expr(
                 } else if (native_module == "node-fetch" || native_module == "fetch" || native_module == "fetchWithAuth" || native_module == "fetchPostWithAuth") && (method == "status" || method == "ok") {
                     // status returns number, ok returns boolean
                     Ok(result)
+                } else if (native_module == "node-fetch" || native_module == "fetch" || native_module == "fetchWithAuth" || native_module == "fetchPostWithAuth") && method == "statusText" {
+                    // statusText returns *mut StringHeader (i64) - NaN-box with STRING_TAG
+                    Ok(inline_nanbox_string(builder, result))
                 } else if native_module == "node-fetch" && (method == "streamStart" || method == "streamStatus" || method == "streamClose") {
                     // streamStart/streamStatus/streamClose return f64 directly (numbers)
                     Ok(result)

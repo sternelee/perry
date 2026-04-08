@@ -4777,6 +4777,26 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                 }
                             }
 
+                            // Check for Response.json(value) / Response.redirect(url, status?) static factories
+                            if obj_ident.sym.as_ref() == "Response" {
+                                if let ast::MemberProp::Ident(method_ident) = &member.prop {
+                                    let method_name = method_ident.sym.as_ref();
+                                    match method_name {
+                                        "json" | "redirect" => {
+                                            ctx.uses_fetch = true;
+                                            return Ok(Expr::NativeMethodCall {
+                                                module: "fetch".to_string(),
+                                                class_name: Some("Response".to_string()),
+                                                object: None,
+                                                method: format!("static_{}", method_name),
+                                                args,
+                                            });
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+
                             // Check for Math.methodName() calls
                             if obj_ident.sym.as_ref() == "Math" {
                                 if let ast::MemberProp::Ident(method_ident) = &member.prop {
