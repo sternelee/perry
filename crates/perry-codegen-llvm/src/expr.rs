@@ -715,6 +715,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // bench_array_ops with ~400K reads per iteration this is the
         // bulk of the LLVM-vs-Cranelift gap.
         Expr::IndexGet { object, index } => {
+            // String indexing fast path: `s[i]` returns the char at
+            // position i as a single-char string. Handled before the
+            // array path so `str[0]` doesn't fall through to a raw
+            // double load.
+            if is_string_expr(ctx, object) {
+                let s_box = lower_expr(ctx, object)?;
+                let idx_d = lower_expr(ctx, index)?;
+                let blk = ctx.block();
+                let s_handle = unbox_to_i64(blk, &s_box);
+                let idx_i32 = blk.fptosi(DOUBLE, &idx_d, I32);
+                let result = blk.call(
+                    I64,
+                    "js_string_char_at",
+                    &[(I64, &s_handle), (I32, &idx_i32)],
+                );
+                return Ok(nanbox_string_inline(blk, &result));
+            }
             // Three cases:
             //   1. Receiver is a known array → inline f64 element load
             //   2. Index is a string (literal or string-typed local) →
