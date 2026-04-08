@@ -9,7 +9,7 @@
 //! one-line explanation instead of a silent broken binary.
 
 use anyhow::{anyhow, bail, Result};
-use perry_hir::{BinaryOp, CompareOp, Expr, UpdateOp};
+use perry_hir::{BinaryOp, CompareOp, Expr, LogicalOp, UpdateOp};
 use perry_types::Type as HirType;
 
 use crate::block::LlBlock;
@@ -317,6 +317,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ))
         }
 
+        // -------- Logical operators (Phase B.6) --------
+        // `a && b` and `a || b` short-circuit. We compile `a` first, branch
+        // on its truthiness (treating 0.0 as false / non-zero as true),
+        // and either evaluate `b` or jump straight to the merge with `a`'s
+        // value. The merge block uses a phi to pick the right result.
+        // `??` (Coalesce) requires NaN-tag inspection (null/undefined
+        // checks), so it lands in a later slice.
+        Expr::Logical { op, left, right } => lower_logical(ctx, *op, left, right),
+
         // -------- Calls --------
         Expr::Call { callee, args, .. } => lower_call(ctx, callee, args),
 
@@ -412,6 +421,77 @@ fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+/// Lower `a && b` / `a || b` with short-circuit evaluation.
+///
+/// Pattern (for `&&` — `||` swaps the cond_br targets):
+/// ```llvm
+///   ; <current>: evaluate left, branch on truthiness
+///   %l = <lower left>
+///   %lb = fcmp one double %l, 0.0
+///   br i1 %lb, label %then, label %merge
+/// then:
+///   %r = <lower right>
+///   br label %merge
+/// merge:
+///   %result = phi double [ %l, %left_block ], [ %r, %right_block ]
+/// ```
+///
+/// The phi predecessors are captured AFTER lowering each side, because
+/// `lower_expr` may itself create new blocks (nested if/logical/etc.) and
+/// the actual incoming block is the last block of that subexpression's
+/// codegen, not the original entry block we started in.
+///
+/// `??` (Coalesce) needs runtime null/undefined NaN-tag checks via
+/// `js_is_truthy` or a dedicated `js_is_nullish` helper — deferred.
+fn lower_logical(
+    ctx: &mut FnCtx<'_>,
+    op: LogicalOp,
+    left: &Expr,
+    right: &Expr,
+) -> Result<String> {
+    if matches!(op, LogicalOp::Coalesce) {
+        bail!("perry-codegen-llvm Phase B.6: `??` (nullish coalesce) not yet supported");
+    }
+
+    // Lower left in the current block.
+    let l = lower_expr(ctx, left)?;
+    // Capture the post-left block — left's lowering may have created new
+    // blocks via nested control flow.
+    let l_block_label = ctx.block().label.clone();
+    let l_bool = ctx.block().fcmp("one", &l, "0.0");
+
+    let then_idx = ctx.new_block("logical.then");
+    let merge_idx = ctx.new_block("logical.merge");
+    let then_label = ctx.block_label(then_idx);
+    let merge_label = ctx.block_label(merge_idx);
+
+    match op {
+        LogicalOp::And => {
+            // a && b: if a true, evaluate b; otherwise short-circuit to merge
+            ctx.block().cond_br(&l_bool, &then_label, &merge_label);
+        }
+        LogicalOp::Or => {
+            // a || b: if a true, short-circuit to merge; otherwise evaluate b
+            ctx.block().cond_br(&l_bool, &merge_label, &then_label);
+        }
+        LogicalOp::Coalesce => unreachable!("guarded above"),
+    }
+
+    // The "then" block evaluates the right side.
+    ctx.current_block = then_idx;
+    let r = lower_expr(ctx, right)?;
+    let r_block_label = ctx.block().label.clone();
+    if !ctx.block().is_terminated() {
+        ctx.block().br(&merge_label);
+    }
+
+    // Merge block: phi between l (short-circuit path) and r (normal path).
+    ctx.current_block = merge_idx;
+    Ok(ctx
+        .block()
+        .phi(DOUBLE, &[(&l, &l_block_label), (&r, &r_block_label)]))
 }
 
 /// Statically determine whether an expression is an array. Used for
