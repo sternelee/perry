@@ -190,15 +190,15 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
         }
 
         // Phase G stubs: real exception handling lives in a future
-        // phase. For now we lower throw as a process abort and try
-        // as just the body block (no catch, no finally). This is
-        // wrong but unblocks compilation of programs that have a
-        // try/catch but never actually throw at runtime.
-        Stmt::Throw(_expr) => {
-            // Emit `unreachable` so subsequent code in the same block
-            // is dead. The program will trap at runtime if this is
-            // reached, which is closer to "abort" than "ignore".
-            ctx.block().unreachable();
+        // phase. For now we lower throw as a no-op (lower the value
+        // for side effects) and try as just the body block (no
+        // catch, no finally). This is wrong but unblocks
+        // compilation AND runtime — programs that have a try/catch
+        // but never actually throw at runtime now run, and programs
+        // that DO throw silently continue executing (bad, but
+        // doesn't crash with SIGTRAP).
+        Stmt::Throw(expr) => {
+            let _ = lower_expr(ctx, expr)?;
             Ok(())
         }
         Stmt::Try { body, catch: _, finally } => {

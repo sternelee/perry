@@ -532,10 +532,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             };
             let blk = ctx.block();
             let bit = blk.fcmp(pred, &l, &r);
-            // `bit` is `i1`; zext to `i64` then sitofp to `double` so that
-            // downstream consumers see a canonical 0.0/1.0 double.
-            let as_i64 = blk.zext(crate::types::I1, &bit, crate::types::I64);
-            Ok(blk.sitofp(crate::types::I64, &as_i64, DOUBLE))
+            // Result is a NaN-boxed boolean (TAG_TRUE / TAG_FALSE) so
+            // downstream `console.log(x === y)` prints "true"/"false"
+            // via the runtime's NaN-tag dispatch instead of "1"/"0".
+            // We compute via select on the i1 — picking between two
+            // pre-baked i64 constants — then bitcast to double.
+            let tag_true_i64 = crate::nanbox::TAG_TRUE_I64;
+            let tag_false_i64 = crate::nanbox::TAG_FALSE_I64;
+            let tagged_i64 = blk.select(crate::types::I1, &bit, crate::types::I64, tag_true_i64, tag_false_i64);
+            Ok(blk.bitcast_i64_to_double(&tagged_i64))
         }
 
         // -------- Objects (Phase B.4) --------
@@ -2856,7 +2861,13 @@ pub(crate) fn is_numeric_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
             ctx.local_types.get(id),
             Some(HirType::Number) | Some(HirType::Int32)
         ),
-        Expr::Binary { .. } | Expr::Compare { .. } | Expr::Update { .. } => true,
+        // NOTE: Expr::Compare is NOT numeric — it produces a NaN-boxed
+        // TAG_TRUE/TAG_FALSE which `fcmp one cond, 0.0` would handle
+        // incorrectly (NaN compared with 0.0 is unordered → false).
+        // Comparisons go through the slow path (js_is_truthy) which
+        // dispatches on the NaN tag.
+        Expr::Binary { op, .. } => !matches!(op, BinaryOp::Add), // Add may concat strings
+        Expr::Update { .. } => true,
         Expr::DateNow => true,
         _ => false,
     }
