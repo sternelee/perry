@@ -1386,71 +1386,358 @@ fn collect_ref_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut std::collection
 }
 
 fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut std::collections::HashSet<u32>) {
-    use perry_hir::Expr;
+    use perry_hir::{ArrayElement, CallArg, Expr};
+    let mut walk = |sub: &Expr, out: &mut std::collections::HashSet<u32>| {
+        collect_ref_ids_in_expr(sub, out);
+    };
     match e {
         Expr::LocalGet(id) => {
             out.insert(*id);
         }
         Expr::LocalSet(id, value) => {
             out.insert(*id);
-            collect_ref_ids_in_expr(value, out);
+            walk(value, out);
         }
         Expr::Update { id, .. } => {
             out.insert(*id);
         }
-        Expr::Binary { left, right, .. } | Expr::Compare { left, right, .. } | Expr::Logical { left, right, .. } => {
-            collect_ref_ids_in_expr(left, out);
-            collect_ref_ids_in_expr(right, out);
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            walk(left, out);
+            walk(right, out);
         }
-        Expr::Unary { operand, .. } | Expr::Void(operand) | Expr::TypeOf(operand) => {
-            collect_ref_ids_in_expr(operand, out);
+        Expr::Unary { operand, .. }
+        | Expr::Void(operand)
+        | Expr::TypeOf(operand)
+        | Expr::Await(operand)
+        | Expr::Delete(operand)
+        | Expr::StringCoerce(operand)
+        | Expr::BooleanCoerce(operand)
+        | Expr::NumberCoerce(operand)
+        | Expr::IsFinite(operand)
+        | Expr::IsNaN(operand)
+        | Expr::NumberIsNaN(operand)
+        | Expr::NumberIsFinite(operand)
+        | Expr::NumberIsInteger(operand)
+        | Expr::IsUndefinedOrBareNan(operand)
+        | Expr::ParseFloat(operand)
+        | Expr::ObjectKeys(operand)
+        | Expr::ObjectValues(operand)
+        | Expr::ObjectEntries(operand)
+        | Expr::ObjectFromEntries(operand)
+        | Expr::ObjectIsFrozen(operand)
+        | Expr::ObjectIsSealed(operand)
+        | Expr::ObjectIsExtensible(operand)
+        | Expr::ObjectCreate(operand)
+        | Expr::SetSize(operand)
+        | Expr::SetClear(operand)
+        | Expr::ArrayFrom(operand)
+        | Expr::Uint8ArrayFrom(operand)
+        | Expr::IteratorToArray(operand)
+        | Expr::WeakRefNew(operand)
+        | Expr::WeakRefDeref(operand)
+        | Expr::StructuredClone(operand)
+        | Expr::QueueMicrotask(operand)
+        | Expr::ProcessNextTick(operand)
+        | Expr::FsExistsSync(operand)
+        | Expr::FsReadFileSync(operand)
+        | Expr::FsReadFileBinary(operand)
+        | Expr::FsUnlinkSync(operand)
+        | Expr::FsMkdirSync(operand)
+        | Expr::PathDirname(operand)
+        | Expr::PathBasename(operand)
+        | Expr::PathExtname(operand)
+        | Expr::PathResolve(operand)
+        | Expr::PathNormalize(operand)
+        | Expr::PathFormat(operand)
+        | Expr::PathParse(operand)
+        | Expr::DateToISOString(operand)
+        | Expr::DateParse(operand)
+        | Expr::EnvGetDynamic(operand)
+        | Expr::ErrorNew(Some(operand))
+        | Expr::FinalizationRegistryNew(operand)
+        | Expr::Uint8ArrayNew(Some(operand))
+        | Expr::Uint8ArrayLength(operand)
+        | Expr::JsonParse(operand)
+        | Expr::MathSqrt(operand)
+        | Expr::MathFloor(operand)
+        | Expr::MathCeil(operand)
+        | Expr::MathRound(operand)
+        | Expr::MathAbs(operand)
+        | Expr::MathLog(operand)
+        | Expr::MathLog2(operand)
+        | Expr::MathLog10(operand)
+        | Expr::MathLog1p(operand)
+        | Expr::MathClz32(operand)
+        | Expr::MathMinSpread(operand)
+        | Expr::MathMaxSpread(operand) => {
+            walk(operand, out);
         }
         Expr::Call { callee, args, .. } => {
-            collect_ref_ids_in_expr(callee, out);
+            walk(callee, out);
             for a in args {
-                collect_ref_ids_in_expr(a, out);
+                walk(a, out);
+            }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            walk(callee, out);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => walk(e, out),
+                }
+            }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object {
+                walk(o, out);
+            }
+            for a in args {
+                walk(a, out);
             }
         }
         Expr::Conditional { condition, then_expr, else_expr } => {
-            collect_ref_ids_in_expr(condition, out);
-            collect_ref_ids_in_expr(then_expr, out);
-            collect_ref_ids_in_expr(else_expr, out);
+            walk(condition, out);
+            walk(then_expr, out);
+            walk(else_expr, out);
         }
-        Expr::PropertyGet { object, .. } => {
-            collect_ref_ids_in_expr(object, out);
-        }
+        Expr::PropertyGet { object, .. } => walk(object, out),
         Expr::PropertySet { object, value, .. } => {
-            collect_ref_ids_in_expr(object, out);
-            collect_ref_ids_in_expr(value, out);
+            walk(object, out);
+            walk(value, out);
         }
+        Expr::PropertyUpdate { object, .. } => walk(object, out),
         Expr::IndexGet { object, index } => {
-            collect_ref_ids_in_expr(object, out);
-            collect_ref_ids_in_expr(index, out);
+            walk(object, out);
+            walk(index, out);
         }
         Expr::IndexSet { object, index, value } => {
-            collect_ref_ids_in_expr(object, out);
-            collect_ref_ids_in_expr(index, out);
-            collect_ref_ids_in_expr(value, out);
+            walk(object, out);
+            walk(index, out);
+            walk(value, out);
         }
         Expr::ArrayPush { array_id, value } => {
             out.insert(*array_id);
-            collect_ref_ids_in_expr(value, out);
+            walk(value, out);
+        }
+        Expr::ArrayPop(id) | Expr::ArrayShift(id) => {
+            out.insert(*id);
+        }
+        Expr::ArraySplice { array_id, start, delete_count, items } => {
+            out.insert(*array_id);
+            walk(start, out);
+            if let Some(d) = delete_count {
+                walk(d, out);
+            }
+            for it in items {
+                walk(it, out);
+            }
         }
         Expr::Array(elements) => {
             for el in elements {
-                collect_ref_ids_in_expr(el, out);
+                walk(el, out);
             }
+        }
+        Expr::ArraySpread(elements) => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => walk(e, out),
+                }
+            }
+        }
+        Expr::ArrayMap { array, callback }
+        | Expr::ArrayFilter { array, callback }
+        | Expr::ArraySort { array, comparator: callback }
+        | Expr::ArrayFind { array, callback }
+        | Expr::ArrayFindIndex { array, callback }
+        | Expr::ArrayFindLast { array, callback }
+        | Expr::ArrayFindLastIndex { array, callback } => {
+            walk(array, out);
+            walk(callback, out);
+        }
+        Expr::ArrayReduce { array, callback, initial }
+        | Expr::ArrayReduceRight { array, callback, initial } => {
+            walk(array, out);
+            walk(callback, out);
+            if let Some(init) = initial {
+                walk(init, out);
+            }
+        }
+        Expr::ArrayJoin { array, separator } => {
+            walk(array, out);
+            if let Some(sep) = separator {
+                walk(sep, out);
+            }
+        }
+        Expr::ArraySlice { array, start, end } => {
+            walk(array, out);
+            walk(start, out);
+            if let Some(e) = end {
+                walk(e, out);
+            }
+        }
+        Expr::ArrayIncludes { array, value } => {
+            walk(array, out);
+            walk(value, out);
         }
         Expr::Object(props) => {
             for (_, v) in props {
-                collect_ref_ids_in_expr(v, out);
+                walk(v, out);
             }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, e) in parts {
+                walk(e, out);
+            }
+        }
+        Expr::ObjectRest { object, .. } => walk(object, out),
+        Expr::ObjectIs(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::ObjectHasOwn(a, b) => {
+            walk(a, out);
+            walk(b, out);
         }
         Expr::New { args, .. } => {
             for a in args {
-                collect_ref_ids_in_expr(a, out);
+                walk(a, out);
             }
         }
+        Expr::MapNew | Expr::SetNew => {}
+        Expr::SetNewFromArray(arr) => walk(arr, out),
+        Expr::MapSet { map, key, value } => {
+            walk(map, out);
+            walk(key, out);
+            walk(value, out);
+        }
+        Expr::MapGet { map, key } | Expr::MapHas { map, key } | Expr::MapDelete { map, key } => {
+            walk(map, out);
+            walk(key, out);
+        }
+        Expr::MapClear(map) => walk(map, out),
+        Expr::SetAdd { set_id, value } => {
+            out.insert(*set_id);
+            walk(value, out);
+        }
+        Expr::SetHas { set, value } | Expr::SetDelete { set, value } => {
+            walk(set, out);
+            walk(value, out);
+        }
+        Expr::MathMin(values) | Expr::MathMax(values) => {
+            for v in values {
+                walk(v, out);
+            }
+        }
+        Expr::MathPow(a, b) | Expr::PathJoin(a, b) | Expr::PathRelative(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::PathBasenameExt(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::JsonStringifyFull(value, replacer, indent) => {
+            walk(value, out);
+            walk(replacer, out);
+            walk(indent, out);
+        }
+        Expr::JsonParseReviver { text, reviver } => {
+            walk(text, out);
+            walk(reviver, out);
+        }
+        Expr::JsonParseWithReviver(a, b) => {
+            walk(a, out);
+            walk(b, out);
+        }
+        Expr::Closure { body, captures, .. } => {
+            // Closure literals don't introduce captures into the outer
+            // scope, but their explicit captures + body references may
+            // mention outer locals that need to be globalized.
+            for c in captures {
+                out.insert(*c);
+            }
+            collect_ref_ids_in_stmts(body, out);
+        }
+        Expr::ParseInt { string, radix } => {
+            walk(string, out);
+            if let Some(r) = radix {
+                walk(r, out);
+            }
+        }
+        Expr::Sequence(es) => {
+            for e in es {
+                walk(e, out);
+            }
+        }
+        Expr::InstanceOf { expr, .. } => walk(expr, out),
+        Expr::In { property, object } => {
+            walk(property, out);
+            walk(object, out);
+        }
+        Expr::SuperCall(args)
+        | Expr::SuperMethodCall { args, .. }
+        | Expr::StaticMethodCall { args, .. } => {
+            for a in args {
+                walk(a, out);
+            }
+        }
+        Expr::FsWriteFileSync(p, c) => {
+            walk(p, out);
+            walk(c, out);
+        }
+        Expr::ErrorNewWithCause { message, cause } => {
+            walk(message, out);
+            walk(cause, out);
+        }
+        Expr::DateNew(Some(arg)) => walk(arg, out),
+        Expr::Uint8ArrayGet { array, index } => {
+            walk(array, out);
+            walk(index, out);
+        }
+        Expr::Uint8ArraySet { array, index, value } => {
+            walk(array, out);
+            walk(index, out);
+            walk(value, out);
+        }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            walk(iterable, out);
+            walk(map_fn, out);
+        }
+        Expr::RegExpTest { regex, string }
+        | Expr::RegExpExec { regex, string } => {
+            walk(regex, out);
+            walk(string, out);
+        }
+        Expr::StringMatch { string, regex } => {
+            walk(string, out);
+            walk(regex, out);
+        }
+        Expr::BufferFrom { data, encoding } => {
+            walk(data, out);
+            if let Some(e) = encoding {
+                walk(e, out);
+            }
+        }
+        Expr::BufferAlloc { size, fill } => {
+            walk(size, out);
+            if let Some(f) = fill {
+                walk(f, out);
+            }
+        }
+        Expr::FinalizationRegistryRegister { registry, target, held, token } => {
+            walk(registry, out);
+            walk(target, out);
+            walk(held, out);
+            if let Some(t) = token {
+                walk(t, out);
+            }
+        }
+        Expr::FinalizationRegistryUnregister { registry, token } => {
+            walk(registry, out);
+            walk(token, out);
+        }
+        Expr::StaticFieldSet { value, .. } => walk(value, out),
         _ => {}
     }
 }
