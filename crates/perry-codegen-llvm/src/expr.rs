@@ -502,45 +502,55 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 BinaryOp::Pow => {
                     blk.call(DOUBLE, "js_math_pow", &[(DOUBLE, &l), (DOUBLE, &r)])
                 }
+                // Bitwise ops: JS ToInt32 semantics require safe
+                // i64 conversion then truncation to i32, because
+                // fptosi(f64→i32) is UB for values outside
+                // [-2^31, 2^31-1] (e.g. 0xFFFFFFFF = 4294967295).
                 BinaryOp::BitAnd => {
-                    let li = blk.fptosi(DOUBLE, &l, I32);
-                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let li64 = blk.fptosi(DOUBLE, &l, I64);
+                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
+                    let li = blk.trunc(I64, &li64, I32);
+                    let ri = blk.trunc(I64, &ri64, I32);
                     let v = blk.and(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::BitOr => {
-                    let li = blk.fptosi(DOUBLE, &l, I32);
-                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let li64 = blk.fptosi(DOUBLE, &l, I64);
+                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
+                    let li = blk.trunc(I64, &li64, I32);
+                    let ri = blk.trunc(I64, &ri64, I32);
                     let v = blk.or(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::BitXor => {
-                    let li = blk.fptosi(DOUBLE, &l, I32);
-                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let li64 = blk.fptosi(DOUBLE, &l, I64);
+                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
+                    let li = blk.trunc(I64, &li64, I32);
+                    let ri = blk.trunc(I64, &ri64, I32);
                     let v = blk.xor(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::Shl => {
-                    let li = blk.fptosi(DOUBLE, &l, I32);
-                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let li64 = blk.fptosi(DOUBLE, &l, I64);
+                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
+                    let li = blk.trunc(I64, &li64, I32);
+                    let ri = blk.trunc(I64, &ri64, I32);
                     let v = blk.shl(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::Shr => {
-                    let li = blk.fptosi(DOUBLE, &l, I32);
-                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let li64 = blk.fptosi(DOUBLE, &l, I64);
+                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
+                    let li = blk.trunc(I64, &li64, I32);
+                    let ri = blk.trunc(I64, &ri64, I32);
                     let v = blk.ashr(I32, &li, &ri);
                     blk.sitofp(I32, &v, DOUBLE)
                 }
                 BinaryOp::UShr => {
-                    // `>>>` is the JS unsigned right shift. The result
-                    // is interpreted as an unsigned 32-bit number, so
-                    // 0xFFFFFFFF prints as 4294967295, not -1. Use
-                    // uitofp instead of sitofp to preserve the
-                    // unsigned interpretation when converting back to
-                    // double.
-                    let li = blk.fptosi(DOUBLE, &l, I32);
-                    let ri = blk.fptosi(DOUBLE, &r, I32);
+                    let li64 = blk.fptosi(DOUBLE, &l, I64);
+                    let ri64 = blk.fptosi(DOUBLE, &r, I64);
+                    let li = blk.trunc(I64, &li64, I32);
+                    let ri = blk.trunc(I64, &ri64, I32);
                     let v = blk.lshr(I32, &li, &ri);
                     blk.uitofp(I32, &v, DOUBLE)
                 }
@@ -586,8 +596,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     Ok(blk.bitcast_i64_to_double(&tagged_i64))
                 }
                 UnaryOp::BitNot => {
-                    // ~x: bitwise NOT after fptosi to i32, then sitofp back.
-                    let i32_v = blk.fptosi(DOUBLE, &v, I32);
+                    // ~x: bitwise NOT with proper JS ToInt32 semantics.
+                    // Direct fptosi(f64→i32) has undefined behavior for
+                    // values outside [-2^31, 2^31-1] (like 0xFFFFFFFF =
+                    // 4294967295). Use fptosi(f64→i64) first (safe for
+                    // all JS numbers), then trunc(i64→i32) to get the
+                    // correct 32-bit pattern, then NOT.
+                    let i64_v = blk.fptosi(DOUBLE, &v, I64);
+                    let i32_v = blk.trunc(I64, &i64_v, I32);
                     let inv = blk.xor(I32, &i32_v, "-1");
                     Ok(blk.sitofp(I32, &inv, DOUBLE))
                 }
