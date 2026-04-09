@@ -2093,12 +2093,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // -------- new Set(arr) --------
         Expr::SetNewFromArray(arr_expr) => {
-            // For now: alloc an empty set and ignore the source array.
-            // Proper iteration support lives in a follow-up.
-            let _arr = lower_expr(ctx, arr_expr)?;
-            let cap = "8".to_string();
-            let handle = ctx.block().call(I64, "js_set_alloc", &[(I32, &cap)]);
-            Ok(nanbox_pointer_inline(ctx.block(), &handle))
+            let arr_box = lower_expr(ctx, arr_expr)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let handle = blk.call(I64, "js_set_from_array", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &handle))
         }
 
         // -------- StaticMethodCall --------
@@ -2796,10 +2795,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::MathFround(operand) => lower_expr(ctx, operand),
 
         // -------- new Map([[k,v], ...]) — alloc empty map, ignore source --------
-        Expr::MapNewFromArray(_) => {
-            let cap = "8".to_string();
-            let handle = ctx.block().call(I64, "js_map_alloc", &[(I32, &cap)]);
-            Ok(nanbox_pointer_inline(ctx.block(), &handle))
+        Expr::MapNewFromArray(arr_expr) => {
+            let arr_box = lower_expr(ctx, arr_expr)?;
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let handle = blk.call(I64, "js_map_from_array", &[(I64, &arr_handle)]);
+            Ok(nanbox_pointer_inline(blk, &handle))
         }
 
         // -------- DateGetTime / DateGetTimezoneOffset --------
