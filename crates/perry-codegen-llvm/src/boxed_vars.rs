@@ -64,12 +64,26 @@ pub(crate) fn collect_boxed_vars(
     let mut for_init_ids: HashSet<u32> = HashSet::new();
     collect_for_init_ids(stmts, &mut for_init_ids);
 
-    // Box = declared here AND captured by some closure AND mutated
-    // by someone (inside or outside the closure) AND NOT a for-loop
-    // init var.
+    // Step 5: detect self-recursive closures. When a Stmt::Let has a
+    // Closure init and the closure's body references the Let's own id,
+    // that id needs boxing. The initial store (`let fib = closure(...)`)
+    // happens AFTER the closure captures are populated, so without
+    // boxing the closure would capture 0.0 (the uninitialized slot
+    // value). With a box, the closure captures the box POINTER, and
+    // the first read of fib from inside the body goes through
+    // js_box_get which returns the real closure value.
+    let mut self_recursive_ids: HashSet<u32> = HashSet::new();
+    collect_self_recursive_closure_ids(stmts, &closure_refs, &mut self_recursive_ids);
+
+    // Box = (declared AND captured AND mutated) OR (self-recursive closure),
+    // minus for-loop init vars.
     let mut boxed: HashSet<u32> = HashSet::new();
     for id in &declared {
         if for_init_ids.contains(id) {
+            continue;
+        }
+        if self_recursive_ids.contains(id) {
+            boxed.insert(*id);
             continue;
         }
         if closure_refs.contains(id)
@@ -85,6 +99,69 @@ pub(crate) fn collect_boxed_vars(
 /// anywhere in the given statements. Used by `collect_boxed_vars` to
 /// exclude loop counters from the boxing set (they follow fresh-
 /// binding-per-iteration semantics under let scoping).
+/// Detect the self-recursive closure pattern: `let fib = (n) => fib(n-1)`.
+/// When a Stmt::Let's Closure init captures the Let's own id, that id must
+/// be boxed so the closure body can read the live value instead of the
+/// stale 0.0 that was in the slot at capture time.
+fn collect_self_recursive_closure_ids(
+    stmts: &[perry_hir::Stmt],
+    closure_refs: &HashSet<u32>,
+    out: &mut HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    for s in stmts {
+        if let Stmt::Let { id, init: Some(init_expr), .. } = s {
+            // Check if the init is a Closure whose body references
+            // this same id. We don't need to walk the full body —
+            // just check if the id is in the already-computed
+            // closure_refs set (which includes all ids referenced
+            // from any closure body in these stmts).
+            if matches!(init_expr, perry_hir::Expr::Closure { .. }) {
+                if closure_refs.contains(id) {
+                    out.insert(*id);
+                }
+            }
+        }
+        // Recurse into nested blocks.
+        match s {
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_self_recursive_closure_ids(then_branch, closure_refs, out);
+                if let Some(eb) = else_branch {
+                    collect_self_recursive_closure_ids(eb, closure_refs, out);
+                }
+            }
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_self_recursive_closure_ids(
+                        std::slice::from_ref(init_stmt.as_ref()),
+                        closure_refs,
+                        out,
+                    );
+                }
+                collect_self_recursive_closure_ids(body, closure_refs, out);
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_self_recursive_closure_ids(body, closure_refs, out);
+            }
+            Stmt::Try { body, catch, finally } => {
+                collect_self_recursive_closure_ids(body, closure_refs, out);
+                if let Some(c) = catch {
+                    collect_self_recursive_closure_ids(&c.body, closure_refs, out);
+                }
+                if let Some(f) = finally {
+                    collect_self_recursive_closure_ids(f, closure_refs, out);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    collect_self_recursive_closure_ids(&case.body, closure_refs, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn collect_for_init_ids(
     stmts: &[perry_hir::Stmt],
     out: &mut HashSet<u32>,
