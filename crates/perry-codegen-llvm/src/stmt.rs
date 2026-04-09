@@ -103,6 +103,32 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 }
                 return Ok(());
             }
+            // Boxed local: allocate a heap box and store its pointer
+            // in the slot. `LocalGet` / `LocalSet` / `Update` on this
+            // id all dereference through the box. See `boxed_vars` on
+            // FnCtx for why this exists.
+            if ctx.boxed_vars.contains(id) {
+                let init_val = if let Some(init_expr) = init {
+                    lower_expr(ctx, init_expr)?
+                } else {
+                    crate::nanbox::double_literal(f64::from_bits(
+                        crate::nanbox::TAG_UNDEFINED,
+                    ))
+                };
+                let blk = ctx.block();
+                let box_ptr =
+                    blk.call(crate::types::I64, "js_box_alloc", &[(DOUBLE, &init_val)]);
+                // Store the box pointer as a raw i64-cast-to-double in
+                // the slot. We can't NaN-box a box pointer because
+                // reading the slot back expects the raw pointer —
+                // LocalGet/LocalSet below do a direct bitcast.
+                let slot = ctx.block().alloca(DOUBLE);
+                let box_as_double = ctx.block().bitcast_i64_to_double(&box_ptr);
+                ctx.block().store(DOUBLE, &box_as_double, &slot);
+                ctx.locals.insert(*id, slot);
+                ctx.local_types.insert(*id, refined_ty);
+                return Ok(());
+            }
             let slot = ctx.block().alloca(DOUBLE);
             ctx.locals.insert(*id, slot.clone());
             ctx.local_types.insert(*id, refined_ty);

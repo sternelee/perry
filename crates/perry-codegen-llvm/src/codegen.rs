@@ -285,6 +285,29 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         func_signatures.insert(f.id, (f.params.len(), has_rest));
     }
 
+    // Module-level boxed_vars: union of every per-function/method/
+    // closure/module-init boxed set. We compute this once here because
+    // closures emitted in `compile_closure` need to know whether their
+    // transitively-captured ids from an enclosing function were boxed
+    // at the creation site. Since HIR LocalIds are globally unique
+    // across the module, a single union set is enough: each id either
+    // lives in a box or it doesn't, irrespective of which function
+    // owns it.
+    let mut module_boxed_vars: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    for f in &hir.functions {
+        module_boxed_vars.extend(collect_boxed_vars(&f.body));
+    }
+    for c in &hir.classes {
+        for m in &c.methods {
+            module_boxed_vars.extend(collect_boxed_vars(&m.body));
+        }
+        if let Some(ctor) = &c.constructor {
+            module_boxed_vars.extend(collect_boxed_vars(&ctor.body));
+        }
+    }
+    module_boxed_vars.extend(collect_boxed_vars(&hir.init));
+
     // Pre-declare each imported function as an extern. Cross-module
     // calls in lower_call need a `declare` line at the top of the IR
     // for the symbol to be referenceable; without this, clang errors
@@ -342,7 +365,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 
     // Lower each user function into the module.
     for f in &hir.functions {
-        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures)
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
 
@@ -363,6 +386,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             &class_ids,
             &func_signatures,
             &module_prefix,
+            &module_boxed_vars,
         )
         .with_context(|| format!("lowering closure func_id={}", func_id))?;
     }
@@ -373,7 +397,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // them directly.
     for class in &hir.classes {
         for method in &class.methods {
-            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures)
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
                 .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
         }
         // Getters and setters are also methods, just registered under
@@ -382,13 +406,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for (prop, getter_fn) in &class.getters {
             let mut renamed = getter_fn.clone();
             renamed.name = format!("__get_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
                 .with_context(|| format!("lowering getter '{}::{}'", class.name, prop))?;
         }
         for (prop, setter_fn) in &class.setters {
             let mut renamed = setter_fn.clone();
             renamed.name = format!("__set_{}", prop);
-            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures)
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars)
                 .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
         }
         // Static methods compile as plain functions named
@@ -410,6 +434,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 &class_ids,
                 &func_signatures,
                 &module_prefix,
+                &module_boxed_vars,
             )
             .with_context(|| format!("lowering static method '{}::{}'", class.name, sm.name))?;
         }
@@ -470,6 +495,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         &module_prefix,
         opts.is_entry_module,
         &opts.non_entry_module_prefixes,
+        &module_boxed_vars,
     )
     .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
 
@@ -504,6 +530,7 @@ fn compile_function(
     static_field_globals: &HashMap<(String, String), String>,
     class_ids: &HashMap<String, u32>,
     func_signatures: &HashMap<u32, (usize, bool)>,
+    module_boxed_vars: &std::collections::HashSet<u32>,
 ) -> Result<()> {
     let llvm_name = func_names
         .get(&f.id)
@@ -544,6 +571,13 @@ fn compile_function(
         .map(|p| (p.id, p.ty.clone()))
         .collect();
 
+    // Pre-walk: which locals need to be boxed? A local is boxed when
+    // it's captured by a closure AND written by someone (either the
+    // enclosing function or inside a closure). Box-backing lets multiple
+    // closures share the same mutable cell — critical for the common
+    // `let x = 0; return { get: () => x, set: (n) => x = n }` pattern.
+    let boxed_vars = module_boxed_vars.clone();
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -565,6 +599,7 @@ fn compile_function(
         static_field_globals,
         class_ids,
         func_signatures,
+        boxed_vars,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -616,6 +651,7 @@ fn compile_closure(
     class_ids: &HashMap<String, u32>,
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_prefix: &str,
+    module_boxed_vars: &std::collections::HashSet<u32>,
 ) -> Result<()> {
     // Destructure the closure expression. We trust that the caller
     // passes only `Expr::Closure` here (from `collect_closures_*`).
@@ -719,6 +755,12 @@ fn compile_closure(
         None => Vec::new(),
     };
 
+    // Boxed vars inside the closure body: mutable captures from the
+    // closure's own let-bindings. We don't add the captured-from-outer
+    // ids here because those are already boxed in the outer function;
+    // the closure body just sees them via the capture mechanism.
+    let closure_boxed_vars = module_boxed_vars.clone();
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -744,6 +786,7 @@ fn compile_closure(
         static_field_globals,
         class_ids,
         func_signatures,
+        boxed_vars: closure_boxed_vars,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -774,6 +817,7 @@ fn compile_method(
     static_field_globals: &HashMap<(String, String), String>,
     class_ids: &HashMap<String, u32>,
     func_signatures: &HashMap<u32, (usize, bool)>,
+    module_boxed_vars: &std::collections::HashSet<u32>,
 ) -> Result<()> {
     let llvm_name = methods
         .get(&(class.name.clone(), method.name.clone()))
@@ -817,6 +861,8 @@ fn compile_method(
         .map(|p| (p.id, p.ty.clone()))
         .collect();
 
+    let method_boxed_vars = module_boxed_vars.clone();
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -838,6 +884,7 @@ fn compile_method(
         static_field_globals,
         class_ids,
         func_signatures,
+        boxed_vars: method_boxed_vars,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -881,6 +928,7 @@ fn compile_module_entry(
     module_prefix: &str,
     is_entry: bool,
     non_entry_module_prefixes: &[String],
+    module_boxed_vars: &std::collections::HashSet<u32>,
 ) -> Result<()> {
     let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
 
@@ -908,6 +956,7 @@ fn compile_module_entry(
             }
         }
 
+        let main_boxed_vars = module_boxed_vars.clone();
         let mut ctx = FnCtx {
             func: main,
             locals: HashMap::new(),
@@ -929,6 +978,7 @@ fn compile_module_entry(
             static_field_globals,
             class_ids,
             func_signatures,
+            boxed_vars: main_boxed_vars,
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -953,6 +1003,7 @@ fn compile_module_entry(
             blk.call_void(&strings_init_name, &[]);
         }
 
+        let init_boxed_vars = module_boxed_vars.clone();
         let mut ctx = FnCtx {
             func: init_fn,
             locals: HashMap::new(),
@@ -974,6 +1025,7 @@ fn compile_module_entry(
             static_field_globals,
             class_ids,
             func_signatures,
+            boxed_vars: init_boxed_vars,
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -1046,6 +1098,7 @@ fn compile_static_method(
     class_ids: &HashMap<String, u32>,
     func_signatures: &HashMap<u32, (usize, bool)>,
     module_prefix: &str,
+    module_boxed_vars: &std::collections::HashSet<u32>,
 ) -> Result<()> {
     let llvm_name = format!("perry_static_{}__{}__{}", module_prefix, class_name, f.name);
 
@@ -1100,6 +1153,7 @@ fn compile_static_method(
         static_field_globals,
         class_ids,
         func_signatures,
+        boxed_vars: module_boxed_vars.clone(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
@@ -1695,6 +1749,566 @@ pub(crate) fn collect_ref_ids_in_stmts_pub(
     out: &mut std::collections::HashSet<u32>,
 ) {
     collect_ref_ids_in_stmts(stmts, out)
+}
+
+/// Determine which local ids in the given statement sequence need
+/// heap-boxed storage. An id gets boxed when:
+///
+/// 1. It's declared in these statements (or a nested block)
+/// 2. AND it's captured by at least one closure in the same scope
+/// 3. AND it's mutated by someone — either the enclosing function
+///    updates/sets it, or at least one closure updates/sets it
+///
+/// Without boxing, each closure captures a SNAPSHOT of the value at
+/// creation time, and multiple closures over the same variable never
+/// see each other's mutations. Boxing moves the storage to the heap
+/// so all closures (and the enclosing function) share one cell.
+///
+/// Limitations of this analysis:
+/// - We box on capture + any mutation, even if the mutation is in
+///   unreachable code. That's safe (just slightly worse perf).
+/// - We don't distinguish "mutated inside the closure" from "mutated
+///   outside"; both imply boxing. Again, safe.
+/// - Params are not boxed here because Stmt::Let handles box
+///   allocation; params are handled separately at FnCtx setup time
+///   (we don't box them yet — TODO if needed).
+pub(crate) fn collect_boxed_vars(
+    stmts: &[perry_hir::Stmt],
+) -> std::collections::HashSet<u32> {
+    // Step 1: set of ids declared in this scope (Let).
+    let mut declared: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    collect_let_ids(stmts, &mut declared);
+
+    // Step 2: set of ids referenced inside ANY closure body found in
+    // these statements. Walk the AST looking for Closure exprs and
+    // collect their body refs.
+    let mut closure_refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut closure_writes: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    collect_closure_refs_and_writes_in_stmts(stmts, &mut closure_refs, &mut closure_writes);
+
+    // Step 3: set of ids MUTATED in the enclosing scope (outside any
+    // closure). If the enclosing function does `x++` or `x = ...` on
+    // a captured var, that var also needs boxing so the closures see
+    // the outer updates.
+    let mut outer_writes: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    collect_outer_writes_in_stmts(stmts, &mut outer_writes);
+
+    // Step 4: ids declared in a `for` loop init (the `for (let i = ...;
+    // ...; i++)` pattern). These get a fresh binding per iteration
+    // under JS spec (`let` scoping), so closures inside the loop body
+    // that capture them should each see the iteration's own value.
+    // Boxing such a var would make every closure see the LAST iteration's
+    // value, which breaks the classic `for (let i=0; i<5; i++) funcs.
+    // push(() => i)` pattern.
+    //
+    // Keep the simpler semantics here: don't box for-init vars. This
+    // reverts them to the pre-box snapshot-capture path where each
+    // closure stores the current value at creation time, which
+    // happens to produce the right result for loop counters.
+    let mut for_init_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    collect_for_init_ids(stmts, &mut for_init_ids);
+
+    // Box = declared here AND captured by some closure AND mutated
+    // by someone (inside or outside the closure) AND NOT a for-loop
+    // init var.
+    let mut boxed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for id in &declared {
+        if for_init_ids.contains(id) {
+            continue;
+        }
+        if closure_refs.contains(id)
+            && (closure_writes.contains(id) || outer_writes.contains(id))
+        {
+            boxed.insert(*id);
+        }
+    }
+    boxed
+}
+
+/// Collect LocalIds declared inside the init slot of any `for` loop
+/// anywhere in the given statements. Used by `collect_boxed_vars` to
+/// exclude loop counters from the boxing set (they follow fresh-
+/// binding-per-iteration semantics under let scoping).
+fn collect_for_init_ids(
+    stmts: &[perry_hir::Stmt],
+    out: &mut std::collections::HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    for s in stmts {
+        match s {
+            Stmt::For { init, body, .. } => {
+                if let Some(init_stmt) = init {
+                    collect_let_ids(std::slice::from_ref(init_stmt.as_ref()), out);
+                }
+                collect_for_init_ids(body, out);
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                collect_for_init_ids(then_branch, out);
+                if let Some(eb) = else_branch {
+                    collect_for_init_ids(eb, out);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+                collect_for_init_ids(body, out);
+            }
+            Stmt::Try { body, catch, finally } => {
+                collect_for_init_ids(body, out);
+                if let Some(c) = catch {
+                    collect_for_init_ids(&c.body, out);
+                }
+                if let Some(f) = finally {
+                    collect_for_init_ids(f, out);
+                }
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    collect_for_init_ids(&case.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Walk statements and, for every Closure expression encountered,
+/// collect the ids that its body reads and writes. Skips nested
+/// closures' bodies (those are analyzed independently when they're
+/// compiled).
+fn collect_closure_refs_and_writes_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    refs: &mut std::collections::HashSet<u32>,
+    writes: &mut std::collections::HashSet<u32>,
+) {
+    for s in stmts {
+        collect_closure_refs_and_writes_in_stmt(s, refs, writes);
+    }
+}
+
+fn collect_closure_refs_and_writes_in_stmt(
+    stmt: &perry_hir::Stmt,
+    refs: &mut std::collections::HashSet<u32>,
+    writes: &mut std::collections::HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Expr(e) | Stmt::Throw(e) => {
+            collect_closure_refs_and_writes_in_expr(e, refs, writes);
+        }
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                collect_closure_refs_and_writes_in_expr(e, refs, writes);
+            }
+        }
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                collect_closure_refs_and_writes_in_expr(e, refs, writes);
+            }
+        }
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_closure_refs_and_writes_in_expr(condition, refs, writes);
+            collect_closure_refs_and_writes_in_stmts(then_branch, refs, writes);
+            if let Some(eb) = else_branch {
+                collect_closure_refs_and_writes_in_stmts(eb, refs, writes);
+            }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init {
+                collect_closure_refs_and_writes_in_stmt(i, refs, writes);
+            }
+            if let Some(c) = condition {
+                collect_closure_refs_and_writes_in_expr(c, refs, writes);
+            }
+            if let Some(u) = update {
+                collect_closure_refs_and_writes_in_expr(u, refs, writes);
+            }
+            collect_closure_refs_and_writes_in_stmts(body, refs, writes);
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            collect_closure_refs_and_writes_in_expr(condition, refs, writes);
+            collect_closure_refs_and_writes_in_stmts(body, refs, writes);
+        }
+        Stmt::Try { body, catch, finally } => {
+            collect_closure_refs_and_writes_in_stmts(body, refs, writes);
+            if let Some(c) = catch {
+                collect_closure_refs_and_writes_in_stmts(&c.body, refs, writes);
+            }
+            if let Some(f) = finally {
+                collect_closure_refs_and_writes_in_stmts(f, refs, writes);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_closure_refs_and_writes_in_expr(discriminant, refs, writes);
+            for case in cases {
+                if let Some(t) = &case.test {
+                    collect_closure_refs_and_writes_in_expr(t, refs, writes);
+                }
+                collect_closure_refs_and_writes_in_stmts(&case.body, refs, writes);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_closure_refs_and_writes_in_expr(
+    expr: &perry_hir::Expr,
+    refs: &mut std::collections::HashSet<u32>,
+    writes: &mut std::collections::HashSet<u32>,
+) {
+    use perry_hir::Expr;
+    match expr {
+        Expr::Closure { body, .. } => {
+            // Collect every LocalGet/LocalSet/Update ref inside the
+            // closure body. Nested closures inside this body will
+            // also contribute their refs.
+            collect_ref_ids_in_stmts(body, refs);
+            collect_write_ids_in_stmts(body, writes);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Logical { left, right, .. }
+        | Expr::Compare { left, right, .. } => {
+            collect_closure_refs_and_writes_in_expr(left, refs, writes);
+            collect_closure_refs_and_writes_in_expr(right, refs, writes);
+        }
+        Expr::Unary { operand, .. } => {
+            collect_closure_refs_and_writes_in_expr(operand, refs, writes);
+        }
+        Expr::Update { id, .. } => {
+            writes.insert(*id);
+            refs.insert(*id);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_closure_refs_and_writes_in_expr(callee, refs, writes);
+            for a in args {
+                collect_closure_refs_and_writes_in_expr(a, refs, writes);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_closure_refs_and_writes_in_expr(a, refs, writes);
+            }
+        }
+        Expr::Array(items) => {
+            for i in items {
+                collect_closure_refs_and_writes_in_expr(i, refs, writes);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_closure_refs_and_writes_in_expr(v, refs, writes);
+            }
+        }
+        Expr::LocalSet(_, v) => {
+            collect_closure_refs_and_writes_in_expr(v, refs, writes);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_closure_refs_and_writes_in_expr(condition, refs, writes);
+            collect_closure_refs_and_writes_in_expr(then_expr, refs, writes);
+            collect_closure_refs_and_writes_in_expr(else_expr, refs, writes);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_closure_refs_and_writes_in_expr(object, refs, writes);
+            collect_closure_refs_and_writes_in_expr(index, refs, writes);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_closure_refs_and_writes_in_expr(object, refs, writes);
+            collect_closure_refs_and_writes_in_expr(index, refs, writes);
+            collect_closure_refs_and_writes_in_expr(value, refs, writes);
+        }
+        Expr::PropertyGet { object, .. } => {
+            collect_closure_refs_and_writes_in_expr(object, refs, writes);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            collect_closure_refs_and_writes_in_expr(object, refs, writes);
+            collect_closure_refs_and_writes_in_expr(value, refs, writes);
+        }
+        _ => {}
+    }
+}
+
+/// Collect LocalIds that are written (LocalSet or Update) anywhere in
+/// the given statements, OUTSIDE of any closure bodies. Used to
+/// determine whether an outer-scope var is being mutated, which
+/// together with capture triggers boxing.
+fn collect_outer_writes_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    out: &mut std::collections::HashSet<u32>,
+) {
+    for s in stmts {
+        collect_outer_writes_in_stmt(s, out);
+    }
+}
+
+fn collect_outer_writes_in_stmt(
+    stmt: &perry_hir::Stmt,
+    out: &mut std::collections::HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Expr(e) | Stmt::Throw(e) => collect_outer_writes_in_expr(e, out),
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                collect_outer_writes_in_expr(e, out);
+            }
+        }
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                collect_outer_writes_in_expr(e, out);
+            }
+        }
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_outer_writes_in_expr(condition, out);
+            collect_outer_writes_in_stmts(then_branch, out);
+            if let Some(eb) = else_branch {
+                collect_outer_writes_in_stmts(eb, out);
+            }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init {
+                collect_outer_writes_in_stmt(i, out);
+            }
+            if let Some(c) = condition {
+                collect_outer_writes_in_expr(c, out);
+            }
+            if let Some(u) = update {
+                collect_outer_writes_in_expr(u, out);
+            }
+            collect_outer_writes_in_stmts(body, out);
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            collect_outer_writes_in_expr(condition, out);
+            collect_outer_writes_in_stmts(body, out);
+        }
+        Stmt::Try { body, catch, finally } => {
+            collect_outer_writes_in_stmts(body, out);
+            if let Some(c) = catch {
+                collect_outer_writes_in_stmts(&c.body, out);
+            }
+            if let Some(f) = finally {
+                collect_outer_writes_in_stmts(f, out);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_outer_writes_in_expr(discriminant, out);
+            for case in cases {
+                if let Some(t) = &case.test {
+                    collect_outer_writes_in_expr(t, out);
+                }
+                collect_outer_writes_in_stmts(&case.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_outer_writes_in_expr(
+    expr: &perry_hir::Expr,
+    out: &mut std::collections::HashSet<u32>,
+) {
+    use perry_hir::Expr;
+    match expr {
+        // STOP recursing into closures — those are "inside"; we only
+        // collect outer-scope writes here.
+        Expr::Closure { .. } => {}
+        Expr::LocalSet(id, v) => {
+            out.insert(*id);
+            collect_outer_writes_in_expr(v, out);
+        }
+        Expr::Update { id, .. } => {
+            out.insert(*id);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Logical { left, right, .. }
+        | Expr::Compare { left, right, .. } => {
+            collect_outer_writes_in_expr(left, out);
+            collect_outer_writes_in_expr(right, out);
+        }
+        Expr::Unary { operand, .. } => collect_outer_writes_in_expr(operand, out),
+        Expr::Call { callee, args, .. } => {
+            collect_outer_writes_in_expr(callee, out);
+            for a in args {
+                collect_outer_writes_in_expr(a, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_outer_writes_in_expr(a, out);
+            }
+        }
+        Expr::Array(items) => {
+            for i in items {
+                collect_outer_writes_in_expr(i, out);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_outer_writes_in_expr(v, out);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_outer_writes_in_expr(condition, out);
+            collect_outer_writes_in_expr(then_expr, out);
+            collect_outer_writes_in_expr(else_expr, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_outer_writes_in_expr(object, out);
+            collect_outer_writes_in_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_outer_writes_in_expr(object, out);
+            collect_outer_writes_in_expr(index, out);
+            collect_outer_writes_in_expr(value, out);
+        }
+        Expr::PropertyGet { object, .. } => {
+            collect_outer_writes_in_expr(object, out);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            collect_outer_writes_in_expr(object, out);
+            collect_outer_writes_in_expr(value, out);
+        }
+        _ => {}
+    }
+}
+
+/// Collect LocalIds that are written (LocalSet or Update) anywhere in
+/// the given statements, INCLUDING inside nested closures. Used to
+/// detect whether a local is ever mutated — the "is this captured +
+/// mutated" gate for boxing.
+fn collect_write_ids_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    out: &mut std::collections::HashSet<u32>,
+) {
+    for s in stmts {
+        collect_write_ids_in_stmt(s, out);
+    }
+}
+
+fn collect_write_ids_in_stmt(
+    stmt: &perry_hir::Stmt,
+    out: &mut std::collections::HashSet<u32>,
+) {
+    use perry_hir::Stmt;
+    match stmt {
+        Stmt::Expr(e) | Stmt::Throw(e) => collect_write_ids_in_expr(e, out),
+        Stmt::Return(opt) => {
+            if let Some(e) = opt {
+                collect_write_ids_in_expr(e, out);
+            }
+        }
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init {
+                collect_write_ids_in_expr(e, out);
+            }
+        }
+        Stmt::If { condition, then_branch, else_branch } => {
+            collect_write_ids_in_expr(condition, out);
+            collect_write_ids_in_stmts(then_branch, out);
+            if let Some(eb) = else_branch {
+                collect_write_ids_in_stmts(eb, out);
+            }
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init {
+                collect_write_ids_in_stmt(i, out);
+            }
+            if let Some(c) = condition {
+                collect_write_ids_in_expr(c, out);
+            }
+            if let Some(u) = update {
+                collect_write_ids_in_expr(u, out);
+            }
+            collect_write_ids_in_stmts(body, out);
+        }
+        Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+            collect_write_ids_in_expr(condition, out);
+            collect_write_ids_in_stmts(body, out);
+        }
+        Stmt::Try { body, catch, finally } => {
+            collect_write_ids_in_stmts(body, out);
+            if let Some(c) = catch {
+                collect_write_ids_in_stmts(&c.body, out);
+            }
+            if let Some(f) = finally {
+                collect_write_ids_in_stmts(f, out);
+            }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            collect_write_ids_in_expr(discriminant, out);
+            for case in cases {
+                if let Some(t) = &case.test {
+                    collect_write_ids_in_expr(t, out);
+                }
+                collect_write_ids_in_stmts(&case.body, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_write_ids_in_expr(
+    expr: &perry_hir::Expr,
+    out: &mut std::collections::HashSet<u32>,
+) {
+    use perry_hir::Expr;
+    match expr {
+        Expr::LocalSet(id, v) => {
+            out.insert(*id);
+            collect_write_ids_in_expr(v, out);
+        }
+        Expr::Update { id, .. } => {
+            out.insert(*id);
+        }
+        Expr::Closure { body, .. } => collect_write_ids_in_stmts(body, out),
+        Expr::Binary { left, right, .. }
+        | Expr::Logical { left, right, .. }
+        | Expr::Compare { left, right, .. } => {
+            collect_write_ids_in_expr(left, out);
+            collect_write_ids_in_expr(right, out);
+        }
+        Expr::Unary { operand, .. } => collect_write_ids_in_expr(operand, out),
+        Expr::Call { callee, args, .. } => {
+            collect_write_ids_in_expr(callee, out);
+            for a in args {
+                collect_write_ids_in_expr(a, out);
+            }
+        }
+        Expr::New { args, .. } => {
+            for a in args {
+                collect_write_ids_in_expr(a, out);
+            }
+        }
+        Expr::Array(items) => {
+            for i in items {
+                collect_write_ids_in_expr(i, out);
+            }
+        }
+        Expr::Object(props) => {
+            for (_, v) in props {
+                collect_write_ids_in_expr(v, out);
+            }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            collect_write_ids_in_expr(condition, out);
+            collect_write_ids_in_expr(then_expr, out);
+            collect_write_ids_in_expr(else_expr, out);
+        }
+        Expr::IndexGet { object, index } => {
+            collect_write_ids_in_expr(object, out);
+            collect_write_ids_in_expr(index, out);
+        }
+        Expr::IndexSet { object, index, value } => {
+            collect_write_ids_in_expr(object, out);
+            collect_write_ids_in_expr(index, out);
+            collect_write_ids_in_expr(value, out);
+        }
+        Expr::PropertyGet { object, .. } => {
+            collect_write_ids_in_expr(object, out);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            collect_write_ids_in_expr(object, out);
+            collect_write_ids_in_expr(value, out);
+        }
+        _ => {}
+    }
 }
 
 fn collect_let_ids(stmts: &[perry_hir::Stmt], out: &mut std::collections::HashSet<u32>) {

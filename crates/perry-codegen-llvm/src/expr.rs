@@ -160,6 +160,23 @@ pub(crate) struct FnCtx<'a> {
     /// has_rest_param)`. Used by FuncRef call sites to know whether
     /// to bundle trailing arguments into a rest array.
     pub func_signatures: &'a std::collections::HashMap<u32, (usize, bool)>,
+    /// LocalIds that must be stored in heap boxes (`js_box_alloc`)
+    /// instead of stack allocas. A local gets boxed when at least
+    /// one closure captures it AND it's written to (either by the
+    /// enclosing function or inside a closure). Boxing guarantees
+    /// that all readers — inc()/get() on a shared counter, for
+    /// instance — observe each other's writes. See `collect_boxed_
+    /// vars` for the detection rule.
+    ///
+    /// For ids in this set:
+    /// - Stmt::Let allocates a box via `js_box_alloc(init)` and
+    ///   stores the box pointer (i64) in a local alloca slot.
+    /// - LocalGet reads the slot, unboxes, and calls `js_box_get`.
+    /// - LocalSet/Update reads the slot, unboxes, and calls
+    ///   `js_box_set`.
+    /// - Closure creation captures the box pointer directly so
+    ///   the closure body sees the same storage.
+    pub boxed_vars: std::collections::HashSet<u32>,
 }
 
 impl<'a> FnCtx<'a> {
@@ -372,18 +389,44 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // functions read their own params/lets, and any function read
         // module-scope `let`s (the ones in `hir.init` at top level).
         Expr::LocalGet(id) => {
+            // Captured by closure (from outer scope):
             if let Some(&capture_idx) = ctx.closure_captures.get(id) {
                 let closure_ptr = ctx
                     .current_closure_ptr
                     .clone()
                     .ok_or_else(|| anyhow!("captured local but no current_closure_ptr"))?;
                 let idx_str = capture_idx.to_string();
-                Ok(ctx.block().call(
+                // If the captured id is a boxed var, the capture
+                // slot holds a raw box pointer (as a bit-castable
+                // double). Read the capture, extract the box
+                // pointer, and deref via js_box_get.
+                if ctx.boxed_vars.contains(id) {
+                    let blk = ctx.block();
+                    let cap_dbl = blk.call(
+                        DOUBLE,
+                        "js_closure_get_capture_f64",
+                        &[(I64, &closure_ptr), (I32, &idx_str)],
+                    );
+                    let box_ptr = blk.bitcast_double_to_i64(&cap_dbl);
+                    return Ok(blk.call(DOUBLE, "js_box_get", &[(I64, &box_ptr)]));
+                }
+                return Ok(ctx.block().call(
                     DOUBLE,
                     "js_closure_get_capture_f64",
                     &[(I64, &closure_ptr), (I32, &idx_str)],
-                ))
-            } else if let Some(slot) = ctx.locals.get(id).cloned() {
+                ));
+            }
+            // Boxed local in enclosing function: load the slot (box
+            // pointer), deref via js_box_get.
+            if ctx.boxed_vars.contains(id) {
+                if let Some(slot) = ctx.locals.get(id).cloned() {
+                    let blk = ctx.block();
+                    let box_dbl = blk.load(DOUBLE, &slot);
+                    let box_ptr = blk.bitcast_double_to_i64(&box_dbl);
+                    return Ok(blk.call(DOUBLE, "js_box_get", &[(I64, &box_ptr)]));
+                }
+            }
+            if let Some(slot) = ctx.locals.get(id).cloned() {
                 Ok(ctx.block().load(DOUBLE, &slot))
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
                 let g_ref = format!("@{}", global_name);
@@ -431,10 +474,32 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     .clone()
                     .ok_or_else(|| anyhow!("captured local set but no current_closure_ptr"))?;
                 let idx_str = capture_idx.to_string();
-                ctx.block().call_void(
-                    "js_closure_set_capture_f64",
-                    &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &v)],
-                );
+                // Boxed captured var: read the box pointer from the
+                // capture slot, then js_box_set to update the shared
+                // cell. Do NOT overwrite the capture slot — it holds
+                // the box pointer, not the value.
+                if ctx.boxed_vars.contains(id) {
+                    let blk = ctx.block();
+                    let cap_dbl = blk.call(
+                        DOUBLE,
+                        "js_closure_get_capture_f64",
+                        &[(I64, &closure_ptr), (I32, &idx_str)],
+                    );
+                    let box_ptr = blk.bitcast_double_to_i64(&cap_dbl);
+                    blk.call_void("js_box_set", &[(I64, &box_ptr), (DOUBLE, &v)]);
+                } else {
+                    ctx.block().call_void(
+                        "js_closure_set_capture_f64",
+                        &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &v)],
+                    );
+                }
+            } else if ctx.boxed_vars.contains(id) {
+                if let Some(slot) = ctx.locals.get(id).cloned() {
+                    let blk = ctx.block();
+                    let box_dbl = blk.load(DOUBLE, &slot);
+                    let box_ptr = blk.bitcast_double_to_i64(&box_dbl);
+                    blk.call_void("js_box_set", &[(I64, &box_ptr), (DOUBLE, &v)]);
+                }
             } else if let Some(slot) = ctx.locals.get(id).cloned() {
                 ctx.block().store(DOUBLE, &v, &slot);
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
@@ -457,6 +522,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     .clone()
                     .ok_or_else(|| anyhow!("captured local update but no current_closure_ptr"))?;
                 let idx_str = capture_idx.to_string();
+                // Boxed captured var: deref box, modify, store back.
+                if ctx.boxed_vars.contains(id) {
+                    let blk = ctx.block();
+                    let cap_dbl = blk.call(
+                        DOUBLE,
+                        "js_closure_get_capture_f64",
+                        &[(I64, &closure_ptr), (I32, &idx_str)],
+                    );
+                    let box_ptr = blk.bitcast_double_to_i64(&cap_dbl);
+                    let old = blk.call(DOUBLE, "js_box_get", &[(I64, &box_ptr)]);
+                    let new = match op {
+                        UpdateOp::Increment => blk.fadd(&old, "1.0"),
+                        UpdateOp::Decrement => blk.fsub(&old, "1.0"),
+                    };
+                    blk.call_void("js_box_set", &[(I64, &box_ptr), (DOUBLE, &new)]);
+                    return Ok(if *prefix { new } else { old });
+                }
                 let old = ctx.block().call(
                     DOUBLE,
                     "js_closure_get_capture_f64",
@@ -472,6 +554,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     &[(I64, &closure_ptr), (I32, &idx_str), (DOUBLE, &new)],
                 );
                 return Ok(if *prefix { new } else { old });
+            }
+            // Boxed enclosing-scope var: load slot (box ptr), deref,
+            // increment, box_set.
+            if ctx.boxed_vars.contains(id) {
+                if let Some(slot) = ctx.locals.get(id).cloned() {
+                    let blk = ctx.block();
+                    let box_dbl = blk.load(DOUBLE, &slot);
+                    let box_ptr = blk.bitcast_double_to_i64(&box_dbl);
+                    let old = blk.call(DOUBLE, "js_box_get", &[(I64, &box_ptr)]);
+                    let new = match op {
+                        UpdateOp::Increment => blk.fadd(&old, "1.0"),
+                        UpdateOp::Decrement => blk.fsub(&old, "1.0"),
+                    };
+                    blk.call_void("js_box_set", &[(I64, &box_ptr), (DOUBLE, &new)]);
+                    return Ok(if *prefix { new } else { old });
+                }
             }
             let storage = if let Some(slot) = ctx.locals.get(id).cloned() {
                 slot
@@ -1243,10 +1341,59 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Lower each captured value from the OUTER scope (this is
             // an outer-scope access, NOT a closure capture access — at
             // closure creation we're still outside the closure body).
+            //
+            // Boxed captures are special: the CAPTURE VALUE is the
+            // box pointer itself (not the value inside the box). We
+            // store the box pointer (as a bit-castable double) in
+            // the closure's capture slot, so reads/writes inside the
+            // closure body can deref it via js_box_get/set. Without
+            // this, each closure would get a snapshot of the box's
+            // current value.
             let mut captured_values: Vec<String> = Vec::with_capacity(auto_captures.len());
             for cap_id in &auto_captures {
-                let v = lower_expr(ctx, &Expr::LocalGet(*cap_id))?;
-                captured_values.push(v);
+                if ctx.boxed_vars.contains(cap_id) {
+                    // If the enclosing function has this id boxed,
+                    // we want to forward the BOX POINTER through
+                    // the capture slot, not the value inside the
+                    // box. Read the slot (which holds the box
+                    // pointer bit-cast to double) directly without
+                    // going through the normal LocalGet path (which
+                    // would deref via js_box_get).
+                    if let Some(&_capture_idx) = ctx.closure_captures.get(cap_id) {
+                        // We're inside a closure and this id is a
+                        // transitively-captured box. Read the
+                        // capture slot RAW (it holds the box ptr
+                        // as a double) and propagate directly.
+                        let closure_ptr = ctx
+                            .current_closure_ptr
+                            .clone()
+                            .ok_or_else(|| anyhow!("nested boxed capture but no current_closure_ptr"))?;
+                        let idx_str = _capture_idx.to_string();
+                        let v = ctx.block().call(
+                            DOUBLE,
+                            "js_closure_get_capture_f64",
+                            &[(I64, &closure_ptr), (I32, &idx_str)],
+                        );
+                        captured_values.push(v);
+                    } else if let Some(slot) = ctx.locals.get(cap_id).cloned() {
+                        // Enclosing function owns the box: slot
+                        // holds the box pointer as a double.
+                        let v = ctx.block().load(DOUBLE, &slot);
+                        captured_values.push(v);
+                    } else if let Some(global_name) =
+                        ctx.module_globals.get(cap_id).cloned()
+                    {
+                        // Global boxed var (rare).
+                        let g_ref = format!("@{}", global_name);
+                        let v = ctx.block().load(DOUBLE, &g_ref);
+                        captured_values.push(v);
+                    } else {
+                        captured_values.push(double_literal(0.0));
+                    }
+                } else {
+                    let v = lower_expr(ctx, &Expr::LocalGet(*cap_id))?;
+                    captured_values.push(v);
+                }
             }
 
             // Compute the closure function name BEFORE taking the
