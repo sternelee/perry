@@ -29,4 +29,4 @@ pub(crate) mod collectors;
 pub(crate) mod boxed_vars;
 pub mod codegen;
 
-pub use codegen::{compile_module, CompileOptions};
+pub use codegen::{compile_module, CompileOptions, ImportedClass};

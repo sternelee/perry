@@ -1004,6 +1004,8 @@ pub struct OptimizedLibs {
     pub runtime_bc: Option<PathBuf>,
     /// LLVM bitcode (`.bc`) for perry-stdlib (Phase J).
     pub stdlib_bc: Option<PathBuf>,
+    /// LLVM bitcode (`.bc`) for additional crates (UI, jsruntime, geisterhand).
+    pub extra_bc: Vec<PathBuf>,
 }
 
 impl OptimizedLibs {
@@ -1013,6 +1015,7 @@ impl OptimizedLibs {
             stdlib: None,
             runtime_bc: None,
             stdlib_bc: None,
+            extra_bc: Vec::new(),
         }
     }
 }
@@ -1197,7 +1200,7 @@ fn build_optimized_libs(
     // Phase J: when PERRY_LLVM_BITCODE_LINK=1, also emit LLVM bitcode
     // (.bc) for whole-program LTO via `cargo rustc --emit=llvm-bc,link`.
     let bitcode_requested = std::env::var("PERRY_LLVM_BITCODE_LINK").ok().as_deref() == Some("1");
-    let (runtime_bc, stdlib_bc) = if bitcode_requested {
+    let (runtime_bc, stdlib_bc, extra_bc) = if bitcode_requested {
         if matches!(format, OutputFormat::Text) {
             println!("  auto-optimize: emitting LLVM bitcode for whole-program LTO");
         }
@@ -1293,9 +1296,41 @@ fn build_optimized_libs(
 
         let rt_bc = emit_bc("perry-runtime");
         let sl_bc = emit_bc("perry-stdlib");
-        (rt_bc, sl_bc)
+
+        // Emit .bc for additional crates (UI, jsruntime, geisterhand)
+        let mut extra = Vec::new();
+        if ctx.needs_ui {
+            let ui_crate = match target {
+                Some("ios-simulator") | Some("ios") | Some("ios-widget") | Some("ios-widget-simulator") => "perry-ui-ios",
+                Some("android") => "perry-ui-android",
+                Some("watchos-simulator") | Some("watchos") => "perry-ui-watchos",
+                Some("tvos-simulator") | Some("tvos") => "perry-ui-tvos",
+                Some("linux") => "perry-ui-gtk4",
+                Some("windows") => "perry-ui-windows",
+                Some("macos") => "perry-ui-macos",
+                _ => {
+                    if cfg!(target_os = "linux") { "perry-ui-gtk4" }
+                    else { "perry-ui-macos" }
+                }
+            };
+            if let Some(bc) = emit_bc(ui_crate) {
+                extra.push(bc);
+            }
+        }
+        if ctx.needs_geisterhand {
+            if let Some(bc) = emit_bc("perry-ui-geisterhand") {
+                extra.push(bc);
+            }
+        }
+        if ctx.needs_js_runtime {
+            if let Some(bc) = emit_bc("perry-jsruntime") {
+                extra.push(bc);
+            }
+        }
+
+        (rt_bc, sl_bc, extra)
     } else {
-        (None, None)
+        (None, None, Vec::new())
     };
 
     OptimizedLibs {
@@ -1303,6 +1338,7 @@ fn build_optimized_libs(
         stdlib: if stdlib_path.exists() { Some(stdlib_path) } else { None },
         runtime_bc,
         stdlib_bc,
+        extra_bc,
     }
 }
 
@@ -4177,6 +4213,13 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 // path and capture its name. The LLVM codegen uses this
                 // to generate `perry_fn_<source_prefix>__<name>`.
                 let mut import_function_prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+                let mut namespace_imports: Vec<String> = Vec::new();
+                let mut imported_classes: Vec<perry_codegen_llvm::ImportedClass> = Vec::new();
+                let mut imported_enums: Vec<(String, Vec<(String, perry_hir::EnumValue)>)> = Vec::new();
+                let mut imported_async_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut imported_param_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                let mut imported_return_types: std::collections::HashMap<String, perry_types::Type> = std::collections::HashMap::new();
+
                 for import in &hir_module.imports {
                     if import.module_kind != perry_hir::ModuleKind::NativeCompiled {
                         continue;
@@ -4185,35 +4228,134 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                         Some(p) => p,
                         None => continue,
                     };
+                    let resolved_path_str = resolved_path.clone();
                     let source_module = ctx
                         .native_modules
                         .iter()
                         .find(|(p, _)| p.to_string_lossy() == *resolved_path)
                         .map(|(_, m)| m);
-                    let source_prefix = match source_module {
+                    let source_prefix = match &source_module {
                         Some(m) => sanitize_name(&m.name),
                         None => continue,
                     };
+
                     for spec in &import.specifiers {
-                        match spec {
-                            perry_hir::ImportSpecifier::Named { imported, local: _ } => {
-                                import_function_prefixes
-                                    .insert(imported.clone(), source_prefix.clone());
+                        // Handle namespace imports (import * as X)
+                        if let perry_hir::ImportSpecifier::Namespace { local } = spec {
+                            namespace_imports.push(local.clone());
+                            // Register all exports from the source module
+                            if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                                for (export_name, origin_path) in exports {
+                                    let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
+                                    import_function_prefixes.insert(export_name.clone(), origin_prefix.clone());
+
+                                    let key = (origin_path.clone(), export_name.clone());
+                                    if let Some(&param_count) = exported_func_param_counts.get(&key) {
+                                        imported_param_counts.insert(export_name.clone(), param_count);
+                                    }
+                                    if let Some(class) = exported_classes.get(&key) {
+                                        imported_classes.push(perry_codegen_llvm::ImportedClass {
+                                            name: class.name.clone(),
+                                            local_alias: None,
+                                            source_prefix: origin_prefix.clone(),
+                                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                                            parent_name: class.extends_name.clone(),
+                                        });
+                                    }
+                                    if let Some(members) = exported_enums.get(&key) {
+                                        imported_enums.push((export_name.clone(), members.clone()));
+                                    }
+                                }
                             }
-                            perry_hir::ImportSpecifier::Default { local } => {
-                                import_function_prefixes
-                                    .insert(local.clone(), source_prefix.clone());
+                            continue;
+                        }
+
+                        let (local_name, exported_name) = match spec {
+                            perry_hir::ImportSpecifier::Named { imported, local } => (local.clone(), imported.clone()),
+                            perry_hir::ImportSpecifier::Default { local } => (local.clone(), "default".to_string()),
+                            perry_hir::ImportSpecifier::Namespace { .. } => unreachable!(),
+                        };
+
+                        let key = (resolved_path_str.clone(), exported_name.clone());
+
+                        // Resolve effective prefix (follow re-exports)
+                        let effective_prefix = if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                            if let Some(origin_path) = exports.get(&exported_name) {
+                                if origin_path != &resolved_path_str {
+                                    compute_module_prefix(origin_path, &ctx.project_root)
+                                } else {
+                                    source_prefix.clone()
+                                }
+                            } else {
+                                source_prefix.clone()
                             }
-                            _ => {}
+                        } else {
+                            source_prefix.clone()
+                        };
+
+                        import_function_prefixes.insert(exported_name.clone(), effective_prefix.clone());
+                        if local_name != exported_name {
+                            import_function_prefixes.insert(local_name.clone(), effective_prefix.clone());
+                        }
+
+                        // Imported classes
+                        if let Some(class) = exported_classes.get(&key) {
+                            imported_classes.push(perry_codegen_llvm::ImportedClass {
+                                name: class.name.clone(),
+                                local_alias: if local_name != class.name { Some(local_name.clone()) } else { None },
+                                source_prefix: effective_prefix.clone(),
+                                constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                                method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                                parent_name: class.extends_name.clone(),
+                            });
+                        }
+
+                        // Imported param counts
+                        if let Some(&param_count) = exported_func_param_counts.get(&key) {
+                            imported_param_counts.insert(exported_name.clone(), param_count);
+                            if local_name != exported_name {
+                                imported_param_counts.insert(local_name.clone(), param_count);
+                            }
+                        }
+
+                        // Imported return types
+                        if let Some(return_type) = exported_func_return_types.get(&key) {
+                            imported_return_types.insert(local_name.clone(), return_type.clone());
+                        }
+
+                        // Imported async functions
+                        if exported_async_funcs.contains(&key) {
+                            imported_async_set.insert(local_name.clone());
+                            if local_name != exported_name {
+                                imported_async_set.insert(exported_name.clone());
+                            }
+                        }
+
+                        // Imported enums
+                        if let Some(members) = exported_enums.get(&key) {
+                            imported_enums.push((local_name.clone(), members.clone()));
                         }
                     }
                 }
+
+                // Type aliases from all modules
+                let type_alias_map: std::collections::HashMap<String, perry_types::Type> =
+                    all_type_aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
                 let opts = perry_codegen_llvm::CompileOptions {
                     target: target.clone(),
                     is_entry_module: is_entry,
                     non_entry_module_prefixes,
                     import_function_prefixes,
                     emit_ir_only: bitcode_link,
+                    namespace_imports,
+                    imported_classes,
+                    imported_enums,
+                    imported_async_funcs: imported_async_set,
+                    type_aliases: type_alias_map,
+                    imported_func_param_counts: imported_param_counts,
+                    imported_func_return_types: imported_return_types,
                 };
                 let object_code = perry_codegen_llvm::compile_module(hir_module, opts)
                     .map_err(|e| format!(

@@ -74,6 +74,48 @@ pub struct CompileOptions {
     /// as bytes instead of invoking `clang -c` to produce an object file.
     /// Used by the bitcode-link path (`PERRY_LLVM_BITCODE_LINK=1`).
     pub emit_ir_only: bool,
+
+    // ── Cross-module import plumbing (mirrors Cranelift setter chain) ──
+
+    /// Locals that are namespace imports (`import * as X from "./mod"`).
+    /// Codegen uses this to know that `X.foo()` should be dispatched as
+    /// a cross-module call rather than an object method call.
+    pub namespace_imports: Vec<String>,
+    /// Imported class definitions from other native modules, keyed by
+    /// the local alias (or original name when no alias). Each entry
+    /// carries the class HIR, the module prefix of its origin, and an
+    /// optional local alias.
+    pub imported_classes: Vec<ImportedClass>,
+    /// Imported enum member lists, keyed by the local name under which
+    /// the enum is visible in this module.
+    pub imported_enums: Vec<(String, Vec<(String, perry_hir::EnumValue)>)>,
+    /// Names of imported functions that are async. Codegen needs this to
+    /// wrap calls in the promise machinery.
+    pub imported_async_funcs: std::collections::HashSet<String>,
+    /// Type alias map (name → Type) aggregated from all modules. Codegen
+    /// uses this to resolve `Named` types in function signatures.
+    pub type_aliases: std::collections::HashMap<String, perry_types::Type>,
+    /// Imported function parameter counts, keyed by function name.
+    pub imported_func_param_counts: std::collections::HashMap<String, usize>,
+    /// Imported function return types, keyed by local function name.
+    pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+}
+
+/// A class imported from another native module.
+#[derive(Debug, Clone)]
+pub struct ImportedClass {
+    /// The class name as exported from its origin module.
+    pub name: String,
+    /// Optional local alias (`import { Foo as Bar }`).
+    pub local_alias: Option<String>,
+    /// Symbol prefix of the origin module (for cross-module method calls).
+    pub source_prefix: String,
+    /// Number of constructor parameters (needed for dispatch).
+    pub constructor_param_count: usize,
+    /// Method names defined on this class.
+    pub method_names: Vec<String>,
+    /// Parent class name, if any.
+    pub parent_name: Option<String>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
