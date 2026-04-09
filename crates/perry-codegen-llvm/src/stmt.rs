@@ -344,7 +344,18 @@ fn lower_try(
     // --- current block: setjmp dispatch ---
     let blk = ctx.block();
     let jmpbuf = blk.call(PTR, "js_try_push", &[]);
-    let sjr = blk.call(I32, "setjmp", &[(PTR, &jmpbuf)]);
+    // CRITICAL: setjmp must carry `returns_twice` on the call site
+    // too (not just the declaration). Without it, LLVM -O2 promotes
+    // alloca-backed locals to SSA registers and the longjmp return
+    // path sees stale pre-setjmp values instead of the try-body's
+    // assignments. The standard `blk.call()` doesn't support call
+    // attributes, so we emit the instruction manually.
+    let sjr_reg = blk.next_reg();
+    blk.emit_raw(format!(
+        "{} = call i32 @setjmp(ptr {}) #0",
+        sjr_reg, jmpbuf
+    ));
+    let sjr = sjr_reg;
     let is_exc = blk.icmp_ne(I32, &sjr, "0");
     blk.cond_br(&is_exc, &catch_label, &try_body_label);
 

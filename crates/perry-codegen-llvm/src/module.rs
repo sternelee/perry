@@ -48,9 +48,15 @@ impl LlModule {
         }
         self.declared_names.insert(name.to_string());
         let param_str = param_types.join(", ");
+        // setjmp needs the `returns_twice` attribute to prevent
+        // LLVM from promoting alloca slots to SSA registers across
+        // the setjmp boundary. Without it, local variables modified
+        // between setjmp and longjmp are clobbered when the second
+        // return (via longjmp) happens.
+        let attrs = if name == "setjmp" { " #0" } else { "" };
         self.declarations.push((
             name.to_string(),
-            format!("declare {} @{}({})", return_type, name, param_str),
+            format!("declare {} @{}({}){}", return_type, name, param_str, attrs),
         ));
     }
 
@@ -174,6 +180,12 @@ impl LlModule {
         for func in &self.functions {
             ir.push_str(&func.to_ir());
             ir.push('\n');
+        }
+
+        // Attribute group for setjmp's `returns_twice` marker.
+        // Only emit if setjmp was actually declared in this module.
+        if self.declared_names.contains("setjmp") {
+            ir.push_str("\nattributes #0 = { returns_twice }\n");
         }
 
         ir
