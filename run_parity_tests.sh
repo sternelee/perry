@@ -7,6 +7,22 @@ TEST_DIR="$SCRIPT_DIR/test-files"
 OUTPUT_DIR="$SCRIPT_DIR/test-parity/output"
 REPORT_DIR="$SCRIPT_DIR/test-parity/reports"
 
+# Backend selection: set PERRY_BACKEND=llvm or pass --llvm to use the LLVM backend
+BACKEND="${PERRY_BACKEND:-cranelift}"
+for arg in "$@"; do
+    case "$arg" in
+        --llvm) BACKEND="llvm" ;;
+        --cranelift) BACKEND="cranelift" ;;
+    esac
+done
+if [[ "$BACKEND" == "llvm" ]]; then
+    BACKEND_FLAG="--backend llvm"
+    BACKEND_LABEL="LLVM"
+else
+    BACKEND_FLAG=""
+    BACKEND_LABEL="Cranelift"
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -118,7 +134,7 @@ normalize_output() {
 }
 
 echo "========================================"
-echo "   Perry Parity Test Runner"
+echo "   Perry Parity Test Runner ($BACKEND_LABEL)"
 echo "========================================"
 echo ""
 
@@ -137,7 +153,7 @@ fi
 
 echo -e "${GREEN}Compiler and runtime built successfully${NC}"
 echo ""
-echo "Running parity tests..."
+echo "Running parity tests (backend: $BACKEND_LABEL)..."
 echo ""
 
 # JSON report data
@@ -179,7 +195,7 @@ for test_file in "$TEST_DIR"/*.ts; do
     echo "$node_output" > "$node_output_file"
 
     # Compile with Perry
-    compile_output=$(cargo run --quiet -- "$test_file" -o "$perry_binary" 2>&1)
+    compile_output=$(cargo run --quiet -- $BACKEND_FLAG "$test_file" -o "$perry_binary" 2>&1)
     compile_exit=$?
 
     if [[ $compile_exit -ne 0 ]]; then
