@@ -211,7 +211,21 @@ pub(crate) fn is_map_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
 pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
     match e {
         Expr::String(_) => true,
-        Expr::LocalGet(id) => matches!(ctx.local_types.get(id), Some(HirType::String)),
+        Expr::LocalGet(id) => {
+            match ctx.local_types.get(id) {
+                Some(HirType::String) => true,
+                // Union(String, Null/Void) — nullable strings are still
+                // strings at runtime when non-null. The ?. and != null
+                // guard paths lower the non-null case through the string
+                // method dispatch. Without this, `(s: string | null).
+                // toUpperCase()` fell through to the generic path and
+                // returned undefined.
+                Some(HirType::Union(members)) => {
+                    members.iter().any(|m| matches!(m, HirType::String))
+                }
+                _ => false,
+            }
+        }
         // arr[i] where arr is Array<string> → element is a string.
         // Lets `this.parts[i].length` use the string fast path inline
         // without needing an intermediate let binding.

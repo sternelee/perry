@@ -1758,29 +1758,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- isFinite(x) / Number.isFinite(x) --------
-        // Runtime returns a raw i32 via `js_is_finite` (f64 → i32).
-        // Wrap in i32_bool_to_nanbox so console.log prints
-        // "true"/"false". Note: js_is_finite's signature in the
-        // runtime returns f64 (0.0/1.0), so we use fcmp one to
-        // convert, NOT a call to js_is_finite_i32.
+        // The runtime's js_is_finite already returns NaN-tagged
+        // TAG_TRUE/TAG_FALSE (not a raw 0.0/1.0), so we just
+        // return the result directly. No fcmp conversion needed —
+        // that was wrong because TAG_TRUE is itself a NaN payload
+        // and fcmp("one", NaN, 0.0) always returns false.
         Expr::IsFinite(operand) | Expr::NumberIsFinite(operand) => {
             let v = lower_expr(ctx, operand)?;
-            let blk = ctx.block();
-            // llvm intrinsic: x is finite iff (x - x) is finite.
-            // Simpler: finite = !isnan(x) && !isinf(x). Using
-            // fcmp ord x, x checks NaN; fcmp oeq x, inf checks inf.
-            // Cheapest: fcmp ord x, x AND not-inf. For simplicity,
-            // stay with js_is_finite (returns f64) and convert.
-            let truthy = blk.call(DOUBLE, "js_is_finite", &[(DOUBLE, &v)]);
-            let bit = blk.fcmp("one", &truthy, "0.0");
-            let tagged = blk.select(
-                I1,
-                &bit,
-                I64,
-                crate::nanbox::TAG_TRUE_I64,
-                crate::nanbox::TAG_FALSE_I64,
-            );
-            Ok(blk.bitcast_i64_to_double(&tagged))
+            Ok(ctx.block().call(DOUBLE, "js_is_finite", &[(DOUBLE, &v)]))
         }
 
         // -------- internal: is value === undefined OR a bare-NaN double --------
@@ -2510,18 +2495,9 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, "js_object_is", &[(DOUBLE, &av), (DOUBLE, &bv)]))
         }
         Expr::NumberIsInteger(operand) => {
+            // Runtime already returns NaN-tagged TAG_TRUE/TAG_FALSE.
             let v = lower_expr(ctx, operand)?;
-            let blk = ctx.block();
-            let truthy = blk.call(DOUBLE, "js_number_is_integer", &[(DOUBLE, &v)]);
-            let bit = blk.fcmp("one", &truthy, "0.0");
-            let tagged = blk.select(
-                I1,
-                &bit,
-                I64,
-                crate::nanbox::TAG_TRUE_I64,
-                crate::nanbox::TAG_FALSE_I64,
-            );
-            Ok(blk.bitcast_i64_to_double(&tagged))
+            Ok(ctx.block().call(DOUBLE, "js_number_is_integer", &[(DOUBLE, &v)]))
         }
 
         // -------- Map.clear --------
