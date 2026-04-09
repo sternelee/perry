@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.93
+**Current Version:** 0.4.94
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.94 (llvm-backend)
+- fix: self-recursive nested functions now get their LocalId defined before body lowering, so the LLVM backend's boxed-var analysis sees the same LocalId at declaration and self-reference sites.
+- feat: LLVM driver dispatch now wires namespace imports, imported classes, enums, async funcs, type aliases, and param counts/return types through CompileOptions (mirrors Cranelift setter chain).
+- feat: `run_parity_tests.sh` supports `--llvm` / `PERRY_BACKEND=llvm`; new `run_llvm_sweep.sh` for LLVM parity sweeps.
 
 ### v0.4.93 (llvm-backend)
 - feat: bitcode link now emits `.bc` for all linked crates (perry-ui-*, perry-jsruntime, perry-ui-geisterhand), not just runtime+stdlib. Extra `.bc` files are merged into the whole-program LTO pipeline via `llvm-link`, enabling cross-crate inlining and dead code elimination across UI/jsruntime boundaries.
