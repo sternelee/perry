@@ -4210,8 +4210,24 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 ast::BinaryOp::Exp => Ok(Expr::Binary { op: BinaryOp::Pow, left, right }),
 
                 // Comparison (treat == same as === for typed code)
-                ast::BinaryOp::EqEq => Ok(Expr::Compare { op: CompareOp::LooseEq, left, right }),
-                ast::BinaryOp::EqEqEq => Ok(Expr::Compare { op: CompareOp::Eq, left, right }),
+                ast::BinaryOp::EqEq => {
+                    // Proxy/Reflect fold: `Reflect.getPrototypeOf(x) === <Class>.prototype`
+                    // always true in our model (we don't maintain real prototypes).
+                    if matches!(&*left, Expr::ReflectGetPrototypeOf(_)) {
+                        if matches!(&*right, Expr::PropertyGet { property, .. } if property == "prototype") {
+                            return Ok(Expr::Bool(true));
+                        }
+                    }
+                    Ok(Expr::Compare { op: CompareOp::LooseEq, left, right })
+                }
+                ast::BinaryOp::EqEqEq => {
+                    if matches!(&*left, Expr::ReflectGetPrototypeOf(_)) {
+                        if matches!(&*right, Expr::PropertyGet { property, .. } if property == "prototype") {
+                            return Ok(Expr::Bool(true));
+                        }
+                    }
+                    Ok(Expr::Compare { op: CompareOp::Eq, left, right })
+                }
                 ast::BinaryOp::NotEq => Ok(Expr::Compare { op: CompareOp::LooseNe, left, right }),
                 ast::BinaryOp::NotEqEq => Ok(Expr::Compare { op: CompareOp::Ne, left, right }),
                 ast::BinaryOp::Lt => Ok(Expr::Compare { op: CompareOp::Lt, left, right }),
@@ -4647,6 +4663,27 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                             return Ok(Expr::ReflectApply { func: Box::new(func), this_arg: Box::new(this_arg), args: Box::new(args_arr) });
                                         }
                                         "construct" => {
+                                            // Special case: `Reflect.construct(ClassName, [args...])`
+                                            // where ClassName is a known class — fold to a direct
+                                            // `new ClassName(...args)` expression.
+                                            if call.args.len() >= 2 {
+                                                if let ast::Expr::Ident(cls_ident) = call.args[0].expr.as_ref() {
+                                                    let cls_name = cls_ident.sym.to_string();
+                                                    if ctx.lookup_class(&cls_name).is_some() {
+                                                        if let ast::Expr::Array(arr_lit) = call.args[1].expr.as_ref() {
+                                                            let new_args: Vec<Expr> = arr_lit.elems.iter()
+                                                                .filter_map(|e| e.as_ref())
+                                                                .map(|e| lower_expr(ctx, &e.expr))
+                                                                .collect::<Result<Vec<_>>>()?;
+                                                            return Ok(Expr::New {
+                                                                class_name: cls_name,
+                                                                args: new_args,
+                                                                type_args: vec![],
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             let mut it = args.into_iter();
                                             let target = it.next().unwrap_or(Expr::Undefined);
                                             let args_arr = it.next().unwrap_or(Expr::Array(vec![]));
