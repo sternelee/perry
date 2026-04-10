@@ -716,6 +716,7 @@ fn pre_scan_weakref_locals(ast_module: &ast::Module, ctx: &mut LoweringContext) 
                 "FinalizationRegistry" => Some("FinalizationRegistry"),
                 "WeakMap" => Some("WeakMap"),
                 "WeakSet" => Some("WeakSet"),
+                "Proxy" => Some("Proxy"),
                 _ => None,
             }
         } else {
@@ -745,6 +746,7 @@ fn pre_scan_weakref_locals(ast_module: &ast::Module, ctx: &mut LoweringContext) 
                     Some("FinalizationRegistry") => { ctx.finreg_locals.insert(name); }
                     Some("WeakMap") => { ctx.weakmap_locals.insert(name); }
                     Some("WeakSet") => { ctx.weakset_locals.insert(name); }
+                    Some("Proxy") => { ctx.proxy_locals.insert(name); }
                     _ => {}
                 }
             }
@@ -3103,6 +3105,95 @@ fn lower_stmt(
                                 ctx.regex_exec_locals.insert(ident.id.sym.to_string());
                             }
                         }
+                        // `const { proxy: revProxy, revoke } = Proxy.revocable(t, h)`
+                        // is rewritten to a ProxyNew binding + a dummy revoke binding.
+                        if let (ast::Pat::Object(obj_pat), Some(init)) = (&decl.name, &decl.init) {
+                            let inner = {
+                                let mut e = init.as_ref();
+                                loop {
+                                    match e {
+                                        ast::Expr::TsAs(ts_as) => e = &ts_as.expr,
+                                        ast::Expr::TsNonNull(nn) => e = &nn.expr,
+                                        ast::Expr::TsConstAssertion(ca) => e = &ca.expr,
+                                        ast::Expr::TsTypeAssertion(ta) => e = &ta.expr,
+                                        ast::Expr::Paren(p) => e = &p.expr,
+                                        _ => break,
+                                    }
+                                }
+                                e
+                            };
+                            let mut is_proxy_revocable = false;
+                            if let ast::Expr::Call(call) = inner {
+                                if let ast::Callee::Expr(callee) = &call.callee {
+                                    if let ast::Expr::Member(m) = callee.as_ref() {
+                                        if let ast::Expr::Ident(o) = m.obj.as_ref() {
+                                            if o.sym.as_ref() == "Proxy" {
+                                                if let ast::MemberProp::Ident(p) = &m.prop {
+                                                    if p.sym.as_ref() == "revocable" {
+                                                        is_proxy_revocable = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if is_proxy_revocable {
+                                if let ast::Expr::Call(call) = inner {
+                                    let target_ast = call.args.get(0).map(|a| a.expr.clone());
+                                    let handler_ast = call.args.get(1).map(|a| a.expr.clone());
+                                    let target = if let Some(t) = target_ast { lower_expr(ctx, &t)? } else { Expr::Undefined };
+                                    let handler = if let Some(h) = handler_ast { lower_expr(ctx, &h)? } else { Expr::Object(vec![]) };
+                                    let mut proxy_alias: Option<String> = None;
+                                    let mut revoke_alias: Option<String> = None;
+                                    for prop in &obj_pat.props {
+                                        match prop {
+                                            ast::ObjectPatProp::KeyValue(kv) => {
+                                                let key_name = match &kv.key {
+                                                    ast::PropName::Ident(i) => i.sym.to_string(),
+                                                    ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                                                    _ => continue,
+                                                };
+                                                if let ast::Pat::Ident(alias) = &*kv.value {
+                                                    let alias_name = alias.id.sym.to_string();
+                                                    if key_name == "proxy" { proxy_alias = Some(alias_name); }
+                                                    else if key_name == "revoke" { revoke_alias = Some(alias_name); }
+                                                }
+                                            }
+                                            ast::ObjectPatProp::Assign(a) => {
+                                                let name = a.key.sym.to_string();
+                                                if name == "proxy" { proxy_alias = Some(name); }
+                                                else if name == "revoke" { revoke_alias = Some(name); }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    if let Some(p_name) = proxy_alias {
+                                        let proxy_id = ctx.define_local(p_name.clone(), Type::Any);
+                                        module.init.push(Stmt::Let {
+                                            id: proxy_id,
+                                            name: p_name.clone(),
+                                            ty: Type::Any,
+                                            mutable,
+                                            init: Some(Expr::ProxyNew { target: Box::new(target), handler: Box::new(handler) }),
+                                        });
+                                        ctx.proxy_locals.insert(p_name.clone());
+                                        if let Some(r_name) = revoke_alias {
+                                            ctx.proxy_revoke_locals.insert(r_name.clone(), p_name);
+                                            let rev_id = ctx.define_local(r_name.clone(), Type::Any);
+                                            module.init.push(Stmt::Let {
+                                                id: rev_id,
+                                                name: r_name,
+                                                ty: Type::Any,
+                                                mutable,
+                                                init: Some(Expr::Undefined),
+                                            });
+                                        }
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
                         let stmts = lower_var_decl_with_destructuring(ctx, decl, mutable)?;
                         // `var` is function-scoped: mark defined locals so
                         // `pop_block_scope` preserves them when leaving an inner block.
@@ -4050,6 +4141,15 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
         ast::Expr::Bin(bin) => {
             // Handle 'in' operator: property in object
             if matches!(bin.op, ast::BinaryOp::In) {
+                // Proxy fast path: `key in proxy` routes through js_proxy_has.
+                if let ast::Expr::Ident(obj_ident) = bin.right.as_ref() {
+                    let obj_name = obj_ident.sym.to_string();
+                    if ctx.proxy_locals.contains(&obj_name) {
+                        let key = Box::new(lower_expr(ctx, &bin.left)?);
+                        let proxy = Box::new(lower_expr(ctx, &bin.right)?);
+                        return Ok(Expr::ProxyHas { proxy, key });
+                    }
+                }
                 let property = Box::new(lower_expr(ctx, &bin.left)?);
                 let object = Box::new(lower_expr(ctx, &bin.right)?);
                 return Ok(Expr::In { property, object });
@@ -4169,7 +4269,13 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     }
                     Ok(Expr::TypeOf(operand))
                 }
-                ast::UnaryOp::Delete => Ok(Expr::Delete(operand)),
+                ast::UnaryOp::Delete => {
+                    // Proxy delete: rewrite `delete proxy.key` as ProxyDelete.
+                    if let Expr::ProxyGet { proxy, key } = &*operand {
+                        return Ok(Expr::ProxyDelete { proxy: proxy.clone(), key: key.clone() });
+                    }
+                    Ok(Expr::Delete(operand))
+                }
                 ast::UnaryOp::Void => Ok(Expr::Void(operand)),
                 _ => Err(anyhow!("Unsupported unary operator: {:?}", unary.op)),
             }
@@ -4181,6 +4287,28 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             let mut args = call.args.iter()
                 .map(|arg| lower_expr(ctx, &arg.expr))
                 .collect::<Result<Vec<_>>>()?;
+
+            // --- Proxy apply / revoke fast path ---
+            if !has_spread {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = callee_expr.as_ref() {
+                        let name = ident.sym.to_string();
+                        if ctx.proxy_locals.contains(&name) {
+                            if let Some(id) = ctx.lookup_local(&name) {
+                                return Ok(Expr::ProxyApply {
+                                    proxy: Box::new(Expr::LocalGet(id)),
+                                    args,
+                                });
+                            }
+                        }
+                        if let Some(proxy_name) = ctx.proxy_revoke_locals.get(&name).cloned() {
+                            if let Some(id) = ctx.lookup_local(&proxy_name) {
+                                return Ok(Expr::ProxyRevoke(Box::new(Expr::LocalGet(id))));
+                            }
+                        }
+                    }
+                }
+            }
 
             // If spread is present, create CallSpread instead of Call
             let spread_args: Option<Vec<CallArg>> = if has_spread {
@@ -8321,6 +8449,23 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     }
                 }
                 ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(member)) => {
+                    // Proxy set: `proxy.foo = v` / `proxy[k] = v`
+                    if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                        let obj_name = obj_ident.sym.to_string();
+                        if ctx.proxy_locals.contains(&obj_name) {
+                            let proxy = Box::new(if let Some(id) = ctx.lookup_local(&obj_name) {
+                                Expr::LocalGet(id)
+                            } else {
+                                lower_expr(ctx, &member.obj)?
+                            });
+                            let key = Box::new(match &member.prop {
+                                ast::MemberProp::Ident(i) => Expr::String(i.sym.to_string()),
+                                ast::MemberProp::Computed(c) => lower_expr(ctx, &c.expr)?,
+                                ast::MemberProp::PrivateName(p) => Expr::String(format!("#{}", p.name.as_str())),
+                            });
+                            return Ok(Expr::ProxySet { proxy, key, value });
+                        }
+                    }
                     // Check if this is a static field assignment (e.g., Counter.count = 5)
                     if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
                         let obj_name = obj_ident.sym.to_string();
@@ -8718,6 +8863,25 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             return Ok(Expr::DateNew(None));
                         } else {
                             return Ok(Expr::DateNew(Some(Box::new(args.into_iter().next().unwrap()))));
+                        }
+                    }
+                    if class_name == "Proxy" {
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+                        let mut it = args.into_iter();
+                        let target = it.next().unwrap_or(Expr::Undefined);
+                        let handler = it.next().unwrap_or(Expr::Object(vec![]));
+                        return Ok(Expr::ProxyNew { target: Box::new(target), handler: Box::new(handler) });
+                    }
+                    if ctx.proxy_locals.contains(&class_name) {
+                        let args = new_expr.args.as_ref()
+                            .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                            .transpose()?
+                            .unwrap_or_default();
+                        if let Some(id) = ctx.lookup_local(&class_name) {
+                            return Ok(Expr::ProxyConstruct { proxy: Box::new(Expr::LocalGet(id)), args });
                         }
                     }
                     // Handle AggregateError separately (2-arg form: errors array, message)
