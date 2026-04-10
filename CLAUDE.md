@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.97
+**Current Version:** 0.4.98
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.98 (llvm-backend)
+- fix: `format_jsvalue` safe fallback for non-array/object GC types — removes heuristic pointer interpretation that could crash on closures, maps, sets, promises. Now dispatches by GC type with safe "[object Object]" default.
+- feat: LLVM `lower_array_method.rs` safety-net handlers for 17 array methods (find, findIndex, findLast, findLastIndex, reduce, reduceRight, map, filter, forEach, includes, indexOf, at, slice, shift, fill, unshift, entries/keys/values). Fixes `arr.fill(7)` in test_edge_arrays. Declares `js_array_forEach`/`js_array_fill` in LLVM runtime_decls.
+- feat: `benchmarks/compare_backends.sh` — Cranelift vs LLVM backend comparison (compile time, binary size, runtime perf).
 
 ### v0.4.97 (llvm-backend)
 - feat: `for...of` iteration on Maps and Sets + `Map.forEach`/`Set.forEach` dispatch. LLVM backend now handles `Expr::MapEntries`/`MapKeys`/`MapValues`/`SetValues` (calling `js_map_entries`/`js_set_to_array` runtime functions). `lower_call.rs` intercepts `map.forEach(cb)`/`set.forEach(cb)` on Map/Set-typed receivers and routes to `js_map_foreach`/`js_set_foreach`. HIR `lower.rs` now wraps Set for...of iterables with `SetValues()` (was missing, only Map had `MapEntries` wrapping). Fixed runtime bug: `js_map_foreach`/`js_set_foreach` now mask NaN-box tag bits from callback pointer before calling `js_closure_call2`.
