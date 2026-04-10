@@ -66,12 +66,32 @@ fn decode_proxy_id(raw: i64) -> Option<u64> {
     Some(id)
 }
 
-/// Look up a proxy by NaN-boxed value. Strips POINTER_TAG and extracts the
-/// lower 48 bits, then validates the id range.
+/// Look up a proxy by NaN-boxed value. Validates that the value is
+/// pointer-tagged with a low-48 payload inside the proxy-id range AND that
+/// the id corresponds to a registered entry, so a regular heap pointer
+/// whose lower bits happen to fall in the encoding range doesn't get
+/// misclassified as a proxy.
 fn lookup(proxy_boxed: f64) -> Option<u64> {
     let bits = proxy_boxed.to_bits();
-    let lower48 = (bits & POINTER_MASK) as i64;
-    decode_proxy_id(lower48)
+    // Proxies are always POINTER_TAG.
+    if (bits >> 48) != (POINTER_TAG >> 48) {
+        return None;
+    }
+    let lower48 = (bits & POINTER_MASK) as u64;
+    // Real heap pointers live >= 0x1_0000_0000 on macOS/iOS arenas.
+    if lower48 >= 0x1_0000_0000 {
+        return None;
+    }
+    let id = decode_proxy_id(lower48 as i64)?;
+    // Only a real entry in the registry counts as a proxy.
+    PROXIES.with(|p| {
+        let v = p.borrow();
+        if (id as usize) < v.len() && v[id as usize].is_some() {
+            Some(id)
+        } else {
+            None
+        }
+    })
 }
 
 /// Allocate a new proxy. Returns the NaN-boxed POINTER_TAG value holding the
