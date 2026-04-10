@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.105
+**Current Version:** 0.4.106
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.106 (llvm-backend)
+- fix: `"foo".split(/regex/)` segfault (LLVM backend) — the codegen always routes string.split through `js_string_split` regardless of delimiter type, and the runtime was interpreting the regex header as a `StringHeader`. Added `REGEX_POINTERS` thread-local in `regex.rs` that records every `RegExpHeader` allocation, plus an `is_regex_pointer()` check in `js_string_split` that delegates to `js_string_split_regex` for matched pointers. `test_edge_json_regex` flipped from LLVM_CRASH (SIGBUS) to DIFF; sweep CRASH count 7 → 6, MATCH 84 → 85.
 
 ### v0.4.104 (llvm-backend)
 - fix: 2D indexing `grid[i][j]` and `grid[i].length` when `grid: Array<Array<T>>`. `static_type_of` in `type_analysis.rs` now walks `Expr::IndexGet` to return the element type of a statically-known array receiver, so `grid[i]` is recognized as an array and its `.length` hits the inline fast path (`load i32 from ptr+0`) instead of falling through to `js_object_get_field_by_name_f64` which returned undefined. `is_array_expr` also now recognizes unions whose non-nullish variant is an array (e.g. `number[] | null` after `if (x)` narrowing), fixing `maybeArr.length` in test_edge_arrays. test_edge_arrays flipped DIFF → MATCH (sweep 84 → 85).

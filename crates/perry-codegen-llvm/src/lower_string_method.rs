@@ -104,6 +104,10 @@ pub(crate) fn lower_string_method(
             if args.len() != 1 {
                 bail!("perry-codegen-llvm: String.split expects 1 arg (delimiter), got {}", args.len());
             }
+            // NOTE: we always call js_string_split here, even for regex
+            // delimiters — the runtime will detect regex pointers via
+            // their GC header and delegate to js_string_split_regex
+            // internally. This avoids needing a new LLVM runtime decl.
             let delim_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);

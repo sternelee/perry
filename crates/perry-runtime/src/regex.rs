@@ -5,7 +5,7 @@
 
 use regex::Regex;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::sync::Arc;
 
@@ -21,6 +21,26 @@ thread_local! {
     /// after the exec call.
     static LAST_EXEC_INDEX: RefCell<f64> = RefCell::new(0.0);
     static LAST_EXEC_GROUPS: RefCell<*mut ObjectHeader> = RefCell::new(ptr::null_mut());
+
+    /// Set of all RegExpHeader pointers ever allocated in this thread.
+    /// Used by callers (e.g. `js_string_split`) to distinguish a regex
+    /// delimiter from a string delimiter when the codegen can't tell
+    /// statically. Pointers are never removed; RegExpHeader is backed by
+    /// `gc_malloc` but headers are effectively permanent in practice, and
+    /// even if a header is freed, subsequent lookups will simply miss —
+    /// the worst outcome is that a stale regex is treated as a string
+    /// (safe) rather than the other way around (segfault).
+    static REGEX_POINTERS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+}
+
+/// Check whether `ptr` is a RegExpHeader pointer that was allocated in
+/// this thread. Called by `js_string_split` to detect the `s.split(re)`
+/// case without a separate runtime FFI entry point.
+pub(crate) fn is_regex_pointer(ptr: *const u8) -> bool {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return false;
+    }
+    REGEX_POINTERS.with(|s| s.borrow().contains(&(ptr as usize)))
 }
 
 thread_local! {
@@ -177,6 +197,12 @@ pub extern "C" fn js_regexp_new(pattern: *const StringHeader, flags: *const Stri
         (*ptr).global = global;
         (*ptr).multiline = multiline;
         (*ptr).last_index = 0;
+
+        // Record the pointer so that js_string_split can detect
+        // `s.split(regex)` without a dedicated runtime decl.
+        REGEX_POINTERS.with(|s| {
+            s.borrow_mut().insert(ptr as usize);
+        });
 
         ptr
     }

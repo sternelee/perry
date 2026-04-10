@@ -991,6 +991,19 @@ pub extern "C" fn js_string_split(s: *const StringHeader, delimiter: *const Stri
         return crate::array::js_array_alloc(0);
     }
 
+    // The LLVM backend can't always statically distinguish `s.split(regex)`
+    // from `s.split(string)` at the call site — it uses a single decl for
+    // both. Detect regex delimiters by checking whether the pointer was
+    // recorded by `js_regexp_new` and delegate to `js_string_split_regex`
+    // on a match. Otherwise the regex header would be read as a
+    // StringHeader and segfault on the first byte of its `regex_ptr`.
+    if crate::regex::is_regex_pointer(delimiter as *const u8) {
+        return crate::regex::js_string_split_regex(
+            s,
+            delimiter as *const crate::regex::RegExpHeader,
+        );
+    }
+
     let str_data = string_as_str(s);
     let delim = if !is_valid_string_ptr(delimiter) {
         ""
