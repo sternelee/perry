@@ -452,6 +452,8 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     module.declare_function("js_array_delete", I32, &[I64, I32]);
     // Array.from() — js_array_clone handles arrays, Sets, and Maps.
     module.declare_function("js_array_clone", I64, &[I64]);
+    // Generator / iterator protocol: walk `.next()`/`.value` loop and collect into array.
+    module.declare_function("js_iterator_to_array", I64, &[DOUBLE]);
 
     declare_phase_b_objects(module);
 }

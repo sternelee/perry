@@ -155,7 +155,10 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
 
     // Track IDs allocated during linearization (e.g. yield* delegation vars)
     let local_id_before = *next_local_id;
-    linearize_body(&func.body, &mut states, &mut current, &mut state_num, state_id, next_local_id, sent_id);
+    // Catches collected during linearization: each entry is (catch_param_id, catch_body).
+    // Used by the .throw() closure to re-route the exception into the catch handler.
+    let mut catches: Vec<(Option<LocalId>, Vec<Stmt>)> = Vec::new();
+    linearize_body(&func.body, &mut states, &mut current, &mut state_num, state_id, next_local_id, sent_id, &mut catches);
     let extra_local_ids: Vec<LocalId> = (local_id_before..*next_local_id).collect();
 
     // Push final state (code after last yield / end of function)
@@ -382,17 +385,43 @@ fn transform_generator_function(func: &mut Function, next_local_id: &mut u32, ne
         is_async: false,
     };
 
-    // Build .throw(error) closure — marks done (simplified: doesn't route to catch)
+    // Build .throw(error) closure.
+    // Simplified catch routing: if any catch was seen during linearization, the throw
+    // closure assigns the first catch's param to the thrown value and inlines the
+    // catch body. Nested / multiple independent catches are not supported yet —
+    // the first `catch (e)` block wins. Catches must not contain `yield` themselves
+    // (the transform doesn't lift them into the state machine).
     let throw_param_id = alloc_local(next_local_id);
     let throw_func_id_val = { let id = *next_func_id; *next_func_id += 1; id };
+    let mut throw_body: Vec<Stmt> = Vec::new();
+    if let Some((catch_param_id, catch_body)) = catches.first().cloned() {
+        // Assign catch parameter from the thrown value so the catch body can read `e`.
+        if let Some(cp_id) = catch_param_id {
+            throw_body.push(Stmt::Expr(Expr::LocalSet(
+                cp_id,
+                Box::new(Expr::LocalGet(throw_param_id)),
+            )));
+        }
+        // Inline the catch body. Any `Let { id, init: Some(...) }` for a hoisted
+        // var is rewritten to LocalSet so the captured box is updated instead of
+        // shadowed (mirrors the rewrite in the next() closure above).
+        let mut rewritten = catch_body;
+        for stmt in &mut rewritten {
+            if let Stmt::Let { id, init: Some(init_expr), .. } = stmt {
+                if hoisted_ids.contains(id) {
+                    *stmt = Stmt::Expr(Expr::LocalSet(*id, Box::new(init_expr.clone())));
+                }
+            }
+        }
+        throw_body.extend(rewritten);
+    }
+    throw_body.push(Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))));
+    throw_body.push(Stmt::Return(Some(make_iter_result(Expr::Undefined, true))));
     let throw_closure = Expr::Closure {
         func_id: throw_func_id_val,
         params: vec![perry_hir::Param { id: throw_param_id, name: "__throw_val".to_string(), ty: Type::Any, is_rest: false, default: None }],
         return_type: Type::Any,
-        body: vec![
-            Stmt::Expr(Expr::LocalSet(done_id, Box::new(Expr::Bool(true)))),
-            Stmt::Return(Some(make_iter_result(Expr::Undefined, true))),
-        ],
+        body: throw_body,
         captures: captures.clone(),
         mutable_captures: mutable_captures.clone(),
         captures_this: false,
@@ -437,6 +466,7 @@ fn linearize_body(
     #[allow(unused_variables)]
     next_local_id: &mut u32,
     sent_id: LocalId,
+    catches: &mut Vec<(Option<LocalId>, Vec<Stmt>)>,
 ) {
     for stmt in stmts {
         match stmt {
@@ -491,7 +521,7 @@ fn linearize_body(
                 };
 
                 // Now linearize the expanded while (it contains a yield, so the while handler picks it up)
-                linearize_body(&[while_stmt], states, current, state_num, state_id, next_local_id, sent_id);
+                linearize_body(&[while_stmt], states, current, state_num, state_id, next_local_id, sent_id, catches);
             }
 
             // yield expr at statement level (non-delegate)
@@ -582,7 +612,7 @@ fn linearize_body(
                 });
 
                 // Process loop body (may contain yields)
-                linearize_body(body, states, current, state_num, state_id, next_local_id, sent_id);
+                linearize_body(body, states, current, state_num, state_id, next_local_id, sent_id, catches);
 
                 // State for update: run update expression, goto condition check
                 let update_state = *state_num;
@@ -649,7 +679,7 @@ fn linearize_body(
                 });
 
                 // Process body
-                linearize_body(while_body, states, current, state_num, state_id, next_local_id, sent_id);
+                linearize_body(while_body, states, current, state_num, state_id, next_local_id, sent_id, catches);
 
                 // After body, goto condition
                 let loop_back_state = *state_num;
@@ -669,24 +699,22 @@ fn linearize_body(
                 }
             }
 
-            // Try-catch containing yield(s) — linearize the try body directly.
-            // This strips the try/catch wrapper which means .throw() won't route
-            // to the catch handler, but it's correct for the non-throwing path and
-            // unblocks compilation. A full implementation would need per-state
-            // exception handler tracking.
+            // Try-catch containing yield(s) — linearize the try body directly and
+            // stash the catch body so the .throw() closure can inline it.
+            // Limitations: no per-state exception handler tracking, so only the
+            // first catch encountered will run on .throw(). Catches themselves
+            // must not yield — they run to completion inside the throw closure.
             Stmt::Try { body, catch, finally }
                 if body_contains_yield(body) =>
             {
                 // Linearize the try body directly (yields become normal states)
-                linearize_body(body, states, current, state_num, state_id, next_local_id, sent_id);
+                linearize_body(body, states, current, state_num, state_id, next_local_id, sent_id, catches);
 
-                // If there's a catch block, append it as regular statements
-                // (they'll execute if the try body falls through, which is wrong
-                // for exception semantics but harmless when no throw occurs)
+                // Stash the catch so transform_generator_function can inline it
+                // into the .throw() closure later.
                 if let Some(catch_clause) = catch {
-                    // Skip adding catch body to the main flow — it should only
-                    // execute on .throw(), not on normal fallthrough
-                    let _ = catch_clause;
+                    let param_id = catch_clause.param.as_ref().map(|(id, _)| *id);
+                    catches.push((param_id, catch_clause.body.clone()));
                 }
 
                 // Finally block always runs
@@ -733,7 +761,7 @@ fn linearize_body(
                 });
 
                 // Linearize then-branch
-                linearize_body(then_branch, states, current, state_num, state_id, next_local_id, sent_id);
+                linearize_body(then_branch, states, current, state_num, state_id, next_local_id, sent_id, catches);
                 // After then-branch, flush into a goto-after state
                 let then_end_state = *state_num;
                 *state_num += 1;
@@ -746,7 +774,7 @@ fn linearize_body(
                 // Linearize else-branch
                 let else_state = *state_num;
                 if let Some(else_stmts) = else_branch {
-                    linearize_body(else_stmts, states, current, state_num, state_id, next_local_id, sent_id);
+                    linearize_body(else_stmts, states, current, state_num, state_id, next_local_id, sent_id, catches);
                 }
                 let else_end_state = *state_num;
                 *state_num += 1;
@@ -896,7 +924,13 @@ fn collect_vars_recursive(stmts: &[Stmt], vars: &mut Vec<(LocalId, String, Type)
             }
             Stmt::Try { body, catch, finally } => {
                 collect_vars_recursive(body, vars);
-                if let Some(c) = catch { collect_vars_recursive(&c.body, vars); }
+                if let Some(c) = catch {
+                    // Hoist the catch parameter so the .throw() closure can assign to it.
+                    if let Some((pid, pname)) = &c.param {
+                        vars.push((*pid, pname.clone(), Type::Any));
+                    }
+                    collect_vars_recursive(&c.body, vars);
+                }
                 if let Some(f) = finally { collect_vars_recursive(f, vars); }
             }
             Stmt::Switch { cases, .. } => {

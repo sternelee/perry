@@ -177,6 +177,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
 
+### v0.4.112 (llvm-backend)
+- feat: generator `for...of` / spread / `Array.from` / array destructuring now produce real arrays. `Expr::IteratorToArray` in LLVM backend was a passthrough — it now calls `js_iterator_to_array` (walks `.next()` loop, collects `.value` into a fresh array). Fixes the 4 denormal output lines in `test_gap_generators`.
+- feat: generator `.throw(err)` routes into the enclosing `catch` clause. `perry-transform::generator.rs` now collects catch clauses during linearization; the throw closure assigns the catch param and inlines the catch body before marking done. Single catch per generator; catches must not yield (still). Fixes the missing `"caught: test error"` line.
+- Sweep: still 89 MATCH / 25 DIFF — no regressions. `test_gap_generators` diff dropped 15 → 1 (only the `*[Symbol.iterator]` class method case remains, which needs `lower_decl.rs` support for computed method keys — out of scope).
+
 ### v0.4.111 (llvm-backend)
 - fix: `{ ...src, k: v }` object spread now calls `js_object_copy_own_fields(dst, src)` (was silently ignored with `// Spreads are silently ignored`). Runtime was already implemented in `object.rs:860`.
 - fix: `js_array_concat` detects Sets (via `SET_REGISTRY`) and auto-converts before concatenation, so `[...new Set(...)]` spread-into-array gets the right elements instead of reading SetHeader memory as f64 array elements.

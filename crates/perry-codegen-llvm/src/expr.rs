@@ -2930,7 +2930,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let _ = lower_expr(ctx, p)?;
             Ok(double_literal(0.0))
         }
-        Expr::IteratorToArray(o) => lower_expr(ctx, o),
+        Expr::IteratorToArray(o) => {
+            // Walk the iterator protocol: call .next() in a loop, collect .value entries
+            // into a fresh array. Runtime returns the raw ArrayHeader pointer, we re-NaN-box
+            // so callers that expect an array-valued NaN-box work correctly.
+            let iter_box = lower_expr(ctx, o)?;
+            let blk = ctx.block();
+            let arr_ptr = blk.call(I64, "js_iterator_to_array", &[(DOUBLE, &iter_box)]);
+            Ok(nanbox_pointer_inline(blk, &arr_ptr))
+        }
         Expr::WeakRefDeref(o) => lower_expr(ctx, o),
         Expr::Uint8ArrayNew(_) => Ok(double_literal(0.0)),
         Expr::Uint8ArrayLength(_) => Ok(double_literal(0.0)),
