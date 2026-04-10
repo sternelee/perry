@@ -2705,12 +2705,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let result = blk.call(I64, "js_path_basename", &[(I64, &p_handle)]);
             Ok(nanbox_string_inline(blk, &result))
         }
-        Expr::PathBasenameExt(p, _ext) => {
-            // Stub: ignore ext stripping.
+        Expr::PathBasenameExt(p, ext) => {
+            // path.basename(path, ext) — strips trailing `ext` suffix.
+            // Runtime: js_path_basename_ext(path_ptr, ext_ptr) -> *StringHeader.
             let p_box = lower_expr(ctx, p)?;
+            let e_box = lower_expr(ctx, ext)?;
             let blk = ctx.block();
             let p_handle = unbox_to_i64(blk, &p_box);
-            let result = blk.call(I64, "js_path_basename", &[(I64, &p_handle)]);
+            let e_handle = unbox_to_i64(blk, &e_box);
+            let result = blk.call(
+                I64,
+                "js_path_basename_ext",
+                &[(I64, &p_handle), (I64, &e_handle)],
+            );
             Ok(nanbox_string_inline(blk, &result))
         }
         Expr::PathParse(p) => {
@@ -2903,6 +2910,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let p_handle = unbox_to_i64(blk, &p_box);
             let result = blk.call(I64, "js_path_extname", &[(I64, &p_handle)]);
             Ok(nanbox_string_inline(blk, &result))
+        }
+        // -------- path.sep / path.delimiter constants --------
+        Expr::PathSep => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_path_sep_get", &[]);
+            Ok(nanbox_string_inline(blk, &h))
+        }
+        Expr::PathDelimiter => {
+            let blk = ctx.block();
+            let h = blk.call(I64, "js_path_delimiter_get", &[]);
+            Ok(nanbox_string_inline(blk, &h))
         }
         Expr::PathFormat(o) => {
             let obj_box = lower_expr(ctx, o)?;

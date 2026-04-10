@@ -292,7 +292,10 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("llvm.sin.f64", DOUBLE, &[DOUBLE]);
     module.declare_function("llvm.cos.f64", DOUBLE, &[DOUBLE]);
     module.declare_function("js_path_basename", I64, &[I64]);
+    module.declare_function("js_path_basename_ext", I64, &[I64, I64]);
     module.declare_function("js_path_extname", I64, &[I64]);
+    module.declare_function("js_path_sep_get", I64, &[]);
+    module.declare_function("js_path_delimiter_get", I64, &[]);
     module.declare_function("js_path_parse", I64, &[I64]);
     // JSON.parse returns JSValue (u64) via integer register on ARM64,
     // not f64. Use I64 return + bitcast to avoid ABI mismatch crash.
