@@ -53,6 +53,25 @@ thread_local! {
     pub(crate) static PROPERTY_DESCRIPTORS: RefCell<HashMap<(usize, String), PropertyAttrs>> = RefCell::new(HashMap::new());
 }
 
+/// Accessor descriptor storage: maps (obj_ptr, key) -> (get_closure_bits, set_closure_bits).
+/// A zero bits value means "no getter" or "no setter". Entries here represent properties
+/// installed via `Object.defineProperty(obj, key, { get, set })` — those must route reads
+/// through the getter closure and writes through the setter closure instead of touching
+/// the underlying field slot.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AccessorDescriptor {
+    pub get: u64, // NaN-boxed closure f64 bits, 0 = absent
+    pub set: u64, // NaN-boxed closure f64 bits, 0 = absent
+}
+
+thread_local! {
+    pub(crate) static ACCESSOR_DESCRIPTORS: RefCell<HashMap<(usize, String), AccessorDescriptor>> = RefCell::new(HashMap::new());
+    /// Fast-path gate: `false` when no accessor descriptors have ever been installed
+    /// on this thread, so hot `js_object_get_field_by_name` / `set_field_by_name`
+    /// can skip the `ACCESSOR_DESCRIPTORS` HashMap lookup entirely.
+    pub(crate) static ACCESSORS_IN_USE: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Look up the property descriptor for (obj, key). Returns None if no entry exists,
 /// in which case the JS default `{ writable: true, enumerable: true, configurable: true }` applies.
 pub(crate) fn get_property_attrs(obj: usize, key: &str) -> Option<PropertyAttrs> {
@@ -62,6 +81,17 @@ pub(crate) fn get_property_attrs(obj: usize, key: &str) -> Option<PropertyAttrs>
 /// Store a property descriptor for (obj, key).
 pub(crate) fn set_property_attrs(obj: usize, key: String, attrs: PropertyAttrs) {
     PROPERTY_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), attrs); });
+}
+
+/// Look up the accessor descriptor (get/set) for (obj, key).
+pub(crate) fn get_accessor_descriptor(obj: usize, key: &str) -> Option<AccessorDescriptor> {
+    ACCESSOR_DESCRIPTORS.with(|m| m.borrow().get(&(obj, key.to_string())).copied())
+}
+
+/// Store an accessor descriptor for (obj, key).
+pub(crate) fn set_accessor_descriptor(obj: usize, key: String, acc: AccessorDescriptor) {
+    ACCESSORS_IN_USE.with(|c| c.set(true));
+    ACCESSOR_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), acc); });
 }
 
 /// Walk the keys array of `obj` and apply the given attribute mask AND filter to every existing key.
@@ -992,10 +1022,44 @@ pub extern "C" fn js_object_set_field_f64(obj: *mut ObjectHeader, field_index: u
 }
 
 /// Set a field by index with a raw f64 value (for dynamic object creation)
-/// This is a convenience wrapper that takes field_index as u32 and value as f64
+/// This is a convenience wrapper that takes field_index as u32 and value as f64.
+/// Honors `Object.freeze` and per-key `writable: false` descriptors so codegen
+/// paths that resolve property writes to a field index still respect the JS
+/// invariants set up by `Object.defineProperty`.
 #[no_mangle]
-pub extern "C" fn js_object_set_field_by_index(obj: *mut ObjectHeader, _key: *const crate::string::StringHeader, field_index: u32, value: f64) {
-    if obj.is_null() { return; }
+pub extern "C" fn js_object_set_field_by_index(obj: *mut ObjectHeader, key: *const crate::string::StringHeader, field_index: u32, value: f64) {
+    if obj.is_null() || (obj as usize) < 0x10000 { return; }
+    unsafe {
+        // Frozen objects reject all writes.
+        let gc = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if (*gc)._reserved & crate::gc::OBJ_FLAG_FROZEN != 0 {
+            return;
+        }
+        // Per-key writable / accessor check when the key string is provided.
+        if !key.is_null() {
+            let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+            let name_len = (*key).length as usize;
+            let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
+            if let Ok(name) = std::str::from_utf8(name_bytes) {
+                if ACCESSORS_IN_USE.with(|c| c.get()) {
+                    if let Some(acc) = get_accessor_descriptor(obj as usize, name) {
+                        if acc.set != 0 {
+                            let closure = (acc.set & crate::value::POINTER_MASK) as *const crate::closure::ClosureHeader;
+                            if !closure.is_null() {
+                                crate::closure::js_closure_call1(closure, value);
+                            }
+                        }
+                        return;
+                    }
+                }
+                if let Some(attrs) = get_property_attrs(obj as usize, name) {
+                    if !attrs.writable() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
     js_object_set_field(obj, field_index, JSValue::from_bits(value.to_bits()));
 }
 
@@ -1319,6 +1383,24 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
             if entry.0 == keys_id && entry.1 == key_hash { Some(entry.2) } else { None }
         });
         if let Some(field_idx) = cached {
+            // Accessor short-circuit: if this (obj, key) has a getter installed,
+            // invoke it instead of reading the slot. The `ACCESSORS_IN_USE`
+            // thread-local gate keeps this off the hot path in the common case.
+            if ACCESSORS_IN_USE.with(|c| c.get()) {
+                if let Ok(name) = std::str::from_utf8(key_bytes) {
+                    if let Some(acc) = get_accessor_descriptor(obj as usize, name) {
+                        if acc.get != 0 {
+                            let closure = (acc.get & crate::value::POINTER_MASK) as *const crate::closure::ClosureHeader;
+                            if !closure.is_null() {
+                                let result_f64 = crate::closure::js_closure_call0(closure);
+                                return JSValue::from_bits(result_f64.to_bits());
+                            }
+                        }
+                        // Has accessor but no getter → undefined.
+                        return JSValue::undefined();
+                    }
+                }
+            }
             return js_object_get_field(obj, field_idx);
         }
 
@@ -1342,6 +1424,21 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
                         let cache = &mut *c.get();
                         cache[cache_idx] = (keys_id, key_hash, i as u32);
                     });
+                    // Accessor short-circuit (see fast path above).
+                    if ACCESSORS_IN_USE.with(|c| c.get()) {
+                        if let Ok(name) = std::str::from_utf8(key_bytes) {
+                            if let Some(acc) = get_accessor_descriptor(obj as usize, name) {
+                                if acc.get != 0 {
+                                    let closure = (acc.get & crate::value::POINTER_MASK) as *const crate::closure::ClosureHeader;
+                                    if !closure.is_null() {
+                                        let result_f64 = crate::closure::js_closure_call0(closure);
+                                        return JSValue::from_bits(result_f64.to_bits());
+                                    }
+                                }
+                                return JSValue::undefined();
+                            }
+                        }
+                    }
                     if i < alloc_limit {
                         return js_object_get_field(obj, i as u32);
                     } else {
@@ -1507,6 +1604,22 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
                     // Found it - update the field (frozen objects reject writes)
                     if is_frozen {
                         return;
+                    }
+                    // Accessor short-circuit: if a setter is registered, invoke
+                    // it instead of writing the slot. A property with `get` but
+                    // no `set` silently ignores the write (non-strict mode).
+                    if ACCESSORS_IN_USE.with(|c| c.get()) {
+                        if let Some(ref k) = incoming_key_str {
+                            if let Some(acc) = get_accessor_descriptor(obj as usize, k) {
+                                if acc.set != 0 {
+                                    let closure = (acc.set & crate::value::POINTER_MASK) as *const crate::closure::ClosureHeader;
+                                    if !closure.is_null() {
+                                        crate::closure::js_closure_call1(closure, value);
+                                    }
+                                }
+                                return;
+                            }
+                        }
                     }
                     // Per-property writable check (set by Object.defineProperty / freeze).
                     if let Some(ref k) = incoming_key_str {
@@ -2929,30 +3042,27 @@ pub extern "C" fn js_object_is(a: f64, b: f64) -> f64 {
 }
 
 /// Object.hasOwn(obj, key) — check if obj has its own property `key`.
-/// Returns NaN-boxed boolean.
+/// Returns NaN-boxed boolean. Checks via `keys_array` membership (not via
+/// "value != undefined") so properties that legitimately hold `undefined` and
+/// accessor descriptors with no backing slot still report true.
 #[no_mangle]
 pub extern "C" fn js_object_has_own(obj_value: f64, key_value: f64) -> f64 {
     const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
     const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
-    let obj_jsval = crate::JSValue::from_bits(obj_value.to_bits());
-    if !obj_jsval.is_pointer() {
-        return f64::from_bits(TAG_FALSE);
-    }
-    let obj_ptr = obj_jsval.as_pointer::<ObjectHeader>() as *const ObjectHeader;
-    if obj_ptr.is_null() {
-        return f64::from_bits(TAG_FALSE);
-    }
-    // Convert key to string
-    let key_str = crate::builtins::js_string_coerce(key_value);
-    if key_str.is_null() {
-        return f64::from_bits(TAG_FALSE);
-    }
-    let result = js_object_get_field_by_name(obj_ptr, key_str);
-    // If property exists (not undefined), return true
-    if result.is_undefined() {
-        f64::from_bits(TAG_FALSE)
-    } else {
-        f64::from_bits(TAG_TRUE)
+    unsafe {
+        let obj = extract_obj_ptr(obj_value);
+        if obj.is_null() || (obj as usize) < 0x10000 {
+            return f64::from_bits(TAG_FALSE);
+        }
+        let key_str = crate::builtins::js_string_coerce(key_value);
+        if key_str.is_null() {
+            return f64::from_bits(TAG_FALSE);
+        }
+        if own_key_present(obj, key_str) {
+            f64::from_bits(TAG_TRUE)
+        } else {
+            f64::from_bits(TAG_FALSE)
+        }
     }
 }
 
@@ -3007,14 +3117,44 @@ pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, desc
         if desc_ptr.is_null() {
             return obj_value;
         }
-        // Look for "value" field in descriptor — store the data value first.
-        let value_key = crate::string::js_string_from_bytes(b"value".as_ptr(), 5);
-        let value_field = js_object_get_field_by_name(desc_ptr as *const ObjectHeader, value_key);
-        if !value_field.is_undefined() {
-            // Store via runtime path. Any existing descriptor attrs are NOT yet set,
-            // so writability defaults to true and the write goes through.
-            js_object_set_field_by_name(obj, key_str, f64::from_bits(value_field.bits()));
+
+        // Detect accessor descriptor (has `get` and/or `set`) vs. data descriptor (has `value`).
+        // JS disallows mixing them, but we only check for `get`/`set` presence.
+        let get_key = crate::string::js_string_from_bytes(b"get".as_ptr(), 3);
+        let set_key = crate::string::js_string_from_bytes(b"set".as_ptr(), 3);
+        let get_field = js_object_get_field_by_name(desc_ptr as *const ObjectHeader, get_key);
+        let set_field = js_object_get_field_by_name(desc_ptr as *const ObjectHeader, set_key);
+        let has_accessor = !get_field.is_undefined() || !set_field.is_undefined();
+
+        if has_accessor {
+            // Store the accessor closures in the side table. Ensure the key is present
+            // in the object's keys_array so lookups (hasOwn, getOwnPropertyDescriptor,
+            // keys) can see it.
+            ensure_key_in_keys_array(obj, key_str);
+            if let Some(k) = key_rust.clone() {
+                let get_bits = if get_field.is_undefined() { 0u64 } else { get_field.bits() };
+                let set_bits = if set_field.is_undefined() { 0u64 } else { set_field.bits() };
+                set_accessor_descriptor(obj as usize, k, AccessorDescriptor { get: get_bits, set: set_bits });
+            }
+        } else {
+            // Data descriptor: look for "value" field and store it.
+            let value_key = crate::string::js_string_from_bytes(b"value".as_ptr(), 5);
+            let value_field = js_object_get_field_by_name(desc_ptr as *const ObjectHeader, value_key);
+            // Clear any existing accessor for this key so the write doesn't fire the setter.
+            if let Some(ref k) = key_rust {
+                ACCESSOR_DESCRIPTORS.with(|m| { m.borrow_mut().remove(&(obj as usize, k.clone())); });
+            }
+            // Ensure the key exists even if the descriptor's value is undefined —
+            // the property still "exists" per JS semantics.
+            if value_field.is_undefined() {
+                ensure_key_in_keys_array(obj, key_str);
+            } else {
+                // Store via runtime path. Any existing descriptor attrs are NOT yet set,
+                // so writability defaults to true and the write goes through.
+                js_object_set_field_by_name(obj, key_str, f64::from_bits(value_field.bits()));
+            }
         }
+
         // Read attribute flags from descriptor. JS defaults when omitted in
         // `Object.defineProperty` are `false` (NOT `true` like for direct assignment).
         let read_bool = |name: &[u8]| -> Option<bool> {
@@ -3026,7 +3166,11 @@ pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, desc
                 Some(crate::value::js_is_truthy(f64::from_bits(v.bits())) != 0)
             }
         };
-        let writable = read_bool(b"writable").unwrap_or(false);
+        // Accessor descriptors don't have `writable`; we leave it true so data
+        // lookups that happen before the accessor override don't accidentally
+        // reject a legitimate fallthrough write. Attrs default to false when
+        // omitted (JS spec).
+        let writable = read_bool(b"writable").unwrap_or(has_accessor);
         let enumerable = read_bool(b"enumerable").unwrap_or(false);
         let configurable = read_bool(b"configurable").unwrap_or(false);
 
@@ -3038,9 +3182,66 @@ pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, desc
     }
 }
 
-/// Object.getOwnPropertyDescriptor(obj, key) — returns a data descriptor object
-/// `{ value, writable, enumerable, configurable }` reading the side-table attributes
-/// (defaulting to all-true for properties added via direct assignment), or
+/// Ensure a key appears in the object's keys_array. Used by `Object.defineProperty`
+/// so the property is enumerable-filterable and discoverable by `getOwnPropertyNames`
+/// even when the value is undefined or the property is an accessor (no underlying slot).
+unsafe fn ensure_key_in_keys_array(obj: *mut ObjectHeader, key: *const crate::StringHeader) {
+    if obj.is_null() || (obj as usize) < 0x10000 || key.is_null() {
+        return;
+    }
+    // If no keys array exists, create one with this key.
+    let keys = (*obj).keys_array;
+    if keys.is_null() {
+        let new_keys = crate::array::js_array_alloc(4);
+        let new_keys = crate::array::js_array_push(new_keys, JSValue::string_ptr(key as *mut _));
+        (*obj).keys_array = new_keys;
+        if (*obj).field_count == 0 {
+            (*obj).field_count = 1;
+        }
+        return;
+    }
+    // Validate keys array pointer
+    let keys_ptr = keys as usize;
+    if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+        return;
+    }
+    // Check if key already exists
+    let key_count = crate::array::js_array_length(keys) as usize;
+    for i in 0..key_count {
+        let stored = crate::array::js_array_get(keys, i as u32);
+        if stored.is_string() {
+            let stored_key = stored.as_string_ptr();
+            if crate::string::js_string_equals(key, stored_key) != 0 {
+                return; // already present
+            }
+        }
+    }
+    // Clone shared keys array if needed, then append.
+    let owned_keys = if key_count == (*obj).field_count as usize {
+        let cloned = crate::array::js_array_alloc(key_count as u32 + 4);
+        let src_data = (keys as *const u8).add(8) as *const f64;
+        let dst_data = (cloned as *mut u8).add(8) as *mut f64;
+        for i in 0..key_count {
+            *dst_data.add(i) = *src_data.add(i);
+        }
+        (*cloned).length = key_count as u32;
+        (*obj).keys_array = cloned;
+        cloned
+    } else {
+        keys
+    };
+    let new_keys = crate::array::js_array_push(owned_keys, JSValue::string_ptr(key as *mut _));
+    (*obj).keys_array = new_keys;
+    let new_index = key_count as u32;
+    if new_index >= (*obj).field_count {
+        (*obj).field_count = new_index + 1;
+    }
+}
+
+/// Object.getOwnPropertyDescriptor(obj, key) — returns a data descriptor
+/// `{ value, writable, enumerable, configurable }` for data properties, or an
+/// accessor descriptor `{ get, set, enumerable, configurable }` for properties
+/// installed via `Object.defineProperty(obj, key, { get, set })`. Returns
 /// TAG_UNDEFINED if the property doesn't exist.
 #[no_mangle]
 pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_value: f64) -> f64 {
@@ -3063,11 +3264,15 @@ pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_valu
             let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
             std::str::from_utf8(name_bytes).ok().map(|s| s.to_string())
         };
-        // Look up the property
-        let value = js_object_get_field_by_name(obj, key_str);
-        if value.is_undefined() {
+
+        // Check whether the key is actually present on the object. A property can
+        // legitimately hold `undefined`, and accessor descriptors have no value slot,
+        // so we check the keys_array directly instead of relying on "value != undefined".
+        let present = own_key_present(obj, key_str);
+        if !present {
             return f64::from_bits(crate::value::TAG_UNDEFINED);
         }
+
         // Look up descriptor flags (default: all true).
         let attrs = key_rust
             .as_ref()
@@ -3075,7 +3280,37 @@ pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_valu
             .unwrap_or(PropertyAttrs::new(true, true, true));
         let bool_to_f64 = |b: bool| f64::from_bits(if b { TAG_TRUE } else { TAG_FALSE });
 
-        // Build descriptor: { value, writable, enumerable, configurable }
+        // Accessor descriptor path.
+        if let Some(acc) = key_rust
+            .as_ref()
+            .and_then(|k| get_accessor_descriptor(obj as usize, k))
+        {
+            let packed = b"get\0set\0enumerable\0configurable";
+            let desc = js_object_alloc_with_shape(
+                0x0D_E5_C1,
+                4,
+                packed.as_ptr(),
+                packed.len() as u32,
+            );
+            let header_size = std::mem::size_of::<ObjectHeader>();
+            let fields = (desc as *mut u8).add(header_size) as *mut f64;
+            *fields = if acc.get != 0 {
+                f64::from_bits(acc.get)
+            } else {
+                f64::from_bits(crate::value::TAG_UNDEFINED)
+            };
+            *fields.add(1) = if acc.set != 0 {
+                f64::from_bits(acc.set)
+            } else {
+                f64::from_bits(crate::value::TAG_UNDEFINED)
+            };
+            *fields.add(2) = bool_to_f64(attrs.enumerable());
+            *fields.add(3) = bool_to_f64(attrs.configurable());
+            return f64::from_bits((desc as u64) | 0x7FFD_0000_0000_0000);
+        }
+
+        // Data descriptor path.
+        let value = js_object_get_field_by_name(obj, key_str);
         let packed = b"value\0writable\0enumerable\0configurable";
         let desc = js_object_alloc_with_shape(
             0x0D_E5_C0, // unique shape_id for property descriptors
@@ -3083,16 +3318,48 @@ pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_valu
             packed.as_ptr(),
             packed.len() as u32,
         );
-        // Set fields
         let header_size = std::mem::size_of::<ObjectHeader>();
         let fields = (desc as *mut u8).add(header_size) as *mut f64;
         *fields = f64::from_bits(value.bits());                  // value
         *fields.add(1) = bool_to_f64(attrs.writable());          // writable
         *fields.add(2) = bool_to_f64(attrs.enumerable());        // enumerable
         *fields.add(3) = bool_to_f64(attrs.configurable());      // configurable
-        // Return NaN-boxed pointer
         f64::from_bits((desc as u64) | 0x7FFD_0000_0000_0000)
     }
+}
+
+/// Helper: does `key` appear in `obj.keys_array`?
+unsafe fn own_key_present(obj: *mut ObjectHeader, key: *const crate::StringHeader) -> bool {
+    if obj.is_null() || (obj as usize) < 0x10000 || key.is_null() {
+        return false;
+    }
+    let keys = (*obj).keys_array;
+    if keys.is_null() {
+        return false;
+    }
+    let keys_ptr = keys as usize;
+    if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+        return false;
+    }
+    // Validate keys_array GC header
+    let keys_gc = (keys as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+    if (*keys_gc).obj_type != crate::gc::GC_TYPE_ARRAY {
+        return false;
+    }
+    let key_count = crate::array::js_array_length(keys) as usize;
+    if key_count > 65536 {
+        return false;
+    }
+    for i in 0..key_count {
+        let stored = crate::array::js_array_get(keys, i as u32);
+        if stored.is_string() {
+            let stored_key = stored.as_string_ptr();
+            if !stored_key.is_null() && crate::string::js_string_equals(key, stored_key) != 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Object.getOwnPropertyNames(obj) — returns all own property names (including non-enumerable).
@@ -3129,7 +3396,9 @@ pub extern "C" fn js_object_create(_proto_value: f64) -> f64 {
     f64::from_bits((obj as u64) | 0x7FFD_0000_0000_0000)
 }
 
-/// Object.freeze(obj) — sets the frozen flag. Returns the object.
+/// Object.freeze(obj) — sets the frozen flag and drops `writable` +
+/// `configurable` on every existing key so per-key descriptor lookups report
+/// the post-freeze state. Returns the object.
 #[no_mangle]
 pub extern "C" fn js_object_freeze(obj_value: f64) -> f64 {
     unsafe {
@@ -3137,12 +3406,15 @@ pub extern "C" fn js_object_freeze(obj_value: f64) -> f64 {
         if !obj.is_null() && (obj as usize) > 0x10000 {
             let gc = gc_header_for(obj);
             (*gc)._reserved |= crate::gc::OBJ_FLAG_FROZEN | crate::gc::OBJ_FLAG_SEALED | crate::gc::OBJ_FLAG_NO_EXTEND;
+            // Drop writable + configurable for every existing key.
+            mark_all_keys(obj, /*drop_writable=*/true, false, /*drop_configurable=*/true);
         }
     }
     obj_value
 }
 
-/// Object.seal(obj) — sets the sealed flag. Returns the object.
+/// Object.seal(obj) — sets the sealed flag and drops `configurable` on every
+/// existing key. Writable is preserved (sealed ≠ frozen). Returns the object.
 #[no_mangle]
 pub extern "C" fn js_object_seal(obj_value: f64) -> f64 {
     unsafe {
@@ -3150,6 +3422,8 @@ pub extern "C" fn js_object_seal(obj_value: f64) -> f64 {
         if !obj.is_null() && (obj as usize) > 0x10000 {
             let gc = gc_header_for(obj);
             (*gc)._reserved |= crate::gc::OBJ_FLAG_SEALED | crate::gc::OBJ_FLAG_NO_EXTEND;
+            // Drop configurable for every existing key (but leave writable intact).
+            mark_all_keys(obj, /*drop_writable=*/false, false, /*drop_configurable=*/true);
         }
     }
     obj_value
