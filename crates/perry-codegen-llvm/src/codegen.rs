@@ -368,7 +368,9 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for sf in &c.static_fields {
             let name = format!(
                 "perry_static_{}__{}__{}",
-                module_prefix, c.name, sf.name
+                module_prefix,
+                sanitize(&c.name),
+                sanitize(&sf.name),
             );
             llmod.add_internal_global(&name, DOUBLE, "0.0");
             static_field_globals.insert((c.name.clone(), sf.name.clone()), name);
@@ -407,10 +409,17 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         // so `Counter.increment()` (StaticMethodCall) can look them
         // up the same way as instance methods, but emitted as
         // `perry_static_<modprefix>__<class>__<method>` (no `this`).
+        // The class/method names are sanitized so private methods
+        // (`#helper`) produce a valid LLVM identifier.
         for sm in &c.static_methods {
             method_names.insert(
                 (c.name.clone(), sm.name.clone()),
-                format!("perry_static_{}__{}__{}", module_prefix, c.name, sm.name),
+                format!(
+                    "perry_static_{}__{}__{}",
+                    module_prefix,
+                    sanitize(&c.name),
+                    sanitize(&sm.name),
+                ),
             );
         }
     }
@@ -1433,7 +1442,12 @@ fn compile_static_method(
     closure_rest_params: &HashMap<u32, usize>,
     cross_module: &CrossModuleCtx,
 ) -> Result<()> {
-    let llvm_name = format!("perry_static_{}__{}__{}", module_prefix, class_name, f.name);
+    let llvm_name = format!(
+        "perry_static_{}__{}__{}",
+        module_prefix,
+        sanitize(class_name),
+        sanitize(&f.name),
+    );
 
     let params: Vec<(LlvmType, String)> = f
         .params
@@ -1532,6 +1546,21 @@ fn init_static_fields(
                 let v = crate::expr::lower_expr(ctx, init_expr)?;
                 let g_ref = format!("@{}", global_name);
                 ctx.block().store(DOUBLE, &v, &g_ref);
+            }
+        }
+    }
+    // Static blocks — emitted as synthetic static methods with the
+    // name prefix `__perry_static_init_`. Call them in registration
+    // order for each class, after that class's static fields are
+    // initialized, so they can reference those fields.
+    for c in &hir.classes {
+        for sm in &c.static_methods {
+            if !sm.name.starts_with("__perry_static_init_") {
+                continue;
+            }
+            let key = (c.name.clone(), sm.name.clone());
+            if let Some(llvm_name) = ctx.methods.get(&key).cloned() {
+                ctx.block().call(DOUBLE, &llvm_name, &[]);
             }
         }
     }

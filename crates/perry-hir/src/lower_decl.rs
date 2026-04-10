@@ -253,10 +253,18 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                     static_method_names.push(ident.sym.to_string());
                 }
             }
+            ast::ClassMember::PrivateMethod(method) if method.is_static => {
+                // Register as "#name" so WithPrivateStatic.#helper()
+                // call-site lookup via has_static_method() succeeds.
+                static_method_names.push(format!("#{}", method.key.name.to_string()));
+            }
             ast::ClassMember::ClassProp(prop) if prop.is_static => {
                 if let ast::PropName::Ident(ident) = &prop.key {
                     static_field_names.push(ident.sym.to_string());
                 }
+            }
+            ast::ClassMember::PrivateProp(prop) if prop.is_static => {
+                static_field_names.push(format!("#{}", prop.key.name.to_string()));
             }
             _ => {}
         }
@@ -382,6 +390,65 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                 } else {
                     fields.push(field);
                 }
+            }
+            ast::ClassMember::PrivateMethod(method) => {
+                // Skip TypeScript overload declarations (no body)
+                if method.function.body.is_none() {
+                    continue;
+                }
+                match method.kind {
+                    ast::MethodKind::Method => {
+                        let func = lower_private_method(ctx, method)?;
+                        if method.is_static {
+                            static_methods.push(func);
+                        } else {
+                            methods.push(func);
+                        }
+                    }
+                    ast::MethodKind::Getter => {
+                        // Store under "#name" so PropertyGet on "#name"
+                        // can hit the getter registry (which keys on
+                        // the property name, not `get_#name`).
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_getter(ctx, method)?;
+                        getters.push((prop_name, func));
+                    }
+                    ast::MethodKind::Setter => {
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_setter(ctx, method)?;
+                        setters.push((prop_name, func));
+                    }
+                }
+            }
+            ast::ClassMember::StaticBlock(block) => {
+                // `static { ... }` — lower the body and attach it as
+                // a synthetic static method whose name is
+                // `__perry_static_init_N`. `codegen.rs :: init_static_fields`
+                // later recognizes the prefix and emits a call to each
+                // such method right after static field init, so they
+                // run once at module startup.
+                let scope_mark = ctx.enter_scope();
+                let body = lower_block_stmt(ctx, &block.body)?;
+                ctx.exit_scope(scope_mark);
+
+                let block_idx = static_methods
+                    .iter()
+                    .filter(|m| m.name.starts_with("__perry_static_init_"))
+                    .count();
+                let synthetic_name = format!("__perry_static_init_{}", block_idx);
+                static_methods.push(Function {
+                    id: ctx.fresh_func(),
+                    name: synthetic_name,
+                    type_params: Vec::new(),
+                    params: Vec::new(),
+                    return_type: Type::Void,
+                    body,
+                    is_async: false,
+                    is_generator: false,
+                    is_exported: false,
+                    captures: Vec::new(),
+                    decorators: Vec::new(),
+                });
             }
             _ => {}
         }
@@ -572,10 +639,16 @@ pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class
                     static_method_names.push(ident.sym.to_string());
                 }
             }
+            ast::ClassMember::PrivateMethod(method) if method.is_static => {
+                static_method_names.push(format!("#{}", method.key.name.to_string()));
+            }
             ast::ClassMember::ClassProp(prop) if prop.is_static => {
                 if let ast::PropName::Ident(ident) = &prop.key {
                     static_field_names.push(ident.sym.to_string());
                 }
+            }
+            ast::ClassMember::PrivateProp(prop) if prop.is_static => {
+                static_field_names.push(format!("#{}", prop.key.name.to_string()));
             }
             _ => {}
         }
@@ -644,6 +717,55 @@ pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class
                 } else {
                     fields.push(field);
                 }
+            }
+            ast::ClassMember::PrivateMethod(method) => {
+                if method.function.body.is_none() {
+                    continue;
+                }
+                match method.kind {
+                    ast::MethodKind::Method => {
+                        let func = lower_private_method(ctx, method)?;
+                        if method.is_static {
+                            static_methods.push(func);
+                        } else {
+                            methods.push(func);
+                        }
+                    }
+                    ast::MethodKind::Getter => {
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_getter(ctx, method)?;
+                        getters.push((prop_name, func));
+                    }
+                    ast::MethodKind::Setter => {
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_setter(ctx, method)?;
+                        setters.push((prop_name, func));
+                    }
+                }
+            }
+            ast::ClassMember::StaticBlock(block) => {
+                let scope_mark = ctx.enter_scope();
+                let body = lower_block_stmt(ctx, &block.body)?;
+                ctx.exit_scope(scope_mark);
+
+                let block_idx = static_methods
+                    .iter()
+                    .filter(|m| m.name.starts_with("__perry_static_init_"))
+                    .count();
+                let synthetic_name = format!("__perry_static_init_{}", block_idx);
+                static_methods.push(Function {
+                    id: ctx.fresh_func(),
+                    name: synthetic_name,
+                    type_params: Vec::new(),
+                    params: Vec::new(),
+                    return_type: Type::Void,
+                    body,
+                    is_async: false,
+                    is_generator: false,
+                    is_exported: false,
+                    captures: Vec::new(),
+                    decorators: Vec::new(),
+                });
             }
             _ => {}
         }
@@ -1184,6 +1306,154 @@ pub(crate) fn lower_class_prop(ctx: &mut LoweringContext, prop: &ast::ClassProp)
         init,
         is_private: false, // TODO: check accessibility
         is_readonly: prop.readonly,
+    })
+}
+
+/// Lower a private method (e.g. `#secret(): number { ... }`) — this mirrors
+/// `lower_class_method` but for `ast::PrivateMethod`. The resulting function
+/// is stored with the name prefixed by `#` so method dispatch (which keys on
+/// `(class_name, "#secret")`) can find it.
+pub(crate) fn lower_private_method(ctx: &mut LoweringContext, method: &ast::PrivateMethod) -> Result<Function> {
+    let name = format!("#{}", method.key.name.to_string());
+
+    // Extract method-level type parameters (e.g., #helper<U>(x: U): T)
+    let type_params = method.function.type_params
+        .as_ref()
+        .map(|tp| extract_type_params(tp))
+        .unwrap_or_default();
+
+    ctx.enter_type_param_scope(&type_params);
+
+    let scope_mark = ctx.enter_scope();
+
+    // Add 'this' for instance methods
+    if !method.is_static {
+        ctx.define_local("this".to_string(), Type::Any);
+    }
+
+    // Lower parameters with type extraction
+    let mut params = Vec::new();
+    for param in &method.function.params {
+        let param_name = get_pat_name(&param.pat)?;
+        let param_type = extract_param_type_with_ctx(&param.pat, Some(ctx));
+        let param_default = get_param_default(ctx, &param.pat)?;
+        let is_rest = is_rest_param(&param.pat);
+        let param_id = ctx.define_local(param_name.clone(), param_type.clone());
+        params.push(Param {
+            id: param_id,
+            name: param_name,
+            ty: param_type,
+            default: param_default,
+            is_rest,
+        });
+    }
+
+    // Extract return type
+    let return_type = method.function.return_type.as_ref()
+        .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
+        .unwrap_or(Type::Any);
+
+    // Lower body
+    let body = if let Some(ref block) = method.function.body {
+        lower_block_stmt(ctx, block)?
+    } else {
+        Vec::new()
+    };
+
+    ctx.exit_scope(scope_mark);
+    ctx.exit_type_param_scope();
+
+    Ok(Function {
+        id: ctx.fresh_func(),
+        name,
+        type_params,
+        params,
+        return_type,
+        body,
+        is_async: method.function.is_async,
+        is_generator: method.function.is_generator,
+        is_exported: false,
+        captures: Vec::new(),
+        decorators: Vec::new(),
+    })
+}
+
+/// Lower a private getter method (e.g. `get #value(): number { ... }`).
+/// Returned function has `name` set to `get_#value` so that the codegen's
+/// getter-mangling convention (`__get_<name>`) stays consistent with the
+/// dispatch registry.
+pub(crate) fn lower_private_getter(ctx: &mut LoweringContext, method: &ast::PrivateMethod) -> Result<Function> {
+    let name = format!("get_#{}", method.key.name.to_string());
+    let scope_mark = ctx.enter_scope();
+    ctx.define_local("this".to_string(), Type::Any);
+
+    let return_type = method.function.return_type.as_ref()
+        .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
+        .unwrap_or(Type::Any);
+
+    let body = if let Some(ref block) = method.function.body {
+        lower_block_stmt(ctx, block)?
+    } else {
+        Vec::new()
+    };
+
+    ctx.exit_scope(scope_mark);
+
+    Ok(Function {
+        id: ctx.fresh_func(),
+        name,
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type,
+        body,
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        captures: Vec::new(),
+        decorators: Vec::new(),
+    })
+}
+
+/// Lower a private setter method (e.g. `set #value(v: number) { ... }`).
+pub(crate) fn lower_private_setter(ctx: &mut LoweringContext, method: &ast::PrivateMethod) -> Result<Function> {
+    let name = format!("set_#{}", method.key.name.to_string());
+    let scope_mark = ctx.enter_scope();
+    ctx.define_local("this".to_string(), Type::Any);
+
+    let mut params = Vec::new();
+    for param in &method.function.params {
+        let param_name = get_pat_name(&param.pat)?;
+        let param_type = extract_param_type_with_ctx(&param.pat, Some(ctx));
+        let param_id = ctx.define_local(param_name.clone(), param_type.clone());
+        params.push(Param {
+            id: param_id,
+            name: param_name,
+            ty: param_type,
+            default: None,
+            is_rest: false,
+        });
+    }
+
+    let body = if let Some(ref block) = method.function.body {
+        lower_block_stmt(ctx, block)?
+    } else {
+        Vec::new()
+    };
+
+    ctx.exit_scope(scope_mark);
+
+    Ok(Function {
+        id: ctx.fresh_func(),
+        name,
+        type_params: Vec::new(),
+        params,
+        return_type: Type::Void,
+        body,
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        captures: Vec::new(),
+        decorators: Vec::new(),
     })
 }
 

@@ -157,6 +157,12 @@ pub struct LoweringContext {
     /// so `new p(args)` can fold to `new ClassName(args)` (pragmatic — lets
     /// the test's construct trap see the expected value).
     pub(crate) proxy_target_classes: HashMap<String, String>,
+    /// Alias map for class expressions: `const MyClass = class { ... }`
+    /// binds the local `MyClass` to the synthetic class name created
+    /// by `lower_class_from_ast`. The `new MyClass(...)` lowering looks
+    /// up this map to resolve the alias to the real (synthetic) class
+    /// name, so the New expression points at a real HIR class.
+    pub(crate) class_expr_aliases: HashMap<String, String>,
 }
 
 impl LoweringContext {
@@ -220,6 +226,7 @@ impl LoweringContext {
             proxy_locals: HashSet::new(),
             proxy_revoke_locals: HashMap::new(),
             proxy_target_classes: HashMap::new(),
+            class_expr_aliases: HashMap::new(),
         }
     }
 
@@ -1018,10 +1025,16 @@ pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str
                             static_method_names.push(ident.sym.to_string());
                         }
                     }
+                    ast::ClassMember::PrivateMethod(method) if method.is_static => {
+                        static_method_names.push(format!("#{}", method.key.name.to_string()));
+                    }
                     ast::ClassMember::ClassProp(prop) if prop.is_static => {
                         if let ast::PropName::Ident(ident) = &prop.key {
                             static_field_names.push(ident.sym.to_string());
                         }
+                    }
+                    ast::ClassMember::PrivateProp(prop) if prop.is_static => {
+                        static_field_names.push(format!("#{}", prop.key.name.to_string()));
                     }
                     _ => {}
                 }
@@ -3206,6 +3219,50 @@ fn lower_stmt(
                                             });
                                         }
                                     }
+                                    continue;
+                                }
+                            }
+                        }
+                        // `const X = class { ... }` — lower the class expression
+                        // inline using the binding name as the class name (so
+                        // `new X(...)` later resolves without a dynamic dispatch
+                        // shim). The let binding still stores a sentinel value
+                        // (the new'd object) but the class is fully lowered.
+                        if let (ast::Pat::Ident(ident), Some(init)) = (&decl.name, &decl.init) {
+                            let inner_expr = {
+                                let mut e = init.as_ref();
+                                loop {
+                                    match e {
+                                        ast::Expr::Paren(p) => e = &p.expr,
+                                        ast::Expr::TsAs(a) => e = &a.expr,
+                                        ast::Expr::TsNonNull(n) => e = &n.expr,
+                                        ast::Expr::TsTypeAssertion(a) => e = &a.expr,
+                                        _ => break,
+                                    }
+                                }
+                                e
+                            };
+                            if let ast::Expr::Class(class_expr) = inner_expr {
+                                let bind_name = ident.id.sym.to_string();
+                                // Only handle if there's no explicit type annotation
+                                // that would conflict, and the binding name isn't
+                                // already a class (no shadow).
+                                if ctx.lookup_class(&bind_name).is_none() {
+                                    // Lower the class with the binding name so
+                                    // `new BindName(...)` works unchanged.
+                                    let lowered_class = crate::lower_decl::lower_class_from_ast(
+                                        ctx,
+                                        &class_expr.class,
+                                        &bind_name,
+                                        false,
+                                    )?;
+                                    module.classes.push(lowered_class);
+                                    // Register the alias so `new X()` → `new X()`
+                                    // (no-op lookup, but marks the binding as a class).
+                                    ctx.class_expr_aliases.insert(bind_name.clone(), bind_name.clone());
+                                    // We intentionally DO NOT push a Stmt::Let for
+                                    // this binding — the class itself takes the
+                                    // role of a "static value" referenced by name.
                                     continue;
                                 }
                             }

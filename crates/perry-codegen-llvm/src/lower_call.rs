@@ -1005,6 +1005,13 @@ pub(crate) fn lower_new(
     ctx.this_stack.push(this_slot);
     ctx.class_stack.push(class_name.to_string());
 
+    // Apply field initializers FIRST — TypeScript / ES2022 semantics:
+    // class field initializers run at the start of the constructor body
+    // (after super() for derived classes, before any user ctor code).
+    // Walk the parent chain from the root down so parent fields are
+    // initialized before the child's fields.
+    apply_field_initializers_recursive(ctx, class_name)?;
+
     // If there's a constructor, inline its body. We allocate slots for
     // each constructor parameter and pre-populate them with the lowered
     // argument values. Locals/local_types are saved and restored to keep
@@ -1083,6 +1090,62 @@ pub(crate) fn lower_new(
     ctx.this_stack.pop();
     ctx.class_stack.pop();
     Ok(obj_box)
+}
+
+/// Walk the inheritance chain from the root down and apply each class's
+/// field initializers to `this`. Call this inside `lower_new` after the
+/// `this` slot is pushed but before the constructor body is inlined.
+///
+/// Initializers run in declaration order: root parent first, then each
+/// child, matching JavaScript / TypeScript class semantics where fields
+/// are initialized before user-written constructor code executes (field
+/// initializers are conceptually prepended to the constructor body).
+fn apply_field_initializers_recursive(
+    ctx: &mut FnCtx<'_>,
+    class_name: &str,
+) -> Result<()> {
+    // Collect the inheritance chain from root down.
+    let mut chain: Vec<String> = Vec::new();
+    let mut cur = Some(class_name.to_string());
+    while let Some(c) = cur {
+        let Some(class) = ctx.classes.get(&c).copied() else { break };
+        chain.push(c.clone());
+        cur = class.extends_name.clone();
+    }
+    chain.reverse();
+
+    for class_name_in_chain in chain {
+        let class = match ctx.classes.get(&class_name_in_chain).copied() {
+            Some(c) => c,
+            None => continue,
+        };
+        // Collect (property_name, init_expr) pairs up-front to avoid
+        // holding an immutable borrow of ctx.classes across lower_expr.
+        let mut init_pairs: Vec<(String, Expr)> = Vec::new();
+        for field in &class.fields {
+            if let Some(init) = &field.init {
+                init_pairs.push((field.name.clone(), init.clone()));
+            }
+        }
+        if init_pairs.is_empty() {
+            continue;
+        }
+
+        // Temporarily swap class_stack so `this.field` in the init
+        // resolves against the correct class.
+        ctx.class_stack.push(class_name_in_chain.clone());
+        for (prop, init_expr) in init_pairs {
+            // Build a PropertySet { this, prop, init_expr } and lower.
+            let set_expr = Expr::PropertySet {
+                object: Box::new(Expr::This),
+                property: prop,
+                value: Box::new(init_expr),
+            };
+            let _ = lower_expr(ctx, &set_expr)?;
+        }
+        ctx.class_stack.pop();
+    }
+    Ok(())
 }
 
 /// Lower a `NativeMethodCall { module, method, object, args }` (Phase H.1).
