@@ -351,6 +351,26 @@ pub extern "C" fn js_array_pop_f64(arr: *mut ArrayHeader) -> f64 {
     }
 }
 
+/// Delete an element from an array by index, creating a "hole".
+/// Sets the element to undefined without changing the array length.
+/// Matches JavaScript `delete arr[index]` semantics.
+/// Returns 1 (true) on success, 0 (false) on failure.
+#[no_mangle]
+pub extern "C" fn js_array_delete(arr: *mut ArrayHeader, index: u32) -> i32 {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return 1; }
+    unsafe {
+        let length = (*arr).length;
+        if index >= length {
+            return 1; // delete on out-of-bounds always returns true in JS
+        }
+        const TAG_UNDEFINED_F64: f64 = unsafe { std::mem::transmute(0x7FFC_0000_0000_0001u64) };
+        let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        std::ptr::write(elements_ptr.add(index as usize), TAG_UNDEFINED_F64);
+        1
+    }
+}
+
 /// Shift an element from the beginning of an array
 /// Returns the removed element (or NaN if empty)
 #[no_mangle]

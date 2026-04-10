@@ -385,6 +385,7 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     module.declare_function("js_array_join", I64, &[I64, I64]);
     module.declare_function("js_array_forEach", VOID, &[I64, I64]);
     module.declare_function("js_array_fill", I64, &[I64, DOUBLE]);
+    module.declare_function("js_array_delete", I32, &[I64, I32]);
 
     declare_phase_b_objects(module);
 }

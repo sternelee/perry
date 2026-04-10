@@ -2303,6 +2303,30 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     );
                     Ok(blk.bitcast_i64_to_double(&tagged))
                 }
+                // delete arr[numericIndex] — set element to undefined
+                Expr::IndexGet { object, index } => {
+                    let arr_box = lower_expr(ctx, object)?;
+                    let idx_box = lower_expr(ctx, index)?;
+                    let blk = ctx.block();
+                    let arr_handle = unbox_to_i64(blk, &arr_box);
+                    // Convert index to i32. It may be a double (NaN-boxed
+                    // number) or a raw integer literal.
+                    let idx_i32 = blk.fptosi(DOUBLE, &idx_box, I32);
+                    let i32_v = blk.call(
+                        I32,
+                        "js_array_delete",
+                        &[(I64, &arr_handle), (I32, &idx_i32)],
+                    );
+                    let bit = blk.icmp_ne(I32, &i32_v, "0");
+                    let tagged = blk.select(
+                        crate::types::I1,
+                        &bit,
+                        I64,
+                        crate::nanbox::TAG_TRUE_I64,
+                        crate::nanbox::TAG_FALSE_I64,
+                    );
+                    Ok(blk.bitcast_i64_to_double(&tagged))
+                }
                 _ => {
                     let _ = lower_expr(ctx, operand)?;
                     Ok(double_literal(1.0))
@@ -2321,10 +2345,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         }
 
         // -------- Array.from(iterable) — stub returns the iterable as-is --------
-        // For an iterable that's already an array, this is correct.
-        // For other iterables (Map/Set), it's wrong but doesn't crash.
-        Expr::ArrayFrom(iter) => lower_expr(ctx, iter),
-        Expr::ArrayFromMapped { iterable, .. } => lower_expr(ctx, iterable),
+        // Array.from(iterable) — clone via js_array_clone which
+        // handles arrays, Sets (→ js_set_to_array), Maps (→ entries).
+        Expr::ArrayFrom(iter) => {
+            let iter_box = lower_expr(ctx, iter)?;
+            let blk = ctx.block();
+            let iter_handle = unbox_to_i64(blk, &iter_box);
+            let result = blk.call(I64, "js_array_clone", &[(I64, &iter_handle)]);
+            Ok(nanbox_pointer_inline(blk, &result))
+        }
+        Expr::ArrayFromMapped { iterable, map_fn } => {
+            let iter_box = lower_expr(ctx, iterable)?;
+            let cb_box = lower_expr(ctx, map_fn)?;
+            let blk = ctx.block();
+            let iter_handle = unbox_to_i64(blk, &iter_box);
+            let arr = blk.call(I64, "js_array_clone", &[(I64, &iter_handle)]);
+            let cb_handle = unbox_to_i64(blk, &cb_box);
+            let mapped = blk.call(I64, "js_array_map", &[(I64, &arr), (I64, &cb_handle)]);
+            Ok(nanbox_pointer_inline(blk, &mapped))
+        }
         Expr::Uint8ArrayFrom(iter) => lower_expr(ctx, iter),
 
         // -------- Object.values / Object.entries --------

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.98
+**Current Version:** 0.4.99
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.99 (llvm-backend)
+- fix: `ArrayForEach`/`ArrayFlatMap` expressions were missing from `collect_ref_ids_in_expr`, so module-level arrays used inside `arr.forEach(cb)` within functions weren't promoted to module globals. The function saw a zero pointer and the forEach loop never executed. `test_edge_closure_module_map` now passes.
+- feat: `delete arr[index]` on arrays now sets the element to `TAG_UNDEFINED` via new `js_array_delete(arr, index)` runtime function. Previously the numeric-index case fell through to a no-op. `test_complex_runtime_probes` now passes.
 
 ### v0.4.98 (llvm-backend)
 - fix: `format_jsvalue` safe fallback for non-array/object GC types — removes heuristic pointer interpretation that could crash on closures, maps, sets, promises. Now dispatches by GC type with safe "[object Object]" default.

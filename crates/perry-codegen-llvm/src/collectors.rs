@@ -784,7 +784,9 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
         | Expr::ArrayFind { array, callback }
         | Expr::ArrayFindIndex { array, callback }
         | Expr::ArrayFindLast { array, callback }
-        | Expr::ArrayFindLastIndex { array, callback } => {
+        | Expr::ArrayFindLastIndex { array, callback }
+        | Expr::ArrayForEach { array, callback }
+        | Expr::ArrayFlatMap { array, callback } => {
             walk(array, out);
             walk(callback, out);
         }
