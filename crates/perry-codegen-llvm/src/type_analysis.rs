@@ -348,7 +348,10 @@ pub(crate) fn is_string_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         | Expr::DateToLocaleDateString(_)
         | Expr::DateToLocaleTimeString(_)
         | Expr::DateToISOString(_)
-        | Expr::DateToJSON(_) => true,
+        | Expr::DateToJSON(_)
+        // node:path constants
+        | Expr::PathSep
+        | Expr::PathDelimiter => true,
         // process.* / os.* string-returning accessors. These lower to runtime
         // calls that return raw StringHeader* pointers, NaN-boxed with STRING_TAG
         // in expr.rs. Without this, `process.version.startsWith('v')` falls

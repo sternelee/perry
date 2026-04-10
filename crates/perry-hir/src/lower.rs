@@ -8093,6 +8093,23 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 }
             }
 
+            // Check if this is path.sep / path.delimiter constant access
+            // (where `path` is an imported alias of the node:path module).
+            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                let obj_name = obj_ident.sym.to_string();
+                let is_path_module = obj_name == "path"
+                    || ctx.lookup_builtin_module_alias(&obj_name) == Some("path");
+                if is_path_module {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        match prop_ident.sym.as_ref() {
+                            "sep" => return Ok(Expr::PathSep),
+                            "delimiter" => return Ok(Expr::PathDelimiter),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
             // Check if this is a process.env.VARNAME or process.env[expr] access
             if let ast::Expr::Member(inner_member) = member.obj.as_ref() {
                 if let ast::Expr::Ident(obj_ident) = inner_member.obj.as_ref() {
