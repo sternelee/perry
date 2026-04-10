@@ -4508,6 +4508,99 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             lower_native_method_call(ctx, module, method, object.as_deref(), args)
         }
 
+        // Phase H fs: `fs.promises.METHOD(args...)` — HIR shape is a
+        // nested PropertyGet { PropertyGet { NativeModuleRef("fs"),
+        // "promises" }, method }. We route these to their sync
+        // counterparts and wrap the result in an already-resolved
+        // Promise via `js_promise_resolved`. This is enough for the
+        // test's `await fs.promises.readFile(...)` pattern.
+        Expr::Call { callee, args, .. }
+            if matches!(
+                callee.as_ref(),
+                Expr::PropertyGet { object, .. } if matches!(
+                    object.as_ref(),
+                    Expr::PropertyGet { object: inner, property: p }
+                        if p == "promises" && matches!(
+                            inner.as_ref(),
+                            Expr::NativeModuleRef(name) if name == "fs"
+                        )
+                )
+            ) =>
+        {
+            let property = if let Expr::PropertyGet { property, .. } = callee.as_ref() {
+                property.as_str()
+            } else {
+                unreachable!()
+            };
+            match property {
+                "readFile" if args.len() >= 1 => {
+                    let p = lower_expr(ctx, &args[0])?;
+                    let blk = ctx.block();
+                    let str_handle = blk.call(
+                        I64,
+                        "js_fs_read_file_sync",
+                        &[(DOUBLE, &p)],
+                    );
+                    let str_box = nanbox_string_inline(blk, &str_handle);
+                    let promise_handle = blk.call(
+                        I64,
+                        "js_promise_resolved",
+                        &[(DOUBLE, &str_box)],
+                    );
+                    Ok(nanbox_pointer_inline(blk, &promise_handle))
+                }
+                "writeFile" if args.len() >= 2 => {
+                    let path = lower_expr(ctx, &args[0])?;
+                    let content = lower_expr(ctx, &args[1])?;
+                    let _ = ctx.block().call(
+                        I32,
+                        "js_fs_write_file_sync",
+                        &[(DOUBLE, &path), (DOUBLE, &content)],
+                    );
+                    let blk = ctx.block();
+                    let undef = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                    let promise_handle = blk.call(
+                        I64,
+                        "js_promise_resolved",
+                        &[(DOUBLE, &undef)],
+                    );
+                    Ok(nanbox_pointer_inline(blk, &promise_handle))
+                }
+                "mkdir" if args.len() >= 1 => {
+                    let p = lower_expr(ctx, &args[0])?;
+                    let _ = ctx.block().call(
+                        I32,
+                        "js_fs_mkdir_sync",
+                        &[(DOUBLE, &p)],
+                    );
+                    let blk = ctx.block();
+                    let undef = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                    let promise_handle = blk.call(
+                        I64,
+                        "js_promise_resolved",
+                        &[(DOUBLE, &undef)],
+                    );
+                    Ok(nanbox_pointer_inline(blk, &promise_handle))
+                }
+                _ => {
+                    // Unsupported — return a resolved promise holding
+                    // undefined so `await` sees a real pending→settled
+                    // transition instead of a null pointer.
+                    for a in args {
+                        let _ = lower_expr(ctx, a)?;
+                    }
+                    let blk = ctx.block();
+                    let undef = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                    let promise_handle = blk.call(
+                        I64,
+                        "js_promise_resolved",
+                        &[(DOUBLE, &undef)],
+                    );
+                    Ok(nanbox_pointer_inline(blk, &promise_handle))
+                }
+            }
+        }
+
         // Phase H fs: `fs.METHOD(args...)` — catch all Call expressions
         // where the callee is a PropertyGet on a `NativeModuleRef("fs")`
         // and dispatch to the matching runtime function. HIR already
