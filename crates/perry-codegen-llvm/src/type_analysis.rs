@@ -631,13 +631,15 @@ pub(crate) fn static_type_of(ctx: &FnCtx<'_>, e: &Expr) -> Option<HirType> {
         // nested access like `grid[i][j]` and `grid[i].length` reach
         // the array fast paths (via is_array_expr) when `grid` is
         // statically known to be `Array<Array<T>>` / `Array<Tuple<...>>`.
+        // Also handles `Record<K, V>[key]` → V so `groups["a"].length`
+        // on `Record<string, number[]>` finds the array fast path.
         Expr::IndexGet { object, .. } => match static_type_of(ctx, object)? {
             HirType::Array(inner) => Some(*inner),
             HirType::Tuple(elems) if !elems.is_empty() => {
-                // Heterogeneous tuple — safest bet is the first
-                // element type, which is still better than Any for
-                // common homogeneous tuples.
                 Some(elems[0].clone())
+            }
+            HirType::Generic { base, type_args } if base == "Record" && type_args.len() == 2 => {
+                Some(type_args[1].clone())
             }
             _ => None,
         },
