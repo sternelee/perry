@@ -565,6 +565,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_interval_timer_tick", I32, &[]);
     module.declare_function("js_set_timeout_callback", I64, &[I64, DOUBLE]);
     module.declare_function("setInterval", I64, &[I64, DOUBLE]);
+    module.declare_function("clearTimeout", VOID, &[I64]);
+    module.declare_function("clearInterval", VOID, &[I64]);
     module.declare_function("js_promise_resolve", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_reject", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_resolved", I64, &[DOUBLE]);

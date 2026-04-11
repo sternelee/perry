@@ -177,6 +177,20 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 );
                 return Ok(nanbox_pointer_inline(blk, &id));
             }
+            "clearTimeout" if args.len() == 1 => {
+                let id_box = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let id_handle = unbox_to_i64(blk, &id_box);
+                blk.call_void("clearTimeout", &[(I64, &id_handle)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            "clearInterval" if args.len() == 1 => {
+                let id_box = lower_expr(ctx, &args[0])?;
+                let blk = ctx.block();
+                let id_handle = unbox_to_i64(blk, &id_box);
+                blk.call_void("clearInterval", &[(I64, &id_handle)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
             _ => {}
         }
         // Built-in runtime extern functions (`js_weakmap_set`,
