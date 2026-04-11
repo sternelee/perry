@@ -49,7 +49,7 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         cmd.arg("-target").arg(triple);
     }
 
-    log::debug!("perry-codegen-llvm: {:?}", cmd);
+    log::debug!("perry-codegen: {:?}", cmd);
     let output = cmd
         .output()
         .with_context(|| format!("Failed to invoke {}", clang.display()))?;
@@ -71,8 +71,8 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
     // which case we leave the .ll around for debugging and print the path.
     let keep = env::var_os("PERRY_LLVM_KEEP_IR").is_some();
     if keep {
-        eprintln!("[perry-codegen-llvm] kept LLVM IR: {}", ll_path.display());
-        eprintln!("[perry-codegen-llvm] kept object:  {}", obj_path.display());
+        eprintln!("[perry-codegen] kept LLVM IR: {}", ll_path.display());
+        eprintln!("[perry-codegen] kept object:  {}", obj_path.display());
     } else {
         let _ = fs::remove_file(&ll_path);
         let _ = fs::remove_file(&obj_path);
@@ -218,7 +218,7 @@ pub fn bitcode_link_pipeline(
             cmd.arg(bc);
         }
         cmd.arg("-o").arg(&linked_bc);
-        log::debug!("perry-codegen-llvm bitcode-link: {:?}", cmd);
+        log::debug!("perry-codegen bitcode-link: {:?}", cmd);
         let output = cmd.output().context("Failed to invoke llvm-link")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -232,7 +232,7 @@ pub fn bitcode_link_pipeline(
     {
         let mut cmd = Command::new(&opt_tool);
         cmd.arg("-O3").arg(&linked_bc).arg("-o").arg(&opt_bc);
-        log::debug!("perry-codegen-llvm opt: {:?}", cmd);
+        log::debug!("perry-codegen opt: {:?}", cmd);
         let output = cmd.output().context("Failed to invoke opt")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -249,7 +249,7 @@ pub fn bitcode_link_pipeline(
         if let Some(triple) = target_triple {
             cmd.arg("-mtriple").arg(triple);
         }
-        log::debug!("perry-codegen-llvm llc: {:?}", cmd);
+        log::debug!("perry-codegen llc: {:?}", cmd);
         let output = cmd.output().context("Failed to invoke llc")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -258,7 +258,7 @@ pub fn bitcode_link_pipeline(
     }
 
     if keep {
-        eprintln!("[perry-codegen-llvm] bitcode-link intermediates kept:");
+        eprintln!("[perry-codegen] bitcode-link intermediates kept:");
         for f in &intermediates {
             eprintln!("  {}", f.display());
         }

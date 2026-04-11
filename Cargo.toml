@@ -25,7 +25,6 @@ members = [
     "crates/perry-codegen-glance",
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
-    "crates/perry-codegen-llvm",
     "crates/perry-ui-test",
 ]
 # Only build platform-independent crates by default.
@@ -48,7 +47,6 @@ default-members = [
     "crates/perry-codegen-glance",
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
-    "crates/perry-codegen-llvm",
 ]
 
 # Aggressive release optimizations for small, fast binaries
@@ -87,7 +85,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.4.148"
+version = "0.5.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"
@@ -97,14 +95,6 @@ repository = "https://github.com/PerryTS/perry"
 swc_ecma_parser = "32.0"
 swc_ecma_ast = "19.0"
 swc_common = "18.0"
-
-# Cranelift for code generation (0.121 — last version before breaking declare_var API change in 0.122)
-cranelift = "0.121"
-cranelift-codegen = { version = "0.121", features = ["all-arch"] }
-cranelift-frontend = "0.121"
-cranelift-module = "0.121"
-cranelift-native = "0.121"
-cranelift-object = "0.121"
 
 # Runtime dependencies
 # bdwgc for garbage collection (Boehm GC)
@@ -169,4 +159,3 @@ perry-codegen-swiftui = { path = "crates/perry-codegen-swiftui" }
 perry-codegen-glance = { path = "crates/perry-codegen-glance" }
 perry-codegen-wear-tiles = { path = "crates/perry-codegen-wear-tiles" }
 perry-codegen-wasm = { path = "crates/perry-codegen-wasm" }
-perry-codegen-llvm = { path = "crates/perry-codegen-llvm" }

@@ -47,7 +47,7 @@ for bench in $BENCHMARKS; do
 
   # LLVM compile
   ll_start=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000')
-  "$PERRY" compile --backend llvm "$ts_file" -o "$ll_bin" >/dev/null 2>&1 || true
+  "$PERRY" compile "$ts_file" -o "$ll_bin" >/dev/null 2>&1 || true
   ll_end=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time()*1000')
   ll_ms=$((ll_end - ll_start))
 

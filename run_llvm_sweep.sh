@@ -86,8 +86,8 @@ for f in "$SCRIPT_DIR"/test-files/test_*.ts; do
     TOTAL=$((TOTAL + 1))
     bin="$OUT_DIR/$name.bin"
 
-    # Compile with LLVM backend
-    if ! "$PERRY" compile --backend llvm "$f" -o "$bin" >"$OUT_DIR/$name.compile.log" 2>&1; then
+    # Compile (LLVM is the only backend post-cutover)
+    if ! "$PERRY" compile "$f" -o "$bin" >"$OUT_DIR/$name.compile.log" 2>&1; then
         COMPILE_FAIL=$((COMPILE_FAIL + 1))
         COMPILE_FAILS+=("$name")
         echo -e "${RED}COMPILE_FAIL${NC}  $name"

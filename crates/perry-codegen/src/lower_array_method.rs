@@ -27,7 +27,7 @@ pub(crate) fn lower_array_method(
     match property {
         "pop" => {
             if !args.is_empty() {
-                bail!("perry-codegen-llvm: Array.pop takes no args, got {}", args.len());
+                bail!("perry-codegen: Array.pop takes no args, got {}", args.len());
             }
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
@@ -36,7 +36,7 @@ pub(crate) fn lower_array_method(
         }
         "join" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.join expects 1 arg (separator), got {}", args.len());
+                bail!("perry-codegen: Array.join expects 1 arg (separator), got {}", args.len());
             }
             let sep_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -51,7 +51,7 @@ pub(crate) fn lower_array_method(
         }
         "some" | "every" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.{} expects 1 arg, got {}", property, args.len());
+                bail!("perry-codegen: Array.{} expects 1 arg, got {}", property, args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -127,7 +127,7 @@ pub(crate) fn lower_array_method(
         }
         "flatMap" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.flatMap expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.flatMap expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -145,7 +145,7 @@ pub(crate) fn lower_array_method(
         // the HIR lowering doesn't recognize the pattern.
         "find" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.find expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.find expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -155,7 +155,7 @@ pub(crate) fn lower_array_method(
         }
         "findIndex" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.findIndex expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.findIndex expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -166,7 +166,7 @@ pub(crate) fn lower_array_method(
         }
         "findLast" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.findLast expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.findLast expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -176,7 +176,7 @@ pub(crate) fn lower_array_method(
         }
         "findLastIndex" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.findLastIndex expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.findLastIndex expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -187,7 +187,7 @@ pub(crate) fn lower_array_method(
         }
         "reduce" => {
             if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen-llvm: Array.reduce expects 1-2 args, got {}", args.len());
+                bail!("perry-codegen: Array.reduce expects 1-2 args, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let (has_initial, initial_box) = if args.len() == 2 {
@@ -208,7 +208,7 @@ pub(crate) fn lower_array_method(
         }
         "reduceRight" => {
             if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen-llvm: Array.reduceRight expects 1-2 args, got {}", args.len());
+                bail!("perry-codegen: Array.reduceRight expects 1-2 args, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let (has_initial, initial_box) = if args.len() == 2 {
@@ -229,7 +229,7 @@ pub(crate) fn lower_array_method(
         }
         "map" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.map expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.map expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -240,7 +240,7 @@ pub(crate) fn lower_array_method(
         }
         "filter" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.filter expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.filter expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -251,7 +251,7 @@ pub(crate) fn lower_array_method(
         }
         "forEach" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.forEach expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.forEach expects 1 arg, got {}", args.len());
             }
             let cb_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -263,7 +263,7 @@ pub(crate) fn lower_array_method(
         }
         "includes" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.includes expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.includes expects 1 arg, got {}", args.len());
             }
             let val_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -285,7 +285,7 @@ pub(crate) fn lower_array_method(
         }
         "indexOf" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.indexOf expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.indexOf expects 1 arg, got {}", args.len());
             }
             let val_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -295,7 +295,7 @@ pub(crate) fn lower_array_method(
         }
         "at" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.at expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.at expects 1 arg, got {}", args.len());
             }
             let idx_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -304,7 +304,7 @@ pub(crate) fn lower_array_method(
         }
         "slice" => {
             if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen-llvm: Array.slice expects 1-2 args, got {}", args.len());
+                bail!("perry-codegen: Array.slice expects 1-2 args, got {}", args.len());
             }
             let start_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -327,7 +327,7 @@ pub(crate) fn lower_array_method(
         }
         "shift" => {
             if !args.is_empty() {
-                bail!("perry-codegen-llvm: Array.shift takes no args, got {}", args.len());
+                bail!("perry-codegen: Array.shift takes no args, got {}", args.len());
             }
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
@@ -335,7 +335,7 @@ pub(crate) fn lower_array_method(
         }
         "fill" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.fill expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.fill expects 1 arg, got {}", args.len());
             }
             let val_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -345,7 +345,7 @@ pub(crate) fn lower_array_method(
         }
         "unshift" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: Array.unshift expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: Array.unshift expects 1 arg, got {}", args.len());
             }
             let val_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();

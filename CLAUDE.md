@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.148
+**Current Version:** 0.5.0
 
 ## TypeScript Parity Status
 
@@ -76,7 +76,7 @@ TypeScript (.ts) → Parse (SWC) → AST → Lower → HIR → Transform → Cod
 | **perry-types** | Type system definitions |
 | **perry-hir** | HIR data structures (`ir.rs`) and AST→HIR lowering (`lower.rs`) |
 | **perry-transform** | IR passes (closure conversion, async lowering, inlining) |
-| **perry-codegen-llvm** | LLVM-based native code generation |
+| **perry-codegen** | LLVM-based native code generation |
 | **perry-runtime** | Runtime: value.rs, object.rs, array.rs, string.rs, gc.rs, arena.rs, thread.rs |
 | **perry-stdlib** | Node.js API support (mysql2, redis, fetch, fastify, ws, etc.) |
 | **perry-ui** / **perry-ui-macos** / **perry-ui-ios** / **perry-ui-tvos** | Native UI (AppKit/UIKit) |
@@ -193,6 +193,12 @@ For older versions (v0.4.80 and earlier), see CHANGELOG.md.
   4. **`typeof Object.<method>` / `typeof Array.<method>` constant fold** — `lower.rs::ast::Expr::Unary` now inspects the AST operand BEFORE lowering. If it's `Object.X` or `Array.X` for a known static method name (`is_known_object_static_method`/`is_known_array_static_method` whitelist including `groupBy` and `fromAsync`), the whole `typeof` expression folds to the literal string `"function"`. Without this, the test's `if (typeof Object.groupBy === "function")` guard would always fall to the "not available" branch since the property access on a global currently returns 0/number.
 - Remaining 3 markers in `test_gap_array_methods` are gated on a pre-existing Perry compiler bug (nested `async function* gen()` declared inside another async function returns 0 when called) and the top-level `testFromAsync().then(...)` callback not firing because main exits before draining microtasks. Both are out of scope for this commit.
 - Regression sweep clean: test_edge_arrays, test_gap_encoding_timers, test_edge_buffer_from_encoding, test_gap_class_advanced, test_gap_proxy_reflect, test_gap_object_methods, test_gap_node_fs, test_gap_symbols, test_gap_async_advanced, test_gap_generators all unchanged.
+
+### v0.5.0 — Phase K hard cutover (LLVM-only)
+- **Cranelift backend deleted.** `crates/perry-codegen/` (12 files, ~54 KLOC, the old Cranelift backend) is gone. The LLVM backend at `crates/perry-codegen-llvm/` is renamed to `crates/perry-codegen/` and is now the only codegen path. The `--backend` CLI flag is removed (LLVM is unconditional). All `cranelift*` workspace dependencies are dropped from `Cargo.toml`.
+- Driver dispatch site simplified: ~250 lines of `if use_llvm_backend { ... } else { Cranelift fallback ... }` reduced to a single straight-line LLVM compile path. The two `perry_codegen::generate_stub_object` call sites switch to the LLVM port at `crates/perry-codegen/src/stubs.rs`.
+- `run_parity_tests.sh` and `run_llvm_sweep.sh` no longer pass `--backend llvm` (it's a no-op now). `benchmarks/compare_backends.sh` adapted similarly.
+- Parity sweep result identical pre/post cutover: **102 MATCH / 9 DIFF / 0 CRASH / 0 COMPILE_FAIL / 13 NODE_FAIL / 91.8%**. The 9 DIFFs are 8 nondeterministic (timing/RNG/UUID) + 1 known async-generator baseline + 4 isolated long-tail features (lookbehind regex, string-spread-into-array, UTF-8/UTF-16 length, lone surrogates).
 
 ### v0.4.148 (llvm-backend)
 - feat: `test_gap_node_crypto_buffer` DIFF (54) → **MATCH**. Full Node-style Buffer/crypto surface now works in the LLVM backend. Coordinated changes across runtime, codegen, and HIR:

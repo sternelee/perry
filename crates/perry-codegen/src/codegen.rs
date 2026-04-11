@@ -1,1863 +1,1825 @@
-//! Cranelift code generation
+//! HIR → LLVM IR compilation entry point.
 //!
-//! Translates HIR to Cranelift IR and generates native machine code.
+//! Public contract:
+//!
+//! ```ignore
+//! let opts = CompileOptions { target: None, is_entry_module: true };
+//! let object_bytes: Vec<u8> = perry_codegen::compile_module(&hir, opts)?;
+//! ```
+//!
+//! The returned bytes are a regular object file produced by `clang -c`.
+//! Perry's existing linking stage in `crates/perry/src/commands/compile.rs`
+//! picks them up identically to the Cranelift output.
+//!
+//! ## Phase A scope (in progress — primary-backend migration)
+//!
+//! Building toward feature parity with the Cranelift backend so LLVM can
+//! become Perry's primary build platform. See
+//! `/Users/amlug/.claude/plans/sorted-noodling-quilt.md` for the full
+//! migration plan.
+//!
+//! Currently supported (Phases 1, 2, 2.1, A-strings):
+//!
+//! - User functions with typed `double` ABI
+//! - Recursive and forward calls via `FuncRef`
+//! - If/else, for loops, let, return
+//! - Binary arithmetic (add/sub/mul/div/mod) and compare
+//! - Update (++/--) and LocalSet
+//! - `Date.now()` via `js_date_now`
+//! - **String literals** via the hoisted `StringPool` (one allocation per
+//!   literal at module init time, registered as a permanent GC root via
+//!   `js_gc_register_global_root`; use sites are a single `load`)
+//! - `console.log(<expr>)` — uses `js_console_log_number` for static number
+//!   literals (optimized path) and `js_console_log_dynamic` for everything
+//!   else (NaN-tag dispatch at runtime)
+//!
+//! Anything else (objects, arrays, classes, closures, async, imports, …)
+//! errors with an actionable "Phase X not yet supported" message.
 
-use anyhow::{anyhow, Result};
-use cranelift::prelude::*;
-use cranelift_codegen::ir::AbiParam;
-use cranelift_codegen::settings::{self, Configurable};
-use cranelift_codegen::Context;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_module::{DataDescription, Init, Linkage, Module};
-use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
+use std::collections::HashMap;
 
-use perry_hir::{
-    ArrayElement, BinaryOp, CallArg, CatchClause, Class, ClassField, CompareOp, Decorator, Expr, Function, LogicalOp, Module as HirModule, Stmt, UnaryOp, UpdateOp,
-};
-use perry_types::LocalId;
-use cranelift_codegen::ir::{Block, StackSlot, StackSlotData, StackSlotKind, TrapCode};
+use anyhow::{anyhow, Context, Result};
+use perry_hir::{Function, Module as HirModule};
 
-use crate::types::{ClassMeta, EnumMemberValue, LocalInfo, ThisContext, LoopContext};
-use crate::util::*;
+use crate::expr::FnCtx;
+use crate::module::LlModule;
+use crate::runtime_decls;
+use crate::stmt;
+use crate::strings::StringPool;
+use crate::types::{DOUBLE, I32, I64, LlvmType, PTR, VOID};
 
-/// The main compiler that generates native code from HIR
-pub struct Compiler {
-    /// Cranelift module for the object file
-    pub(crate) module: ObjectModule,
-    /// Cranelift context for function compilation
-    pub(crate) ctx: Context,
-    /// Function builder context (reused across functions)
-    pub(crate) func_ctx: FunctionBuilderContext,
-    /// Mapping from HIR function IDs to Cranelift function IDs
-    pub(crate) func_ids: HashMap<u32, cranelift_module::FuncId>,
-    /// Mapping from external function names to their IDs
-    pub(crate) extern_funcs: HashMap<Cow<'static, str>, cranelift_module::FuncId>,
-    /// Class metadata: class name -> metadata
-    pub(crate) classes: HashMap<String, ClassMeta>,
-    /// Enum member values: (enum_name, member_name) -> value
-    pub(crate) enums: HashMap<(String, String), EnumMemberValue>,
-    /// String literal data: string content -> data ID
-    pub(crate) string_data: HashMap<String, cranelift_module::DataId>,
-    /// Closure function IDs: closure HIR func_id -> Cranelift func_id
-    pub(crate) closure_func_ids: HashMap<u32, cranelift_module::FuncId>,
-    /// Set of async function IDs (for proper return type handling)
-    pub(crate) async_func_ids: HashSet<u32>,
-    /// Set of function IDs that return closures
-    pub(crate) closure_returning_funcs: HashSet<u32>,
-    /// Wrapper functions for named functions used as callbacks: HIR func_id -> wrapper Cranelift func_id
-    pub(crate) func_wrapper_ids: HashMap<u32, cranelift_module::FuncId>,
-    /// HIR functions (needed for wrapper generation)
-    pub(crate) hir_functions: Vec<Function>,
-    /// Function parameter ABI types: func_id -> Vec<abi_type>
-    pub(crate) func_param_types: HashMap<u32, Vec<types::Type>>,
-    /// Function return ABI types: func_id -> abi_type
-    pub(crate) func_return_types: HashMap<u32, types::Type>,
-    /// Function HIR return types: func_id -> full HirType (for detecting Map, Set, etc.)
-    pub(crate) func_hir_return_types: HashMap<u32, perry_types::Type>,
-    /// Rest parameter info: func_id -> index of rest parameter (if any)
-    /// The rest parameter collects all arguments from this index onwards into an array
-    pub(crate) func_rest_param_index: HashMap<u32, usize>,
-    /// Union parameter info: func_id -> Vec<bool> (true if parameter is union type)
-    pub(crate) func_union_params: HashMap<u32, Vec<bool>>,
-    /// Whether the JS runtime is needed for this module
-    pub(crate) needs_js_runtime: bool,
-    /// Whether perry-stdlib is needed (controls stdlib function declarations)
-    pub(crate) needs_stdlib: bool,
-    /// Whether perry/ui is needed (controls UI/system/plugin function declarations)
-    pub(crate) needs_ui: bool,
-    /// Whether dotenv/config was imported (needs auto-init call)
-    pub(crate) needs_dotenv_init: bool,
-    /// Whether this is the entry module (should generate main)
-    pub(crate) is_entry_module: bool,
-    /// Native module init function names to call from main (for entry module)
-    pub(crate) native_module_inits: Vec<String>,
-    /// JavaScript module specifiers that need to be loaded at runtime
-    pub(crate) js_modules: Vec<String>,
-    /// Exported native instance data IDs: variable name -> data ID
-    pub(crate) exported_native_instance_ids: HashMap<String, cranelift_module::DataId>,
-    /// Exported object literal data IDs: variable name -> data ID
-    pub(crate) exported_object_ids: HashMap<String, cranelift_module::DataId>,
-    /// Exported function data IDs: function name -> (data ID, FuncId)
-    /// These are functions that need globals so they can be passed as values to other modules
-    pub(crate) exported_function_ids: HashMap<String, (cranelift_module::DataId, u32)>,
-    /// Module-level variable data IDs: LocalId -> data ID
-    /// These are variables defined at module scope that need to be accessible from functions
-    pub(crate) module_var_data_ids: HashMap<LocalId, cranelift_module::DataId>,
-    /// Module-level variable info: LocalId -> LocalInfo
-    /// Populated during compile_init, used by compile_function for GlobalGet
-    pub(crate) module_level_locals: HashMap<LocalId, LocalInfo>,
-    /// Imported function parameter counts: function name -> param count
-    /// Used to ensure consistent wrapper signatures for functions with optional params
-    pub(crate) imported_func_param_counts: HashMap<String, usize>,
-    /// Imported function return types: function name -> HIR return type
-    /// Used to resolve types for await expressions on cross-module async function calls
-    pub(crate) imported_func_return_types: HashMap<String, perry_types::Type>,
-    /// Imported function names that were declared `async` in their source module.
-    /// Used by `is_promise_expr` so that `return crossModuleAsyncFn()` correctly
-    /// chains the promises via `js_promise_resolve_with_promise`.
-    pub(crate) imported_async_funcs: HashSet<String>,
-    /// Module symbol prefix for scoping cross-module symbols (sanitized module path)
-    pub(crate) module_symbol_prefix: String,
-    /// Mapping from imported function name -> source module's symbol prefix
-    /// Used to construct the correct scoped wrapper name when calling cross-module functions
-    pub(crate) import_module_prefixes: HashMap<String, String>,
-    /// Maps local import name -> full scoped export name for imports where local != export name.
-    /// E.g., `import bs58 from 'bs58'` maps "bs58" -> "__export_{bs58_prefix}__default".
-    pub(crate) import_local_to_scoped: HashMap<String, String>,
-    /// Pre-declared import wrapper function IDs: unscoped func_name -> (scoped FuncId, param_count)
-    /// Populated by pre_declare_import_wrapper before compile_module
-    pub(crate) pre_declared_import_wrappers: HashMap<String, (cranelift_module::FuncId, usize)>,
-    /// Set of import names that are namespace imports (import * as X from './module')
-    /// Used to intercept PropertyGet(ExternFuncRef { name: X }, prop) and resolve prop directly
-    pub(crate) namespace_imports: HashSet<String>,
-    /// Static fields that need runtime initialization (strings, expressions)
-    /// Collected during compile_static_field, processed in compile_init
-    pub(crate) static_field_runtime_inits: Vec<(cranelift_module::DataId, Expr)>,
-    /// Output type: "executable" (default) or "dylib" (shared library plugin)
-    pub(crate) output_type: String,
-    /// Bundled extensions: (canonical_source_path, module_prefix) for static plugin registration
-    pub(crate) bundled_extensions: Vec<(String, String)>,
-    /// External native library FFI function declarations: function_name -> (params, returns)
-    pub(crate) native_library_functions: Vec<(String, Vec<String>, String)>,
-    /// Compile-time platform ID injected as `__platform__` constant:
-    /// 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux
-    pub(crate) compile_target: i64,
-    /// Compile-time feature flags. Each entry becomes a `__feature_NAME__` constant (1).
-    /// Missing features default to 0. Used for dead-code elimination via `if (__plugins__)`.
-    pub(crate) enabled_features: HashSet<String>,
-    /// Whether geisterhand is enabled (starts HTTP server on startup)
-    pub(crate) needs_geisterhand: bool,
-    /// Port for geisterhand HTTP server (default 7676)
-    pub(crate) geisterhand_port: u16,
-    /// Type alias map: alias name -> resolved type.
-    /// Collected from all modules' type_aliases during compile_module,
-    /// used in type_to_abi to resolve Named("BlockTag") to its underlying type.
-    pub(crate) type_alias_map: HashMap<String, perry_types::Type>,
+/// Options mirrored from the Cranelift backend's setter API.
+#[derive(Debug, Clone, Default)]
+pub struct CompileOptions {
+    /// Target triple override. `None` uses the host default.
+    pub target: Option<String>,
+    /// Whether this module is the program entry point. When true, codegen
+    /// emits a `main` function that calls `js_gc_init`, the string pool
+    /// init, every non-entry module's `<prefix>__init`, then the entry
+    /// module's own top-level statements.
+    pub is_entry_module: bool,
+    /// Prefixes of every non-entry module in the program. Only consulted
+    /// when `is_entry_module = true` — `main` calls `<prefix>__init` for
+    /// each one in order before running its own init statements. The
+    /// order matches Perry's existing topological sort (set up by the
+    /// CLI driver in `crates/perry/src/commands/compile.rs`).
+    pub non_entry_module_prefixes: Vec<String>,
+    /// For each imported function name in this module, the prefix of the
+    /// source module that exports it. Used by `ExternFuncRef` lowering
+    /// in `lower_call` to generate the correct cross-module call to
+    /// `perry_fn_<source_prefix>__<funcname>`. Built by the CLI driver
+    /// from each module's `hir.imports` table.
+    pub import_function_prefixes: std::collections::HashMap<String, String>,
+    /// When true, `compile_module` returns the textual LLVM IR (`.ll`)
+    /// as bytes instead of invoking `clang -c` to produce an object file.
+    /// Used by the bitcode-link path (`PERRY_LLVM_BITCODE_LINK=1`).
+    pub emit_ir_only: bool,
+
+    // ── Cross-module import plumbing (mirrors Cranelift setter chain) ──
+
+    /// Locals that are namespace imports (`import * as X from "./mod"`).
+    /// Codegen uses this to know that `X.foo()` should be dispatched as
+    /// a cross-module call rather than an object method call.
+    pub namespace_imports: Vec<String>,
+    /// Imported class definitions from other native modules, keyed by
+    /// the local alias (or original name when no alias). Each entry
+    /// carries the class HIR, the module prefix of its origin, and an
+    /// optional local alias.
+    pub imported_classes: Vec<ImportedClass>,
+    /// Imported enum member lists, keyed by the local name under which
+    /// the enum is visible in this module.
+    pub imported_enums: Vec<(String, Vec<(String, perry_hir::EnumValue)>)>,
+    /// Names of imported functions that are async. Codegen needs this to
+    /// wrap calls in the promise machinery.
+    pub imported_async_funcs: std::collections::HashSet<String>,
+    /// Type alias map (name → Type) aggregated from all modules. Codegen
+    /// uses this to resolve `Named` types in function signatures.
+    pub type_aliases: std::collections::HashMap<String, perry_types::Type>,
+    /// Imported function parameter counts, keyed by function name.
+    pub imported_func_param_counts: std::collections::HashMap<String, usize>,
+    /// Imported function return types, keyed by local function name.
+    pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+
+    // ── Feature plumbing (mirrors Cranelift setter chain) ──
+    //
+    // These fields control which runtime libraries and FFI surfaces are
+    // compiled into the resulting binary. Before this, the LLVM dispatch
+    // site silently skipped the Cranelift setter calls — so the auto-
+    // optimize feature detection didn't fire and real-world programs
+    // with UI/HTTP/DB/native-library deps couldn't link. The fields below
+    // propagate the CLI's feature detection into the LLVM codegen so
+    // both backends honor the same project configuration.
+    //
+    // NOTE: most of these are informational for the CLI driver's auto-
+    // optimize rebuild + linker step — `compile_module` itself only
+    // consults `output_type` (to decide between `main` and a dylib init)
+    // and `i18n_table` (to materialize the table as rodata). The rest
+    // are round-tripped through the CompileOptions so the CLI can hand
+    // them to `build_optimized_libs` / linker flag construction without
+    // threading separate parameters.
+
+    /// Output type. "executable" emits a `main`, "dylib" emits a shared
+    /// library plugin with no entrypoint.
+    pub output_type: String,
+    /// Whether the project needs `libperry_stdlib.a` linked in.
+    pub needs_stdlib: bool,
+    /// Whether the project needs `libperry_ui_*.a` linked in.
+    pub needs_ui: bool,
+    /// Whether the project needs the Geisterhand inspector linked in.
+    pub needs_geisterhand: bool,
+    /// Port the Geisterhand inspector listens on when `needs_geisterhand`.
+    pub geisterhand_port: u16,
+    /// Whether the project needs the QuickJS fallback runtime linked in.
+    pub needs_js_runtime: bool,
+    /// Cargo feature names enabled for this build, computed by the CLI's
+    /// `compute_required_features`. Used by the auto-optimize path to
+    /// decide which optional runtime helpers to compile into
+    /// `libperry_stdlib.a`.
+    pub enabled_features: Vec<String>,
+    /// For the entry module: names of every non-entry native module
+    /// that needs its `<prefix>__init` called before the entry's own
+    /// init. Already covered by `non_entry_module_prefixes` for the
+    /// init sequence, but tracked separately for auto-optimize's
+    /// feature scan.
+    pub native_module_init_names: Vec<String>,
+    /// JavaScript-only modules routed through QuickJS (full specifiers).
+    pub js_module_specifiers: Vec<String>,
+    /// Bundled TypeScript extensions — `(absolute_path, module_prefix)`.
+    pub bundled_extensions: Vec<(String, String)>,
+    /// Native library FFI from `package.json` — `(library_name,
+    /// function_names, header_path)` tuples.
+    pub native_library_functions: Vec<(String, Vec<String>, String)>,
+    /// i18n translation table snapshot — `(translations, key_count,
+    /// locale_count, locale_codes)`.
+    pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>)>,
 }
 
-impl Compiler {
-    /// Create a new compiler for the host target
-    pub fn new(target: Option<&str>) -> Result<Self> {
-        let mut flag_builder = settings::builder();
-        flag_builder.set("use_colocated_libcalls", "false").unwrap();
-        // Enable PIC for macOS/iOS compatibility and Windows COFF cross-module references
-        flag_builder.set("is_pic", "true").unwrap();
-        // Enable maximum optimization
-        flag_builder.set("opt_level", "speed").unwrap();
-        // Enable register allocation checker to detect regalloc bugs
+/// A class imported from another native module.
+#[derive(Debug, Clone)]
+pub struct ImportedClass {
+    /// The class name as exported from its origin module.
+    pub name: String,
+    /// Optional local alias (`import { Foo as Bar }`).
+    pub local_alias: Option<String>,
+    /// Symbol prefix of the origin module (for cross-module method calls).
+    pub source_prefix: String,
+    /// Number of constructor parameters (needed for dispatch).
+    pub constructor_param_count: usize,
+    /// Method names defined on this class.
+    pub method_names: Vec<String>,
+    /// Parent class name, if any.
+    pub parent_name: Option<String>,
+}
 
-        let isa = match target {
-            Some("ios-simulator") | Some("ios") => {
-                // Cross-compile for aarch64-apple-ios (Mach-O)
-                let triple = target_lexicon::Triple::from_str("aarch64-apple-ios")
-                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
-                let isa_builder = cranelift::codegen::isa::lookup(triple)
-                    .map_err(|e| anyhow!("Failed to create iOS ISA: {}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-            Some("watchos") | Some("watchos-simulator") => {
-                // Cross-compile for aarch64-apple-watchos (Mach-O)
-                let triple = target_lexicon::Triple::from_str("aarch64-apple-watchos")
-                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
-                let isa_builder = cranelift::codegen::isa::lookup(triple)
-                    .map_err(|e| anyhow!("Failed to create watchOS ISA: {}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-            Some("tvos") | Some("tvos-simulator") => {
-                // Cross-compile for aarch64-apple-tvos (Mach-O)
-                let triple = target_lexicon::Triple::from_str("aarch64-apple-tvos")
-                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
-                let isa_builder = cranelift::codegen::isa::lookup(triple)
-                    .map_err(|e| anyhow!("Failed to create tvOS ISA: {}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-            Some("android") => {
-                // Cross-compile for aarch64-linux-android (ELF)
-                let triple = target_lexicon::Triple::from_str("aarch64-unknown-linux-android")
-                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
-                let isa_builder = cranelift::codegen::isa::lookup(triple)
-                    .map_err(|e| anyhow!("Failed to create Android ISA: {}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-            Some("linux") => {
-                // Cross-compile for x86_64-linux (ELF)
-                let triple = target_lexicon::Triple::from_str("x86_64-unknown-linux-gnu")
-                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
-                let isa_builder = cranelift::codegen::isa::lookup(triple)
-                    .map_err(|e| anyhow!("Failed to create Linux ISA: {}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-            Some("macos") => {
-                // Cross-compile for aarch64-apple-darwin (Mach-O)
-                let triple = target_lexicon::Triple::from_str("aarch64-apple-darwin")
-                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
-                let isa_builder = cranelift::codegen::isa::lookup(triple)
-                    .map_err(|e| anyhow!("Failed to create macOS ISA: {}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-            Some("windows") => {
-                // Cross-compile for x86_64-windows (PE/COFF)
-                let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc")
-                    .map_err(|e| anyhow!("Bad triple: {}", e))?;
-                let isa_builder = cranelift::codegen::isa::lookup(triple)
-                    .map_err(|e| anyhow!("Failed to create Windows ISA: {}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-            _ => {
-                // Native host target
-                let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
-                isa_builder
-                    .finish(settings::Flags::new(flag_builder))
-                    .map_err(|e| anyhow!("{}", e))?
-            }
-        };
+/// Cross-module import context, bundled into a single struct to avoid
+/// adding five more individual parameters to every compile_* function.
+/// Built once in `compile_module` from `CompileOptions`.
+pub(crate) struct CrossModuleCtx {
+    pub namespace_imports: std::collections::HashSet<String>,
+    pub imported_async_funcs: std::collections::HashSet<String>,
+    /// FuncIds of locally-defined async functions in this module. Populated
+    /// from `hir.functions.is_async`. Used by `is_promise_expr` to refine
+    /// `let p = asyncFn();` to `Promise(_)` so subsequent `p.then(cb)`
+    /// chains route through `js_promise_then`.
+    pub local_async_funcs: std::collections::HashSet<u32>,
+    pub type_aliases: std::collections::HashMap<String, perry_types::Type>,
+    pub imported_func_param_counts: std::collections::HashMap<String, usize>,
+    pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+}
 
-        let builder = ObjectBuilder::new(
-            isa,
-            "perry_output",
-            cranelift_module::default_libcall_names(),
-        )?;
-        let module = ObjectModule::new(builder);
-        let ctx = module.make_context();
+/// Compile a Perry HIR module to an object file via LLVM IR.
+pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> {
+    let triple = opts.target.clone().unwrap_or_else(default_target_triple);
 
-        // Determine the compile-time platform constant for __platform__:
-        // 0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux, 5 = watchOS, 6 = tvOS
-        let compile_target: i64 = match target {
-            Some("ios") | Some("ios-simulator") => 1,
-            Some("android") => 2,
-            Some("watchos") | Some("watchos-simulator") => 5,
-            Some("tvos") | Some("tvos-simulator") => 6,
-            Some("windows") => 3,
-            Some("linux") => 4,
-            _ => {
-                // Native host target: detect the host OS at Rust compile time via cfg!()
-                if cfg!(target_os = "ios")     { 1 }
-                else if cfg!(target_os = "linux")   { 4 }
-                else if cfg!(target_os = "windows") { 3 }
-                else                                { 0 }  // macOS or other → treat as macOS
-            }
-        };
-        // Publish to thread-local so free functions (compile_stmt) can read it
-        COMPILE_TARGET.with(|c| c.set(compile_target));
+    let mut llmod = LlModule::new(&triple);
+    runtime_decls::declare_phase1(&mut llmod);
 
-        Ok(Self {
-            module,
-            ctx,
-            func_ctx: FunctionBuilderContext::new(),
-            func_ids: HashMap::new(),
-            extern_funcs: HashMap::new(),
-            classes: HashMap::new(),
-            enums: HashMap::new(),
-            string_data: HashMap::new(),
-            closure_func_ids: HashMap::new(),
-            async_func_ids: HashSet::new(),
-            closure_returning_funcs: HashSet::new(),
-            func_wrapper_ids: HashMap::new(),
-            hir_functions: Vec::new(),
-            func_param_types: HashMap::new(),
-            func_return_types: HashMap::new(),
-            func_hir_return_types: HashMap::new(),
-            func_rest_param_index: HashMap::new(),
-            func_union_params: HashMap::new(),
-            needs_js_runtime: false,
-            needs_stdlib: true,  // Default to true for backwards compatibility
-            needs_ui: false,
-            needs_dotenv_init: false,
-            is_entry_module: true,  // Default to true for single-module compilation
-            native_module_inits: Vec::new(),
-            js_modules: Vec::new(),
-            exported_native_instance_ids: HashMap::new(),
-            exported_object_ids: HashMap::new(),
-            exported_function_ids: HashMap::new(),
-            module_var_data_ids: HashMap::new(),
-            module_level_locals: HashMap::new(),
-            imported_func_param_counts: HashMap::new(),
-            imported_func_return_types: HashMap::new(),
-            imported_async_funcs: HashSet::new(),
-            module_symbol_prefix: String::new(),
-            import_module_prefixes: HashMap::new(),
-            import_local_to_scoped: HashMap::new(),
-            pre_declared_import_wrappers: HashMap::new(),
-            namespace_imports: HashSet::new(),
-            static_field_runtime_inits: Vec::new(),
-            output_type: "executable".to_string(),
-            bundled_extensions: Vec::new(),
-            native_library_functions: Vec::new(),
-            compile_target,
-            enabled_features: HashSet::new(),
-            needs_geisterhand: false,
-            geisterhand_port: 7676,
-            type_alias_map: HashMap::new(),
+    // Phase F.1: derive a per-module symbol prefix from the HIR module
+    // name. Mirrors `perry-codegen` (Cranelift):
+    //
+    //     self.module_symbol_prefix = hir.name.replace(|c: char|
+    //         !c.is_alphanumeric() && c != '_', "_");
+    //
+    // Every emitted symbol that could collide across modules
+    // (user functions, class methods, string pool globals, handle slots,
+    // module-level globals) gets prefixed with this. The entry module's
+    // `main` is the only globally-named symbol — non-entry modules emit
+    // `<prefix>__init` instead.
+    let module_prefix = sanitize(&hir.name);
+
+    // Imports are no longer a hard error — Phase F.1 supports multi-
+    // module compilation. Cross-module function CALLS via ExternFuncRef
+    // still land in Phase F.2; for now they'll error at the use site
+    // with a specific message.
+
+    // Phase C.2: classes (and inheritance!) are supported. Perry's HIR
+    // lowering aggressively pre-resolves both methods and super calls
+    // into inline statements at the constructor/method body, so the
+    // LLVM codegen mostly sees a flat object-allocation + field-set
+    // pattern. We let everything through and let the expression-level
+    // codegen error at any specific construct it doesn't know how to
+    // handle.
+
+    // Module-wide string literal pool. Owned by the codegen so that
+    // `compile_function` and `compile_main` can take split borrows of
+    // (&mut LlFunction, &mut StringPool) without confusing the borrow
+    // checker — the pool lives outside LlModule. The module prefix
+    // becomes part of every emitted global so multi-module programs
+    // don't collide on `.str.0.handle`.
+    let mut strings = StringPool::with_prefix(module_prefix.clone());
+
+    // Class lookup table for `Expr::New`. Indexed by class name —
+    // the HIR has unique names per module.
+    let mut class_table: HashMap<String, &perry_hir::Class> = hir
+        .classes
+        .iter()
+        .map(|c| (c.name.clone(), c))
+        .collect();
+
+    // Class id assignment: each user class gets an integer id
+    // starting at 1 (0 is reserved for anonymous object literals).
+    // Used by lower_new to tag the object header so virtual
+    // dispatch and instanceof can read the actual class at runtime.
+    let mut class_ids: HashMap<String, u32> = hir
+        .classes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.name.clone(), (i as u32) + 1))
+        .collect();
+
+    // Enum lookup table for `Expr::EnumMember`. Each (enum_name,
+    // member_name) maps to its EnumValue, which the codegen lowers
+    // to either a numeric or string constant. Built once here.
+    let mut enum_table: HashMap<(String, String), perry_hir::EnumValue> = hir
+        .enums
+        .iter()
+        .flat_map(|e| {
+            e.members
+                .iter()
+                .map(move |m| ((e.name.clone(), m.name.clone()), m.value.clone()))
         })
-    }
+        .collect();
 
-    /// Set whether the JS runtime is needed for this module
-    pub fn set_needs_js_runtime(&mut self, needs: bool) {
-        self.needs_js_runtime = needs;
-    }
-
-    /// Set whether perry-stdlib is needed
-    pub fn set_needs_stdlib(&mut self, needs: bool) {
-        self.needs_stdlib = needs;
-    }
-
-    /// Set whether perry/ui is needed (controls UI/system/plugin/screen function declarations)
-    pub fn set_needs_ui(&mut self, needs: bool) {
-        self.needs_ui = needs;
-    }
-
-    /// Set whether this is the entry module (generates main function)
-    pub fn set_is_entry_module(&mut self, is_entry: bool) {
-        self.is_entry_module = is_entry;
-    }
-
-    /// Set the output type ("executable" or "dylib")
-    pub fn set_output_type(&mut self, output_type: String) {
-        self.output_type = output_type;
-    }
-
-    /// Add a native module init function to call from main (for entry module)
-    pub fn add_native_module_init(&mut self, module_name: String) {
-        // Sanitize the module name the same way as in compile_init
-        let sanitized_name = module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
-        let func_name = format!("_perry_init_{}", sanitized_name);
-        self.native_module_inits.push(func_name);
-    }
-
-    /// Add a JavaScript module that should be loaded at runtime
-    pub fn add_js_module(&mut self, specifier: String) {
-        self.js_modules.push(specifier);
-    }
-
-    /// Set enabled compile-time feature flags.
-    /// Each feature becomes a `__feature_NAME__` constant (1) in TypeScript scope.
-    /// The special `__plugins__` constant is derived from the "plugins" feature.
-    pub fn set_enabled_features(&mut self, features: Vec<String>) {
-        self.enabled_features = features.into_iter().collect();
-        // Publish to thread-local so free functions (compile_stmt) can read it
-        ENABLED_FEATURES.with(|f| {
-            *f.borrow_mut() = self.enabled_features.clone();
-        });
-    }
-
-    /// Set whether geisterhand (in-process input fuzzer) is enabled
-    pub fn set_needs_geisterhand(&mut self, needs: bool) {
-        self.needs_geisterhand = needs;
-    }
-
-    /// Set the port for geisterhand HTTP server
-    pub fn set_geisterhand_port(&mut self, port: u16) {
-        self.geisterhand_port = port;
-    }
-
-    /// Register a bundled extension for static plugin registration in the entry module init.
-    /// `source_path` is the canonical absolute path to the extension entry file.
-    /// `module_prefix` is the sanitized module prefix for resolving the extension's default export.
-    pub fn add_bundled_extension(&mut self, source_path: String, module_prefix: String) {
-        self.bundled_extensions.push((source_path, module_prefix));
-    }
-
-    /// Register a type alias from another module.
-    /// This allows `type_to_abi` to resolve cross-module type aliases like
-    /// `type BlockTag = 'latest' | number | string` when used in function parameters.
-    pub fn register_type_alias(&mut self, name: String, ty: perry_types::Type) {
-        self.type_alias_map.insert(name, ty);
-    }
-
-    /// Register an imported function's parameter count.
-    /// This ensures wrapper functions use the correct full signature even when
-    /// the function has optional parameters and is called with different arities.
-    pub fn register_imported_func_param_count(&mut self, func_name: String, param_count: usize) {
-        self.imported_func_param_counts.insert(func_name, param_count);
-    }
-
-    /// Register an imported function's return type.
-    /// Used to resolve types for await expressions on cross-module async function calls.
-    pub fn register_imported_func_return_type(&mut self, func_name: String, return_type: perry_types::Type) {
-        self.imported_func_return_types.insert(func_name, return_type);
-    }
-
-    /// Mark an imported function as `async`. This is needed (in addition to the return
-    /// type) because some async functions are declared without an explicit
-    /// `Promise<T>` annotation, in which case `func.return_type` is the inner type or
-    /// `Type::Any` and the call site has no other way to know it produces a promise.
-    pub fn register_imported_async_func(&mut self, func_name: String) {
-        self.imported_async_funcs.insert(func_name);
-    }
-
-    /// Register external native library FFI functions from package manifests.
-    /// These will be declared as extern imports during codegen initialization.
-    pub fn set_native_library_functions(&mut self, functions: Vec<(String, Vec<String>, String)>) {
-        self.native_library_functions = functions;
-    }
-
-    /// Set the module symbol prefix for scoping cross-module symbols.
-    /// This should be the sanitized module path (e.g., "lib_generic_ts").
-    pub fn set_module_symbol_prefix(&mut self, prefix: String) {
-        self.module_symbol_prefix = prefix;
-    }
-
-    /// Register that an imported function name comes from a specific source module.
-    /// This allows the compiler to construct the correct scoped wrapper name.
-    pub fn register_import_source(&mut self, func_name: String, source_prefix: String) {
-        self.import_module_prefixes.insert(func_name, source_prefix);
-    }
-
-    /// Construct a module-scoped export global name.
-    /// For the exporting module: uses self.module_symbol_prefix.
-    pub(crate) fn scoped_export_name(&self, name: &str) -> String {
-        if self.module_symbol_prefix.is_empty() {
-            format!("__export_{}", name)
-        } else {
-            format!("__export_{}__{}", self.module_symbol_prefix, name)
+    // ── Phase F: merge imported cross-module definitions ──────────
+    //
+    // Imported enums: add their members to the enum_table so
+    // `Expr::EnumMember` can resolve them in this module.
+    for (enum_name, members) in &opts.imported_enums {
+        for (member_name, value) in members {
+            enum_table
+                .entry((enum_name.clone(), member_name.clone()))
+                .or_insert_with(|| value.clone());
         }
     }
 
-    /// Construct a module-scoped wrapper function name.
-    /// For the exporting module: uses self.module_symbol_prefix.
-    pub(crate) fn scoped_wrapper_name(&self, name: &str) -> String {
-        if self.module_symbol_prefix.is_empty() {
-            format!("__wrapper_{}", name)
-        } else {
-            format!("__wrapper_{}__{}", self.module_symbol_prefix, name)
+    // Imported classes: build lightweight stub `Class` objects so the
+    // codegen dispatch tables (class_table, method_names, class_ids)
+    // can resolve cross-module class method calls. The actual method
+    // bodies live in the other module's .o — here we only need the
+    // metadata for dispatch and the extern LLVM declarations for the
+    // linker.
+    let mut imported_class_stubs: Vec<perry_hir::Class> = Vec::new();
+    let next_class_id = (hir.classes.len() as u32) + 1;
+    for (idx, ic) in opts.imported_classes.iter().enumerate() {
+        let class_id = next_class_id + (idx as u32);
+        let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
+
+        // Skip if already defined locally (local definition takes precedence).
+        if class_table.contains_key(effective_name) {
+            continue;
+        }
+
+        // Assign a class id for dispatch / instanceof.
+        class_ids.insert(effective_name.to_string(), class_id);
+        // Also register the canonical name if aliased.
+        if ic.local_alias.is_some() && !class_ids.contains_key(&ic.name) {
+            class_ids.insert(ic.name.clone(), class_id);
+        }
+
+        // Build a stub Class with the minimum fields the codegen needs.
+        // Most fields are empty — only name, extends_name, and methods
+        // are consulted by dispatch.
+        let stub = perry_hir::Class {
+            id: 0, // imported — no local ClassId
+            name: effective_name.to_string(),
+            type_params: Vec::new(),
+            extends: None,
+            extends_name: ic.parent_name.clone(),
+            native_extends: None,
+            fields: Vec::new(),
+            constructor: None,
+            methods: ic.method_names.iter().map(|m| perry_hir::Function {
+                id: 0,
+                name: m.clone(),
+                type_params: Vec::new(),
+                params: Vec::new(),
+                return_type: perry_types::Type::Any,
+                body: Vec::new(),
+                is_async: false,
+                is_generator: false,
+                is_exported: false,
+                captures: Vec::new(),
+                decorators: Vec::new(),
+            }).collect(),
+            getters: Vec::new(),
+            setters: Vec::new(),
+            static_fields: Vec::new(),
+            static_methods: Vec::new(),
+            is_exported: false,
+        };
+        imported_class_stubs.push(stub);
+    }
+    // Add imported class stubs to the class_table (references into the
+    // Vec we just built — the Vec lives for the remainder of compile_module).
+    for stub in &imported_class_stubs {
+        class_table.entry(stub.name.clone()).or_insert(stub);
+    }
+
+    // Local async function FuncIds — populated below from `hir.functions`
+    // (the per-function loop further down). Built here so the CrossModuleCtx
+    // construction is complete before the FnCtx instances reference it.
+    let mut local_async_funcs: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    for f in &hir.functions {
+        if f.is_async {
+            local_async_funcs.insert(f.id);
         }
     }
 
-    /// Construct a scoped export name for an imported symbol from another module.
-    /// Looks up the source module's prefix from import_module_prefixes.
-    pub(crate) fn import_scoped_export_name(&self, name: &str) -> String {
-        if let Some(prefix) = self.import_module_prefixes.get(name) {
-            format!("__export_{}__{}", prefix, name)
-        } else {
-            format!("__export_{}", name)
-        }
-    }
+    // Build the cross-module context bundle from CompileOptions.
+    let cross_module = CrossModuleCtx {
+        namespace_imports: opts.namespace_imports.iter().cloned().collect(),
+        imported_async_funcs: opts.imported_async_funcs,
+        local_async_funcs,
+        type_aliases: opts.type_aliases,
+        imported_func_param_counts: opts.imported_func_param_counts,
+        imported_func_return_types: opts.imported_func_return_types,
+    };
 
-    /// Construct a scoped wrapper name for an imported function from another module.
-    pub(crate) fn import_scoped_wrapper_name(&self, name: &str) -> String {
-        if let Some(prefix) = self.import_module_prefixes.get(name) {
-            format!("__wrapper_{}__{}", prefix, name)
-        } else {
-            format!("__wrapper_{}", name)
-        }
-    }
-
-    /// Pre-declare an imported wrapper function with its scoped name.
-    /// This is called from compile.rs before compile_module() to set up the import references
-    /// with the correct module-scoped symbol names. When compile_expr encounters an ExternFuncRef
-    /// call, it checks pre_declared_import_wrappers first before constructing a wrapper name.
-    /// Pre-declare an imported wrapper function with its scoped name.
-    /// Stores the FuncId in extern_funcs with a `__scoped_wrapper__` prefix key
-    /// so compile_expr can find it without needing a new parameter.
-    pub fn pre_declare_import_wrapper(&mut self, func_name: &str, source_module_prefix: &str, param_count: usize) -> Result<()> {
-        let scoped_name = format!("__wrapper_{}__{}", source_module_prefix, func_name);
-        let mut sig = self.module.make_signature();
-        sig.params.push(AbiParam::new(types::I64)); // closure_ptr (ignored)
-        for _ in 0..param_count {
-            sig.params.push(AbiParam::new(types::F64));
-        }
-        sig.returns.push(AbiParam::new(types::F64));
-        let key: Cow<'static, str> = format!("__scoped_wrapper__{}", func_name).into();
-        match self.module.declare_function(&scoped_name, Linkage::Import, &sig) {
-            Ok(func_id) => {
-                self.extern_funcs.insert(key, func_id);
-                // Also store param count for proper argument padding
-                self.imported_func_param_counts.entry(func_name.to_string()).or_insert(param_count);
-            }
-            Err(_) => {
-                // Already declared or incompatible - try to find existing
-                for (id, decl) in self.module.declarations().get_functions() {
-                    if decl.name.as_deref() == Some(&scoped_name) {
-                        self.extern_funcs.insert(key, id);
-                        break;
-                    }
-                }
+    // Module-level globals registry. Pre-walk:
+    //   1. Collect every LocalId referenced from any function or method
+    //      body (LocalGet / LocalSet / Update). Those that aren't a
+    //      function/method's own param or Let must be module-level.
+    //   2. Walk hir.init's top-level Lets and globalize ONLY the ones in
+    //      that set. Lets that are only referenced from main itself stay
+    //      as cheap stack alloca (preserves perf for the bench
+    //      benchmarks that don't share state with helper functions).
+    let mut referenced_from_fn: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Helper that handles "params + lets define a scope, refs minus
+    // defines flow out". Used for every function/method/closure body.
+    let scan_body = |params: &[perry_hir::Param],
+                     body: &[perry_hir::Stmt],
+                     out: &mut std::collections::HashSet<u32>| {
+        let mut local_defs: std::collections::HashSet<u32> = params.iter().map(|p| p.id).collect();
+        collect_let_ids(body, &mut local_defs);
+        let mut refs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        collect_ref_ids_in_stmts(body, &mut refs);
+        for r in refs {
+            if !local_defs.contains(&r) {
+                out.insert(r);
             }
         }
-        Ok(())
+    };
+    for f in &hir.functions {
+        scan_body(&f.params, &f.body, &mut referenced_from_fn);
     }
-
-    /// Register an alias for an already pre-declared import wrapper.
-    /// Used when local name differs from export name (e.g., default imports).
-    pub fn register_import_wrapper_alias(&mut self, local_name: &str, export_name: &str, param_count: usize) {
-        let export_key = format!("__scoped_wrapper__{}", export_name);
-        if let Some(&func_id) = self.extern_funcs.get(export_key.as_str()) {
-            let local_key: Cow<'static, str> = format!("__scoped_wrapper__{}", local_name).into();
-            self.extern_funcs.insert(local_key, func_id);
-            self.imported_func_param_counts.entry(local_name.to_string()).or_insert(param_count);
+    for c in &hir.classes {
+        for m in &c.methods {
+            scan_body(&m.params, &m.body, &mut referenced_from_fn);
         }
-    }
-
-    /// Pre-declare an imported export global with its scoped name.
-    pub fn pre_declare_import_export(&mut self, export_name: &str, local_name: &str, source_module_prefix: &str) -> Result<()> {
-        let scoped_name = format!("__export_{}__{}", source_module_prefix, export_name);
-        let _ = self.module.declare_data(&scoped_name, Linkage::Import, true, false);
-        self.import_module_prefixes.insert(export_name.to_string(), source_module_prefix.to_string());
-        // When local name differs from export name (e.g., default imports),
-        // map the local name directly to the full scoped export symbol name
-        if local_name != export_name {
-            self.import_module_prefixes.insert(local_name.to_string(), source_module_prefix.to_string());
-            self.import_local_to_scoped.insert(local_name.to_string(), scoped_name);
-        }
-        Ok(())
-    }
-
-    /// Register a namespace import name so codegen can intercept PropertyGet on it.
-    pub fn register_namespace_import(&mut self, local_name: String) {
-        self.namespace_imports.insert(local_name);
-    }
-
-    /// Register an imported class from another module.
-    /// This declares the class's constructor and methods as imports so they can be called.
-    /// The class definition must have been exported from the source module.
-    /// If `local_alias` is provided and differs from the class name, the class is also
-    /// registered under the alias so it can be found when used with that name in the code.
-    /// `source_prefix` is the module symbol prefix of the source module (used to qualify symbols).
-    pub fn register_imported_class(&mut self, class: &Class, local_alias: Option<&str>, source_prefix: &str) -> Result<()> {
-        // Skip if already registered (e.g., if class is defined locally)
-        if self.classes.contains_key(&class.name) {
-            // If there's an alias that differs from the class name, also register under the alias
-            if let Some(alias) = local_alias {
-                if alias != class.name && !self.classes.contains_key(alias) {
-                    // Clone the existing metadata for the alias
-                    if let Some(existing_meta) = self.classes.get(&class.name).cloned() {
-                        self.classes.insert(alias.to_string(), existing_meta);
-                    }
-                }
-            }
-            return Ok(());
-        }
-
-        // Build field indices and types
-        let mut field_indices = HashMap::new();
-        let mut field_types = HashMap::new();
-        for (i, field) in class.fields.iter().enumerate() {
-            field_indices.insert(field.name.clone(), i as u32);
-            field_types.insert(field.name.clone(), field.ty.clone());
-        }
-
-        // Collect method return types
-        let mut method_return_types = HashMap::new();
-        for method in &class.methods {
-            method_return_types.insert(method.name.clone(), method.return_type.clone());
-        }
-
-        // Collect static method return types
-        let mut static_method_return_types = HashMap::new();
-        for method in &class.static_methods {
-            static_method_return_types.insert(method.name.clone(), method.return_type.clone());
-        }
-
-        // Extract type parameter names
-        let type_params: Vec<String> = class.type_params.iter().map(|tp| tp.name.clone()).collect();
-
-        // Collect field default initializer expressions
-        let mut field_inits = HashMap::new();
-        for field in &class.fields {
-            if let Some(ref init) = field.init {
-                field_inits.insert(field.name.clone(), init.clone());
-            }
-        }
-
-        // Create the class metadata (constructor_id and method_ids will be filled below)
-        // Use extends_name for imported classes where extends ClassId may not resolve locally
-        self.classes.insert(class.name.clone(), ClassMeta {
-            id: class.id,
-            parent_class: class.extends_name.clone(),
-            native_parent: class.native_extends.clone(),
-            own_field_count: class.fields.len() as u32,
-            field_count: class.fields.len() as u32,
-            field_indices,
-            field_types,
-            constructor_id: None,
-            method_ids: HashMap::new(),
-            method_param_counts: HashMap::new(),
-            getter_ids: HashMap::new(),
-            setter_ids: HashMap::new(),
-            static_method_ids: HashMap::new(),
-            static_field_ids: HashMap::new(),
-            method_return_types,
-            static_method_return_types,
-            type_params,
-            field_inits,
-        });
-
-        // Declare the constructor as an import (if present)
-        if let Some(ref ctor) = class.constructor {
-            let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // 'this' pointer
-            for _ in &ctor.params {
-                sig.params.push(AbiParam::new(types::F64));
-            }
-            // Constructor returns void
-
-            let func_name = format!("{}__{}_constructor", source_prefix, class.name);
-            let func_id = self.module.declare_function(&func_name, Linkage::Import, &sig)?;
-
-            if let Some(meta) = self.classes.get_mut(&class.name) {
-                meta.constructor_id = Some(func_id);
-            }
-        }
-
-        // Declare methods as imports
-        for method in &class.methods {
-            let mut sig = self.module.make_signature();
-            sig.params.push(AbiParam::new(types::I64)); // 'this' pointer
-            for _ in &method.params {
-                sig.params.push(AbiParam::new(types::F64));
-            }
-            sig.returns.push(AbiParam::new(types::F64));
-
-            let func_name = format!("{}__{}_{}",source_prefix, class.name, method.name);
-            let func_id = self.module.declare_function(&func_name, Linkage::Import, &sig)?;
-
-            if let Some(meta) = self.classes.get_mut(&class.name) {
-                meta.method_ids.insert(method.name.clone(), func_id);
-                meta.method_param_counts.insert(method.name.clone(), method.params.len());
-            }
-        }
-
-        // Declare static methods as imports
-        for method in &class.static_methods {
-            let mut sig = self.module.make_signature();
-            // Static methods do NOT have 'this' pointer
-            for _ in &method.params {
-                sig.params.push(AbiParam::new(types::F64));
-            }
-            sig.returns.push(AbiParam::new(types::F64));
-
-            let func_name = format!("{}__{}_{}__static", source_prefix, class.name, method.name);
-            let func_id = self.module.declare_function(&func_name, Linkage::Import, &sig)?;
-
-            if let Some(meta) = self.classes.get_mut(&class.name) {
-                meta.static_method_ids.insert(method.name.clone(), func_id);
-            }
-        }
-
-        // Declare static fields as imports (so cross-module static field access works)
-        for field in &class.static_fields {
-            let data_name = format!("{}__{}_{}__static_field", source_prefix, class.name, field.name);
-            let data_id = self.module.declare_data(&data_name, Linkage::Import, true, false)?;
-
-            if let Some(meta) = self.classes.get_mut(&class.name) {
-                meta.static_field_ids.insert(field.name.clone(), data_id);
-            }
-        }
-
-        // If there's a local alias that differs from the class name, also register under the alias
-        // This allows code to use the alias name (e.g., `new Alias()` when import was `{ MyClass as Alias }`)
-        if let Some(alias) = local_alias {
-            if alias != class.name && !self.classes.contains_key(alias) {
-                if let Some(existing_meta) = self.classes.get(&class.name).cloned() {
-                    self.classes.insert(alias.to_string(), existing_meta);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Convert a HIR type to a Cranelift ABI type
-    pub(crate) fn type_to_abi(&self, ty: &perry_types::Type) -> types::Type {
-        use perry_types::Type;
-        match ty {
-            // Numbers use f64
-            Type::Number | Type::Int32 => types::F64,
-            // BigInt uses f64 (NaN-boxed pointer with BIGINT_TAG)
-            Type::BigInt => types::F64,
-            // Booleans can be f64 (0.0 or 1.0) for simplicity
-            Type::Boolean => types::F64,
-            // Strings, arrays, objects are pointers (i64)
-            Type::String | Type::Array(_) | Type::Object(_) => types::I64,
-            // Promises are pointers (i64)
-            Type::Promise(_) => types::I64,
-            // Named types: most are pointers, but some are stored as f64
-            Type::Named(name) => {
-                // First check if this is a type alias — resolve to the underlying type.
-                // E.g., `type BlockTag = 'latest' | number | string` should resolve to
-                // Union([String, Number, String]) -> F64 (NaN-boxed), not I64 (object pointer).
-                if let Some(resolved) = self.type_alias_map.get(name) {
-                    return self.type_to_abi(resolved);
-                }
-                match name.as_str() {
-                    "Date" => types::F64,  // Date is stored as f64 timestamp in runtime
-                    // Fastify handles are NaN-boxed f64 values (not raw I64 pointers).
-                    // When passed through closures (js_closure_call2 uses f64 for all args),
-                    // they must be declared as f64 in function signatures to avoid ABI mismatch.
-                    "FastifyInstance" | "FastifyRequest" | "FastifyReply" => types::F64,
-                    _ => {
-                        // Check if this is a numeric const enum — its values are inlined
-                        // as f64 constants, so the ABI type must be f64, not i64.
-                        // String enums are i64 (string pointers).
-                        let is_numeric_enum = self.enums.iter().any(|((enum_name, _), _)| enum_name == name)
-                            && !self.enums.iter().any(|((enum_name, _), v)| enum_name == name && matches!(v, EnumMemberValue::String(_)));
-                        if is_numeric_enum {
-                            types::F64
-                        } else {
-                            types::I64  // Other named types are object pointers
-                        }
-                    }
-                }
-            }
-            // Generic types are pointers
-            Type::Generic { .. } => types::I64,
-            // Void/Null/Undefined return f64 (will be 0)
-            Type::Void | Type::Null => types::F64,
-            // Any/Unknown use f64 (NaN-boxed values for JS interop)
-            Type::Any | Type::Unknown => types::F64,
-            // Functions are pointers
-            Type::Function(_) => types::I64,
-            // Tuples use i64 (could be more complex)
-            Type::Tuple(_) => types::I64,
-            // Union types use f64 (NaN-boxed values can be numbers or pointers)
-            Type::Union(_) => types::F64,
-            // Never type - use f64 as fallback (never actually returned)
-            Type::Never => types::F64,
-            // TypeVar should be substituted before codegen; default to f64
-            Type::TypeVar(_) => types::F64,
-            // Symbol is an i64 id
-            Type::Symbol => types::I64,
+        if let Some(ctor) = &c.constructor {
+            scan_body(&ctor.params, &ctor.body, &mut referenced_from_fn);
         }
     }
-
-    /// Create global data slots for module-level variables
-    /// These allow functions to access variables defined in init statements
-    pub(crate) fn create_module_var_globals(&mut self, init_stmts: &[Stmt]) -> Result<()> {
-        self.create_module_var_globals_recursive(init_stmts)
-    }
-
-    /// Recursively create globals for variables in nested statements (for loops, if blocks, etc.)
-    pub(crate) fn create_module_var_globals_recursive(&mut self, stmts: &[Stmt]) -> Result<()> {
-        for stmt in stmts {
-            match stmt {
-                Stmt::Let { id, name, .. } => {
-                    // Create a global data slot for this variable
-                    // Each slot holds an f64 (8 bytes)
-                    let global_name = format!("__modvar_{}_{}", name, id);
-                    let data_id = self.module.declare_data(&global_name, Linkage::Local, true, false)?;
-                    let mut data_desc = DataDescription::new();
-                    data_desc.define_zeroinit(8); // 8 bytes for f64
-                    self.module.define_data(data_id, &data_desc)?;
-                    self.module_var_data_ids.insert(*id, data_id);
-                }
-                Stmt::For { init, body, .. } => {
-                    // Walk init statement if present
-                    if let Some(init_stmt) = init {
-                        self.create_module_var_globals_recursive(&[*init_stmt.clone()])?;
-                    }
-                    // Walk body statements
-                    self.create_module_var_globals_recursive(body)?;
-                }
-                Stmt::While { body, .. } => {
-                    self.create_module_var_globals_recursive(body)?;
-                }
-                Stmt::If { then_branch, else_branch, .. } => {
-                    self.create_module_var_globals_recursive(then_branch)?;
-                    if let Some(else_stmts) = else_branch {
-                        self.create_module_var_globals_recursive(else_stmts)?;
-                    }
-                }
-                Stmt::Try { body, catch, finally } => {
-                    self.create_module_var_globals_recursive(body)?;
-                    if let Some(c) = catch {
-                        self.create_module_var_globals_recursive(&c.body)?;
-                    }
-                    if let Some(f) = finally {
-                        self.create_module_var_globals_recursive(f)?;
-                    }
-                }
-                Stmt::Switch { cases, .. } => {
-                    for case in cases {
-                        self.create_module_var_globals_recursive(&case.body)?;
-                    }
-                }
-                _ => {}
+    // Also walk every closure body. A self-referencing recursive
+    // closure (`let f = (n) => f(n-1)`) needs `f` to be globalized
+    // so the closure body can see the live storage instead of a
+    // stale snapshot. Without this, the closure auto-capture sees
+    // `f` is not yet declared and bails with "local not in scope".
+    {
+        let mut closures: Vec<(perry_types::FuncId, perry_hir::Expr)> = Vec::new();
+        let mut seen: std::collections::HashSet<perry_types::FuncId> = std::collections::HashSet::new();
+        for f in &hir.functions {
+            collect_closures_in_stmts(&f.body, &mut seen, &mut closures);
+        }
+        for c in &hir.classes {
+            for m in &c.methods {
+                collect_closures_in_stmts(&m.body, &mut seen, &mut closures);
+            }
+            if let Some(ctor) = &c.constructor {
+                collect_closures_in_stmts(&ctor.body, &mut seen, &mut closures);
             }
         }
-        Ok(())
-    }
-
-    /// Analyze module-level variable types from init statements
-    /// This is needed before compile_function to know the types for loading from global slots
-    pub(crate) fn analyze_module_var_types(&mut self, init_stmts: &[Stmt]) {
-        self.analyze_module_var_types_recursive(init_stmts);
-    }
-
-    /// Check if an init expression produces a bigint value (for type analysis)
-    fn is_buffer_method_call(init: Option<&Expr>, locals: &HashMap<LocalId, LocalInfo>) -> bool {
-        if let Some(Expr::Call { callee, .. }) = init {
-            if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                if matches!(property.as_str(), "slice" | "subarray") {
-                    if let Expr::LocalGet(obj_id) = object.as_ref() {
-                        return locals.get(obj_id).map(|i| i.is_buffer).unwrap_or(false);
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    pub(crate) fn is_bigint_init_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::BigInt(_) | Expr::BigIntCoerce(_) => true,
-            // new BN(...) produces a BigInt value
-            Expr::New { class_name, .. } if class_name == "BN" => true,
-            Expr::LocalGet(id) => self.module_level_locals.get(id).map(|i| i.is_bigint).unwrap_or(false),
-            Expr::Binary { left, right, .. } => {
-                self.is_bigint_init_expr(left) || self.is_bigint_init_expr(right)
-            }
-            Expr::Unary { operand, .. } => self.is_bigint_init_expr(operand),
-            _ => false,
-        }
-    }
-
-    /// Recursively analyze variable types in nested statements
-    pub(crate) fn analyze_module_var_types_recursive(&mut self, stmts: &[Stmt]) {
-        use perry_types::Type as HirType;
-
-        for stmt in stmts {
-            match stmt {
-                Stmt::For { init, body, .. } => {
-                    if let Some(init_stmt) = init {
-                        self.analyze_module_var_types_recursive(&[*init_stmt.clone()]);
-                    }
-                    self.analyze_module_var_types_recursive(body);
-                }
-                Stmt::While { body, .. } => {
-                    self.analyze_module_var_types_recursive(body);
-                }
-                Stmt::If { then_branch, else_branch, .. } => {
-                    self.analyze_module_var_types_recursive(then_branch);
-                    if let Some(else_stmts) = else_branch {
-                        self.analyze_module_var_types_recursive(else_stmts);
-                    }
-                }
-                Stmt::Try { body, catch, finally } => {
-                    self.analyze_module_var_types_recursive(body);
-                    if let Some(c) = catch {
-                        self.analyze_module_var_types_recursive(&c.body);
-                    }
-                    if let Some(f) = finally {
-                        self.analyze_module_var_types_recursive(f);
-                    }
-                }
-                Stmt::Switch { cases, .. } => {
-                    for case in cases {
-                        self.analyze_module_var_types_recursive(&case.body);
-                    }
-                }
-                Stmt::Let { id, name, ty, init, mutable, .. } => {
-                // Determine if this variable is a pointer type
-                // Note: String is NOT included because strings are now NaN-boxed (f64 values)
-                let is_pointer = matches!(ty, HirType::Array(_) |
-                    HirType::Object(_) | HirType::Named(_) | HirType::Generic { .. } |
-                    HirType::Function(_));
-
-                // Also check the init expression type for better inference
-                // Note: Expr::String is NOT included because strings are now NaN-boxed (f64 values)
-                // Note: Native handle classes (EventEmitter, Decimal, etc.) use f64 (NaN-boxed), not i64 pointers
-                let is_pointer_from_init = if let Some(init_expr) = init {
-                    match init_expr {
-                        Expr::New { class_name, .. } => {
-                            // Native handle classes and BN (BigInt) use f64, not i64
-                            !matches!(class_name.as_str(),
-                                "BN" | "EventEmitter" | "Decimal" | "Big" | "BigNumber" | "LRUCache" | "Command" | "Redis")
-                        }
-                        Expr::Array(_) | Expr::Object(_) | Expr::ObjectSpread { .. } | Expr::ArraySpread(_) |
-                        Expr::Closure { .. } | Expr::MapNew | Expr::MapNewFromArray(_) | Expr::SetNew | Expr::SetNewFromArray(_) |
-                        // JS interop expressions return pointers
-                        Expr::JsCallFunction { .. } | Expr::JsCallMethod { .. } |
-                        Expr::JsGetExport { .. } | Expr::JsNew { .. } |
-                        Expr::JsNewFromHandle { .. } | Expr::JsGetProperty { .. } |
-                        // Call expressions might return objects/arrays, but only if the
-                        // type annotation doesn't indicate a primitive type.
-                        // Without this check, `const val: number = someFunc()` would be
-                        // incorrectly treated as a pointer, breaking numeric closure returns.
-                        Expr::Call { .. } | Expr::NativeMethodCall { .. } => {
-                            !matches!(ty, HirType::Number | HirType::Boolean | HirType::String | HirType::BigInt)
-                        }
-                        _ => false,
-                    }
-                } else {
-                    false
-                };
-
-                // Check if NativeMethodCall returns a string
-                let is_string_from_native = matches!(init, Some(Expr::NativeMethodCall { module, method, .. })
-                    if (module == "path" && matches!(method.as_str(), "dirname" | "basename" | "extname" | "join" | "resolve"))
-                       || (module == "fs" && method == "readFileSync")
-                       || (module == "uuid" && matches!(method.as_str(), "v4" | "v1" | "v7"))
-                       || (module == "crypto" && matches!(method.as_str(), "sha256" | "md5" | "randomUUID" | "hmacSha256"))
-                );
-                // Check if NativeMethodCall returns a buffer
-                let is_buffer_from_native = matches!(init, Some(Expr::NativeMethodCall { module, method, .. })
-                    if module == "crypto" && method == "randomBytes"
-                ) || matches!(init, Some(Expr::CryptoRandomBytes(_)));
-                // Check if Call expression returns a string (e.g., buffer.toString())
-                let is_string_from_call = if let Some(Expr::Call { callee, .. }) = init {
-                    if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                        // buffer.toString() returns string
-                        if property == "toString" {
-                            if let Expr::LocalGet(obj_id) = object.as_ref() {
-                                self.module_level_locals.get(obj_id).map(|i| i.is_buffer).unwrap_or(false)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                let is_string = matches!(ty, HirType::String) || matches!(init, Some(Expr::String(_))) || is_string_from_native || is_string_from_call;
-                let is_array_from_call = if let Some(Expr::Call { callee, .. }) = init {
-                    if let Expr::PropertyGet { object, property } = callee.as_ref() {
-                        // process.argv.slice() returns an array
-                        property == "slice" && matches!(object.as_ref(), Expr::ProcessArgv)
-                    } else { false }
-                } else { false };
-                let is_array = matches!(ty, HirType::Array(_)) || is_array_from_call || matches!(init, Some(Expr::Array(_))) || matches!(init, Some(Expr::ArraySpread(_))) || matches!(init, Some(Expr::ProcessArgv));
-                let is_closure = matches!(ty, HirType::Function(_)) || matches!(init, Some(Expr::Closure { .. }));
-                // Check for buffer expressions
-                let is_buffer = matches!(init, Some(Expr::BufferFrom { .. }) | Some(Expr::BufferAlloc { .. }) |
-                    Some(Expr::BufferAllocUnsafe(_)) | Some(Expr::BufferConcat(_)) |
-                    Some(Expr::BufferSlice { .. }) | Some(Expr::BufferFill { .. }) |
-                    Some(Expr::Uint8ArrayNew(_)) | Some(Expr::Uint8ArrayFrom(_)) |
-                    Some(Expr::ChildProcessExecSync { .. }))
-                    || is_buffer_from_native
-                    || matches!(ty, HirType::Named(name) if name == "Uint8Array" || name == "Buffer")
-                    // Detect chained buffer methods: new Uint8Array(n).fill(v), Buffer.alloc(n).fill(v)
-                    || matches!(init, Some(Expr::Call { callee, .. }) if matches!(callee.as_ref(),
-                        Expr::PropertyGet { object, property } if property == "fill" && matches!(object.as_ref(),
-                            Expr::Uint8ArrayNew(_) | Expr::BufferAlloc { .. } | Expr::BufferAllocUnsafe(_) |
-                            Expr::BufferFrom { .. } | Expr::BufferSlice { .. } | Expr::BufferConcat(_)
-                        )
-                    ))
-                    // Detect buffer.slice() / buffer.subarray() returning a buffer
-                    || Self::is_buffer_method_call(init.as_ref(), &self.module_level_locals);
-
-                // Track compile-time constant values for const module-level variables.
-                // Special case: `declare const __platform__: number` is injected with
-                // the compile-time platform ID (0=macOS,1=iOS,2=Android,3=Windows,4=Linux).
-                // Special case: `declare const __plugins__: number` gets 1 if "plugins" feature.
-                // Special case: `declare const __feature_NAME__: number` gets 1 if feature "NAME".
-                let const_value = if !mutable && !is_pointer && !is_string {
-                    if name == "__platform__" {
-                        Some(self.compile_target as f64)
-                    } else if name == "__plugins__" {
-                        if self.enabled_features.contains("plugins") { Some(1.0) } else { Some(0.0) }
-                    } else if name.starts_with("__feature_") && name.ends_with("__") {
-                        let feature_name = &name[10..name.len()-2];
-                        if self.enabled_features.contains(feature_name) { Some(1.0) } else { Some(0.0) }
-                    } else {
-                        match init {
-                            Some(Expr::Integer(n)) => Some(*n as f64),
-                            Some(Expr::Number(f)) => Some(*f),
-                            _ => None,
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                // Extract type arguments from HirType::Generic (e.g., Map<string, PoolData>)
-                // or from Expr::New { type_args } init expressions
-                let type_args = if let Some(Expr::New { type_args, .. }) = init {
-                    type_args.clone()
-                } else if let HirType::Generic { type_args, .. } = ty {
-                    type_args.clone()
-                } else {
-                    Vec::new()
-                };
-
-                // Also detect Map/Set from type annotation (not just init expression)
-                let is_map_from_type = matches!(ty, HirType::Generic { base, .. } if base == "Map");
-                let is_set_from_type = matches!(ty, HirType::Generic { base, .. } if base == "Set");
-
-                // Store the type info
-                let class_name = resolve_class_name_from_type(ty, &self.classes).or_else(|| {
-                    if let Some(Expr::New { class_name, .. }) = init {
-                        Some(class_name.clone())
-                    } else {
-                        None
-                    }
-                });
-                let info = LocalInfo {
-                    var: Variable::new(0), // Will be overwritten in compile_function
-                    name: Some(name.clone()),
-                    class_name,
-                    type_args,
-                    is_pointer: is_pointer || is_pointer_from_init,
-                    is_array,
-                    is_string,
-                    is_bigint: matches!(ty, HirType::BigInt) || matches!(init, Some(Expr::BigInt(_))) || matches!(init, Some(Expr::BigIntCoerce(_))) || {
-                        // Check if init is a LocalGet of a known bigint variable,
-                        // or a binary/unary expression involving bigint operands
-                        if let Some(init_expr) = init {
-                            self.is_bigint_init_expr(init_expr)
-                        } else {
-                            false
-                        }
-                    },
-                    is_closure, closure_func_id: None,
-                    is_boxed: false,
-                    is_map: matches!(init, Some(Expr::MapNew) | Some(Expr::MapNewFromArray(_))) || is_map_from_type,
-                    is_set: matches!(init, Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_))) || is_set_from_type,
-                    is_buffer,
-                    is_event_emitter: matches!(init, Some(Expr::New { class_name, .. }) if class_name == "EventEmitter"),
-                    // Mark as union only when the concrete type is unknown.
-                    // Matches stmt.rs logic: Named/Object/Any/Unknown set is_union UNLESS
-                    // expression inference determined a concrete pointer type (array, string,
-                    // closure, map, set, buffer, bigint). Without this exclusion, untyped
-                    // arrays (ty=Unknown) would get is_union=true, causing cranelift_var_type()
-                    // to select F64 while stmt.rs stores them as I64 — a mismatch that
-                    // corrupts pointers on ARM FP flush-to-zero platforms (Android).
-                    is_union: matches!(ty, HirType::Union(_)) ||
-                        (matches!(ty, HirType::Named(_) | HirType::Object(_) | HirType::Any | HirType::Unknown)
-                         && !is_array && !is_string && !is_closure
-                         && !matches!(init, Some(Expr::MapNew) | Some(Expr::MapNewFromArray(_))) && !is_map_from_type
-                         && !matches!(init, Some(Expr::SetNew) | Some(Expr::SetNewFromArray(_))) && !is_set_from_type
-                         && !is_buffer
-                         && !matches!(ty, HirType::BigInt) && !matches!(init, Some(Expr::BigInt(_))) && !matches!(init, Some(Expr::BigIntCoerce(_)))),
-                    is_mixed_array: if let HirType::Array(elem_ty) = ty {
-                        // String/union/any arrays need mixed-array access (NaN-boxed elements)
-                        matches!(elem_ty.as_ref(), HirType::Union(_) | HirType::Any | HirType::String)
-                    } else {
-                        false
-                    },
-                    is_integer: false,
-                    is_integer_array: false,
-                    is_i32: false,
-                    is_boolean: matches!(ty, HirType::Boolean)
-                        || matches!(init, Some(Expr::Bool(_)))
-                        || matches!(init, Some(Expr::Compare { .. }))
-                        || matches!(init, Some(Expr::Unary { op: perry_hir::UnaryOp::Not, .. })),
-                    i32_shadow: None,
-                    bounded_by_array: None,
-                    bounded_by_constant: None,
-                    scalar_fields: None,
-                    squared_cache: None,
-                    product_cache: None,
-                    cached_array_ptr: None,
-                    const_value,
-                    hoisted_element_loads: None,
-                    hoisted_i32_products: None, module_var_data_id: None, class_ref_name: None, object_field_indices: None,
-                };
-                if info.is_bigint {
-                }
-                self.module_level_locals.insert(*id, info);
-                }
-                _ => {}
+        collect_closures_in_stmts(&hir.init, &mut seen, &mut closures);
+        for (_, closure_expr) in &closures {
+            if let perry_hir::Expr::Closure { params, body, .. } = closure_expr {
+                scan_body(params, body, &mut referenced_from_fn);
             }
         }
     }
 
-    /// Compile a HIR module to an object file
-    pub fn compile_module(mut self, hir: &HirModule) -> Result<Vec<u8>> {
-        // Set the module symbol prefix from the module name
-        self.module_symbol_prefix = hir.name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
-
-        // Populate thread-local import module prefixes for use by compile_expr
-        IMPORT_MODULE_PREFIXES.with(|p| {
-            let mut map = p.borrow_mut();
-            map.clear();
-            for (k, v) in &self.import_module_prefixes {
-                map.insert(k.clone(), v.clone());
-            }
-        });
-
-        // Populate thread-local local-to-scoped name mapping for default imports
-        IMPORT_LOCAL_TO_SCOPED.with(|p| {
-            let mut map = p.borrow_mut();
-            map.clear();
-            for (k, v) in &self.import_local_to_scoped {
-                map.insert(k.clone(), v.clone());
-            }
-        });
-
-        // Populate thread-local namespace imports set for use by compile_expr
-        NAMESPACE_IMPORTS.with(|p| {
-            let mut set = p.borrow_mut();
-            set.clear();
-            for name in &self.namespace_imports {
-                set.insert(name.clone());
-            }
-        });
-
-        // Populate thread-local imported function return types for use by compile_stmt
-        IMPORTED_FUNC_RETURN_TYPES.with(|p| {
-            let mut map = p.borrow_mut();
-            map.clear();
-            for (k, v) in &self.imported_func_return_types {
-                map.insert(k.clone(), v.clone());
-            }
-        });
-
-        // Populate thread-local imported async function name set for use by compile_async_stmt's
-        // is_promise_expr — needed so `return crossModuleAsyncFn()` chains promises correctly.
-        IMPORTED_ASYNC_FUNCS.with(|p| {
-            let mut set = p.borrow_mut();
-            set.clear();
-            for name in &self.imported_async_funcs {
-                set.insert(name.clone());
-            }
-        });
-
-        // Store HIR functions for wrapper generation
-        self.hir_functions = hir.functions.clone();
-
-        // Process classes first to build metadata
-        for class in &hir.classes {
-            self.process_class(class, &hir.classes)?;
-        }
-
-        // Resolve class inheritance (merge parent fields into child classes)
-        self.resolve_class_inheritance();
-
-        // Process enums to store their member values
-        // Must happen before func_param_types so type_to_abi can detect numeric enums
-        for en in &hir.enums {
-            self.process_enum(en)?;
-        }
-
-        // Collect type aliases from this module into the type alias map.
-        // This allows type_to_abi to resolve Named("BlockTag") -> Union([...])
-        // so the correct ABI type (F64 for unions) is used for parameters.
-        for ta in &hir.type_aliases {
-            if ta.type_params.is_empty() {
-                self.type_alias_map.insert(ta.name.clone(), ta.ty.clone());
+    let mut module_globals: HashMap<u32, String> = HashMap::new();
+    for s in &hir.init {
+        if let perry_hir::Stmt::Let { id, .. } = s {
+            if referenced_from_fn.contains(id) {
+                let name = format!("perry_global_{}__{}", module_prefix, id);
+                llmod.add_internal_global(&name, DOUBLE, "0.0");
+                module_globals.insert(*id, name);
             }
         }
+    }
 
-        // Build function parameter and return types map for proper call-site type conversion
-        for func in &hir.functions {
-            let param_types: Vec<types::Type> = func.params.iter()
-                .map(|p| self.type_to_abi(&p.ty))
-                .collect();
-            self.func_param_types.insert(func.id, param_types);
+    // Phase E: register and emit static class fields as module globals.
+    // Each `static foo: T = init` becomes `@perry_static_<modprefix>__
+    // <class>__<field>` initialized to 0.0. The init expression runs
+    // in compile_module_entry's main/init function before user code.
+    let mut static_field_globals: HashMap<(String, String), String> = HashMap::new();
+    for c in &hir.classes {
+        for sf in &c.static_fields {
+            let name = format!(
+                "perry_static_{}__{}__{}",
+                module_prefix,
+                sanitize(&c.name),
+                sanitize(&sf.name),
+            );
+            llmod.add_internal_global(&name, DOUBLE, "0.0");
+            static_field_globals.insert((c.name.clone(), sf.name.clone()), name);
+        }
+    }
 
-            // Track return type for correct variable typing when storing call results
-            let return_type = if func.is_async {
-                types::I64 // Async functions return Promise (i64 pointer)
+    // Method registry: (class_name, method_name) → LLVM function name.
+    // Built from `class.methods` so the dispatch in `lower_call` knows
+    // which mangled function name to call for `obj.method(args)`. Method
+    // names are also scoped by module prefix.
+    let mut method_names: HashMap<(String, String), String> = HashMap::new();
+    for c in &hir.classes {
+        for m in &c.methods {
+            method_names.insert(
+                (c.name.clone(), m.name.clone()),
+                scoped_method_name(&module_prefix, &c.name, &m.name),
+            );
+        }
+        // Getters: register under the property name with a `__get_`
+        // prefix to avoid colliding with a regular method of the same
+        // name. The dispatch site for `obj.prop` checks the getter
+        // map first, then falls back to the regular method registry.
+        for (prop, f) in &c.getters {
+            method_names.insert(
+                (c.name.clone(), format!("__get_{}", prop)),
+                scoped_method_name(&module_prefix, &c.name, &format!("__get_{}", f.name)),
+            );
+        }
+        for (prop, f) in &c.setters {
+            method_names.insert(
+                (c.name.clone(), format!("__set_{}", prop)),
+                scoped_method_name(&module_prefix, &c.name, &format!("__set_{}", f.name)),
+            );
+        }
+        // Static methods. Registered under their plain method name
+        // so `Counter.increment()` (StaticMethodCall) can look them
+        // up the same way as instance methods, but emitted as
+        // `perry_static_<modprefix>__<class>__<method>` (no `this`).
+        // The class/method names are sanitized so private methods
+        // (`#helper`) produce a valid LLVM identifier.
+        for sm in &c.static_methods {
+            method_names.insert(
+                (c.name.clone(), sm.name.clone()),
+                format!(
+                    "perry_static_{}__{}__{}",
+                    module_prefix,
+                    sanitize(&c.name),
+                    sanitize(&sm.name),
+                ),
+            );
+        }
+    }
+
+    // Phase F: register imported class methods in the method_names
+    // registry and pre-declare them as extern LLVM functions so the
+    // linker can resolve cross-module method calls.
+    for ic in &opts.imported_classes {
+        let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
+        // Skip if locally defined — local methods take precedence.
+        if hir.classes.iter().any(|c| c.name == *effective_name) {
+            continue;
+        }
+        let src = &ic.source_prefix;
+
+        for method_name in &ic.method_names {
+            // The source module emitted its methods as
+            // `perry_method_<source_prefix>__<class>__<method>`.
+            // Use the canonical class name (ic.name) for the symbol
+            // since that's how the source module mangled it.
+            let llvm_fn = format!(
+                "perry_method_{}__{}__{}",
+                sanitize(src),
+                sanitize(&ic.name),
+                sanitize(method_name),
+            );
+            method_names
+                .entry((effective_name.to_string(), method_name.clone()))
+                .or_insert_with(|| llvm_fn.clone());
+
+            // Declare extern: double method(double this, double arg0, …).
+            // We don't know the exact param count of each method from the
+            // ImportedClass metadata (only method_names), so declare with
+            // a variadic-safe 6-arg signature. The LLVM IR `declare` is
+            // just a prototype — it only matters that the symbol exists
+            // and the return type is correct. At the call site, only the
+            // actual args are passed.
+            // For methods, signature is: double(double_this, ..args)
+            // We declare conservatively with just (double) → double;
+            // extra args at call sites are fine because LLVM validates
+            // the callsite against the number of args it actually passes.
+            // Actually, LLVM requires exact match. We don't know the
+            // arity, so declare with 6 params as a safe upper bound.
+            // Call sites with fewer args work because LLVM only checks
+            // at the indirect call site. For direct calls, the linker
+            // resolves regardless.
+            let param_types: Vec<crate::types::LlvmType> =
+                std::iter::repeat(DOUBLE).take(6).collect();
+            llmod.declare_function(&llvm_fn, DOUBLE, &param_types);
+        }
+
+        // Constructor: declared as
+        // `<source_prefix>__<class>_constructor(i64 this, double arg0, …) → void`
+        // matching the Cranelift convention.
+        let ctor_fn = format!(
+            "{}__{}_constructor",
+            sanitize(src),
+            sanitize(&ic.name),
+        );
+        let mut ctor_params: Vec<crate::types::LlvmType> = vec![I64];
+        for _ in 0..ic.constructor_param_count {
+            ctor_params.push(DOUBLE);
+        }
+        llmod.declare_function(&ctor_fn, VOID, &ctor_params);
+    }
+
+    // Resolve user function names up-front so body lowering can emit
+    // forward/recursive calls without worrying about emission order.
+    // Names are scoped by module prefix to avoid cross-module collisions.
+    let mut func_names: HashMap<u32, String> = HashMap::new();
+    let mut func_signatures: HashMap<u32, (usize, bool)> = HashMap::new();
+    for f in &hir.functions {
+        func_names.insert(f.id, scoped_fn_name(&module_prefix, &f.name));
+        let has_rest = f.params.iter().any(|p| p.is_rest);
+        func_signatures.insert(f.id, (f.params.len(), has_rest));
+    }
+
+    // Module-level boxed_vars: union of every per-function/method/
+    // closure/module-init boxed set. We compute this once here because
+    // closures emitted in `compile_closure` need to know whether their
+    // transitively-captured ids from an enclosing function were boxed
+    // at the creation site. Since HIR LocalIds are globally unique
+    // across the module, a single union set is enough: each id either
+    // lives in a box or it doesn't, irrespective of which function
+    // owns it.
+    let mut module_boxed_vars: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    for f in &hir.functions {
+        module_boxed_vars.extend(collect_boxed_vars(&f.body));
+    }
+    for c in &hir.classes {
+        for m in &c.methods {
+            module_boxed_vars.extend(collect_boxed_vars(&m.body));
+        }
+        if let Some(ctor) = &c.constructor {
+            module_boxed_vars.extend(collect_boxed_vars(&ctor.body));
+        }
+    }
+    module_boxed_vars.extend(collect_boxed_vars(&hir.init));
+
+    // Module-wide LocalId → Type map. Used by closure bodies to
+    // learn the types of captured vars from the enclosing scope.
+    // HIR LocalIds are globally unique within the module, so a
+    // single flat map works.
+    let mut module_local_types: HashMap<u32, perry_types::Type> = HashMap::new();
+    collect_let_types_in_stmts(&hir.init, &mut module_local_types);
+    for f in &hir.functions {
+        for p in &f.params {
+            module_local_types.insert(p.id, p.ty.clone());
+        }
+        collect_let_types_in_stmts(&f.body, &mut module_local_types);
+    }
+    for c in &hir.classes {
+        for m in &c.methods {
+            for p in &m.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&m.body, &mut module_local_types);
+        }
+        if let Some(ctor) = &c.constructor {
+            for p in &ctor.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&ctor.body, &mut module_local_types);
+        }
+        for sm in &c.static_methods {
+            for p in &sm.params {
+                module_local_types.insert(p.id, p.ty.clone());
+            }
+            collect_let_types_in_stmts(&sm.body, &mut module_local_types);
+        }
+    }
+
+    // Pre-declare each imported function as an extern. Cross-module
+    // calls in lower_call need a `declare` line at the top of the IR
+    // for the symbol to be referenceable; without this, clang errors
+    // with "use of undefined value @perry_fn_<src>__<name>".
+    //
+    // We walk hir.functions/methods/init for `Expr::ExternFuncRef` and
+    // for each unique (name, source_prefix) emit a declare with the
+    // right number of double parameters from the carried param_types.
+    {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut collected: Vec<(String, usize)> = Vec::new();
+        for f in &hir.functions {
+            collect_extern_func_refs_in_stmts(&f.body, &mut seen, &mut collected);
+        }
+        for c in &hir.classes {
+            for m in &c.methods {
+                collect_extern_func_refs_in_stmts(&m.body, &mut seen, &mut collected);
+            }
+            if let Some(ctor) = &c.constructor {
+                collect_extern_func_refs_in_stmts(&ctor.body, &mut seen, &mut collected);
+            }
+        }
+        collect_extern_func_refs_in_stmts(&hir.init, &mut seen, &mut collected);
+
+        for (name, param_count) in collected {
+            if let Some(source_prefix) = opts.import_function_prefixes.get(&name) {
+                let llvm_name = format!("perry_fn_{}__{}", source_prefix, name);
+                let param_types: Vec<crate::types::LlvmType> =
+                    std::iter::repeat(DOUBLE).take(param_count).collect();
+                llmod.declare_function(&llvm_name, DOUBLE, &param_types);
+            }
+        }
+    }
+
+    // Pre-walk for closures: every `Expr::Closure` in the program needs
+    // its body emitted as a top-level LLVM function so the closure
+    // creation site can take its address. Collect them all first, then
+    // emit each via `compile_closure` (Phase D.1).
+    let mut closures: Vec<(perry_types::FuncId, perry_hir::Expr)> = Vec::new();
+    {
+        let mut seen: std::collections::HashSet<perry_types::FuncId> = std::collections::HashSet::new();
+        for f in &hir.functions {
+            collect_closures_in_stmts(&f.body, &mut seen, &mut closures);
+        }
+        for c in &hir.classes {
+            for m in &c.methods {
+                collect_closures_in_stmts(&m.body, &mut seen, &mut closures);
+            }
+            if let Some(ctor) = &c.constructor {
+                collect_closures_in_stmts(&ctor.body, &mut seen, &mut closures);
+            }
+        }
+        collect_closures_in_stmts(&hir.init, &mut seen, &mut closures);
+    }
+
+    // Build closure rest param index: for each closure that has a rest
+    // parameter, record its func_id → rest param position. Used by
+    // the closure call site in `lower_call` to bundle trailing args.
+    let closure_rest_params: HashMap<u32, usize> = closures
+        .iter()
+        .filter_map(|(fid, expr)| {
+            if let perry_hir::Expr::Closure { params, .. } = expr {
+                params.iter().position(|p| p.is_rest).map(|idx| (*fid, idx))
             } else {
-                self.type_to_abi(&func.return_type)
-            };
-            self.func_return_types.insert(func.id, return_type);
+                None
+            }
+        })
+        .collect();
 
-            // Store full HIR return type for detecting Map, Set, etc. at call sites
-            self.func_hir_return_types.insert(func.id, func.return_type.clone());
+    // Lower each user function into the module.
+    for f in &hir.functions {
+        compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+            .with_context(|| format!("lowering function '{}'", f.name))?;
+    }
 
-            // Track which parameters are union types (for proper NaN-boxing at call sites).
-            // Also resolve type aliases: Named("BlockTag") -> Union([...]) is a union param.
-            let union_params: Vec<bool> = func.params.iter()
-                .map(|p| {
-                    if matches!(p.ty, perry_types::Type::Union(_)) {
-                        return true;
-                    }
-                    // Check if Named type resolves to a union via type alias
-                    if let perry_types::Type::Named(name) = &p.ty {
-                        if let Some(resolved) = self.type_alias_map.get(name) {
-                            return matches!(resolved, perry_types::Type::Union(_));
-                        }
-                    }
-                    false
-                })
-                .collect();
-            self.func_union_params.insert(func.id, union_params);
+    // Lower each closure body as a top-level LLVM function.
+    for (func_id, closure_expr) in &closures {
+        compile_closure(
+            &mut llmod,
+            *func_id,
+            closure_expr,
+            &func_names,
+            &mut strings,
+            &class_table,
+            &method_names,
+            &module_globals,
+            &opts.import_function_prefixes,
+            &enum_table,
+            &static_field_globals,
+            &class_ids,
+            &func_signatures,
+            &module_prefix,
+            &module_boxed_vars,
+            &module_local_types,
+            &closure_rest_params,
+            &cross_module,
+        )
+        .with_context(|| format!("lowering closure func_id={}", func_id))?;
+    }
+
+    // Lower each class method as `perry_method_<modprefix>__<class>__<name>(
+    // this_box, arg0, arg1, ...) -> double`. Methods are emitted as
+    // standalone LLVM functions; the dispatch in `lower_call` calls
+    // them directly.
+    for class in &hir.classes {
+        for method in &class.methods {
+            compile_method(&mut llmod, class, method, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+                .with_context(|| format!("lowering method '{}::{}'", class.name, method.name))?;
+        }
+        // Getters and setters are also methods, just registered under
+        // a __get_/__set_ prefix in the registry. Emit their bodies
+        // with the same prefix as the LLVM function name.
+        for (prop, getter_fn) in &class.getters {
+            let mut renamed = getter_fn.clone();
+            renamed.name = format!("__get_{}", prop);
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+                .with_context(|| format!("lowering getter '{}::{}'", class.name, prop))?;
+        }
+        for (prop, setter_fn) in &class.setters {
+            let mut renamed = setter_fn.clone();
+            renamed.name = format!("__set_{}", prop);
+            compile_method(&mut llmod, class, &renamed, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
+                .with_context(|| format!("lowering setter '{}::{}'", class.name, prop))?;
+        }
+        // Static methods compile as plain functions named
+        // `perry_static_<modprefix>__<class>__<method>` — no `this`
+        // parameter, no class_stack push.
+        for sm in &class.static_methods {
+            compile_static_method(
+                &mut llmod,
+                &class.name,
+                sm,
+                &func_names,
+                &mut strings,
+                &class_table,
+                &method_names,
+                &module_globals,
+                &opts.import_function_prefixes,
+                &enum_table,
+                &static_field_globals,
+                &class_ids,
+                &func_signatures,
+                &module_prefix,
+                &module_boxed_vars,
+                &closure_rest_params,
+                &cross_module,
+            )
+            .with_context(|| format!("lowering static method '{}::{}'", class.name, sm.name))?;
+        }
+    }
+
+    // Emit FuncRef-as-value wrappers. For each user function, generate
+    // a thin wrapper `__perry_wrap_<name>` whose signature matches the
+    // closure-call ABI: `double(i64 this_closure, double arg0, double
+    // arg1, ...)`. The wrapper discards the closure pointer and forwards
+    // the args to the underlying function.
+    //
+    // The wrapper exists so that `apply(add, 3, 4)` can pass `add` as
+    // a value and have `apply` call it via `js_closure_call2`. Without
+    // a wrapper, the closure call would invoke `add(closure, 3, 4)`
+    // (wrong calling convention) instead of `add(3, 4)`.
+    //
+    // Wrappers are emitted unconditionally for every user function;
+    // dead-code elimination at link time will remove unused ones.
+    for f in &hir.functions {
+        let original_name = func_names.get(&f.id).cloned().unwrap();
+        // Wrapper signature: i64 closure_ptr + N doubles for args.
+        // Cap at 5 since js_closure_call only goes up to 5 args.
+        let arity = f.params.len().min(5);
+        let mut wrap_params: Vec<(LlvmType, String)> =
+            vec![(I64, "%this_closure".to_string())];
+        for i in 0..arity {
+            wrap_params.push((DOUBLE, format!("%a{}", i)));
+        }
+        let wrap_name = format!("__perry_wrap_{}", original_name);
+        let wf = llmod.define_function(&wrap_name, DOUBLE, wrap_params);
+        let _ = wf.create_block("entry");
+        let blk = wf.block_mut(0).unwrap();
+        // Call the underlying function with just the arg doubles.
+        let call_args: Vec<(LlvmType, &str)> = (0..arity)
+            .map(|i| (DOUBLE, if i == 0 { "%a0" } else if i == 1 { "%a1" }
+                else if i == 2 { "%a2" } else if i == 3 { "%a3" } else { "%a4" }))
+            .collect();
+        let result = blk.call(DOUBLE, &original_name, &call_args);
+        blk.ret(DOUBLE, &result);
+    }
+
+    // Emit either `int main()` (entry module) or `void <prefix>__init()`
+    // (non-entry module). The entry main calls each non-entry init in
+    // order before running its own statements.
+    compile_module_entry(
+        &mut llmod,
+        hir,
+        &func_names,
+        &mut strings,
+        &class_table,
+        &method_names,
+        &module_globals,
+        &opts.import_function_prefixes,
+        &enum_table,
+        &static_field_globals,
+        &class_ids,
+        &func_signatures,
+        &module_prefix,
+        opts.is_entry_module,
+        &opts.non_entry_module_prefixes,
+        &module_boxed_vars,
+        &closure_rest_params,
+        &cross_module,
+    )
+    .with_context(|| format!("lowering entry of module '{}'", hir.name))?;
+
+    // After all user code is lowered, the string pool's contents are final.
+    // Emit the bytes globals, handle globals, and the
+    // `__perry_init_strings_<prefix>` function that runs once at startup.
+    // The function name is scoped by module prefix so multiple modules
+    // can each have their own string-pool init without colliding.
+    emit_string_pool(&mut llmod, &strings, &module_prefix);
+
+    let ll_text = llmod.to_ir();
+    log::debug!(
+        "perry-codegen: emitted {} bytes of LLVM IR for '{}' ({} interned strings)",
+        ll_text.len(),
+        hir.name,
+        strings.len()
+    );
+    if opts.emit_ir_only {
+        Ok(ll_text.into_bytes())
+    } else {
+        crate::linker::compile_ll_to_object(&ll_text, opts.target.as_deref())
+    }
+}
+
+/// Compile a single user function into the module.
+fn compile_function(
+    llmod: &mut LlModule,
+    f: &Function,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
+    class_ids: &HashMap<String, u32>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
+    module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
+) -> Result<()> {
+    let llvm_name = func_names
+        .get(&f.id)
+        .cloned()
+        .ok_or_else(|| anyhow!("function name not resolved for {}", f.name))?;
+
+    // Phase A assumes all user-function params are `double`. Parameter
+    // registers are named `%arg{LocalId}` so the body can store them into
+    // alloca slots keyed by the same HIR LocalId.
+    let params: Vec<(LlvmType, String)> = f
+        .params
+        .iter()
+        .map(|p| (DOUBLE, format!("%arg{}", p.id)))
+        .collect();
+
+    let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+    let _ = lf.create_block("entry");
+
+    // Store each param into an alloca slot, collecting LocalId → slot
+    // mappings. We release the &mut LlBlock at scope end before handing
+    // the function over to the FnCtx lowering pass.
+    let locals: HashMap<u32, String> = {
+        let blk = lf.block_mut(0).unwrap();
+        let mut map = HashMap::new();
+        for p in &f.params {
+            let slot = blk.alloca(DOUBLE);
+            blk.store(DOUBLE, &format!("%arg{}", p.id), &slot);
+            map.insert(p.id, slot);
+        }
+        map
+    };
+
+    // Param types feed local_types so type-aware dispatch (e.g. string
+    // concat detection on a `: string` parameter) works inside the body.
+    let local_types: HashMap<u32, perry_types::Type> = f
+        .params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+
+    // Pre-walk: which locals need to be boxed? A local is boxed when
+    // it's captured by a closure AND written by someone (either the
+    // enclosing function or inside a closure). Box-backing lets multiple
+    // closures share the same mutable cell — critical for the common
+    // `let x = 0; return { get: () => x, set: (n) => x = n }` pattern.
+    let boxed_vars = module_boxed_vars.clone();
+
+    let mut ctx = FnCtx {
+        func: lf,
+        locals,
+        local_types,
+        current_block: 0,
+        func_names,
+        strings,
+        loop_targets: Vec::new(),
+        label_targets: HashMap::new(),
+        pending_label: None,
+        classes,
+        this_stack: Vec::new(),
+        class_stack: Vec::new(),
+        methods,
+        module_globals,
+        import_function_prefixes,
+        closure_captures: HashMap::new(),
+        current_closure_ptr: None,
+        enums,
+        is_async_fn: f.is_async,
+        static_field_globals,
+        class_ids,
+        func_signatures,
+        boxed_vars,
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
+    };
+    stmt::lower_stmts(&mut ctx, &f.body)
+        .with_context(|| format!("lowering body of '{}'", f.name))?;
+
+    // Defensive: a well-typed numeric function always returns via an
+    // explicit `return`, but we emit `ret double 0.0` as a fallback so
+    // the LLVM verifier doesn't reject a missing terminator. For
+    // async functions, the fallback also wraps in a resolved promise
+    // so callers can await the result.
+    if !ctx.block().is_terminated() {
+        if f.is_async {
+            let zero = "0.0".to_string();
+            let handle = ctx.block().call(I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
+            let boxed = crate::expr::nanbox_pointer_inline_pub(ctx.block(), &handle);
+            ctx.block().ret(DOUBLE, &boxed);
+        } else {
+            ctx.block().ret(DOUBLE, "0.0");
+        }
+    }
+    Ok(())
+}
+
+/// Compile a closure body as a top-level LLVM function.
+///
+/// Signature: `double perry_closure_<modprefix>__<func_id>(i64 this_closure,
+/// double arg0, double arg1, …)`. The first parameter is the closure
+/// pointer (raw i64); the remaining params are the closure's own
+/// declared parameters.
+///
+/// Inside the body, captured variables (`closure.captures`) are mapped
+/// to capture indices and accessed via the runtime
+/// `js_closure_get/set_capture_f64(this_closure, idx)` calls. The
+/// `closure_captures` field on `FnCtx` carries the LocalId → capture
+/// index map; `current_closure_ptr` carries the closure pointer SSA
+/// value name.
+#[allow(clippy::too_many_arguments)]
+fn compile_closure(
+    llmod: &mut LlModule,
+    func_id: perry_types::FuncId,
+    closure_expr: &perry_hir::Expr,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
+    class_ids: &HashMap<String, u32>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
+    module_prefix: &str,
+    module_boxed_vars: &std::collections::HashSet<u32>,
+    module_local_types: &HashMap<u32, perry_types::Type>,
+    closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
+) -> Result<()> {
+    // Destructure the closure expression. We trust that the caller
+    // passes only `Expr::Closure` here (from `collect_closures_*`).
+    let (params, body, captures, captures_this, enclosing_class) = match closure_expr {
+        perry_hir::Expr::Closure {
+            params,
+            body,
+            captures,
+            captures_this,
+            enclosing_class,
+            ..
+        } => (params, body, captures, *captures_this, enclosing_class.clone()),
+        _ => return Err(anyhow!("compile_closure: expected Expr::Closure")),
+    };
+
+    let llvm_name = format!("perry_closure_{}__{}", module_prefix, func_id);
+
+    // Param list: i64 this_closure, then each param as double.
+    let mut llvm_params: Vec<(LlvmType, String)> =
+        Vec::with_capacity(params.len() + 1);
+    llvm_params.push((I64, "%this_closure".to_string()));
+    for p in params {
+        llvm_params.push((DOUBLE, format!("%arg{}", p.id)));
+    }
+
+    let lf = llmod.define_function(&llvm_name, DOUBLE, llvm_params);
+    let _ = lf.create_block("entry");
+
+    // Allocate slots for the closure's own params (captures don't get
+    // alloca slots — they're accessed via the runtime).
+    let locals: HashMap<u32, String> = {
+        let blk = lf.block_mut(0).unwrap();
+        let mut map = HashMap::new();
+        for p in params {
+            let slot = blk.alloca(DOUBLE);
+            blk.store(DOUBLE, &format!("%arg{}", p.id), &slot);
+            map.insert(p.id, slot);
+        }
+        map
+    };
+
+    // Start with the closure's own params as local_types, then
+    // merge in the module-wide map so captured-from-outer ids have
+    // their types available inside the body. Without this, closures
+    // that capture an array `items` and do `items.length` miss the
+    // typed fast path and return undefined.
+    let mut local_types: HashMap<u32, perry_types::Type> = params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+    for (id, ty) in module_local_types.iter() {
+        local_types.entry(*id).or_insert_with(|| ty.clone());
+    }
+
+    // Build the capture map: each captured LocalId gets the index it
+    // occupies in the closure's capture array. Identical logic to the
+    // `compute_auto_captures` helper used by the closure creation site
+    // — they MUST agree on the slot indices, otherwise the body reads
+    // captures from the wrong slots. Sorting the auto-detected ids
+    // gives deterministic indexing across both call sites.
+    let mut auto_captures: Vec<u32> = captures.clone();
+    {
+        let mut referenced: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        collect_ref_ids_in_stmts(body, &mut referenced);
+        let mut inner_lets: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        collect_let_ids(body, &mut inner_lets);
+        let param_ids: std::collections::HashSet<u32> = params.iter().map(|p| p.id).collect();
+        let already: std::collections::HashSet<u32> = auto_captures.iter().copied().collect();
+        let mut sorted: Vec<u32> = referenced.into_iter().collect();
+        sorted.sort();
+        for id in sorted {
+            if !param_ids.contains(&id)
+                && !inner_lets.contains(&id)
+                && !already.contains(&id)
+                && !module_globals.contains_key(&id)
+            {
+                auto_captures.push(id);
+            }
+        }
+    }
+    let closure_captures: HashMap<u32, u32> = auto_captures
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (*id, i as u32))
+        .collect();
+
+    // `this` capture. Object-literal methods get `captures_this=true`
+    // AND the creation site (lower_object_literal) patches a reserved
+    // capture slot at index `auto_captures.len()` with the containing
+    // object pointer. At function entry we read that slot and store it
+    // into the `this` alloca so `Expr::This` loads the real receiver.
+    //
+    // Arrow-in-class leftover path (`enclosing_class.is_some()` without
+    // the object-literal patch) keeps the old 0.0 sentinel — reads
+    // return a bogus value but don't crash.
+    let this_stack = if captures_this || enclosing_class.is_some() {
+        let this_cap_idx = auto_captures.len() as u32;
+        let blk = lf.block_mut(0).unwrap();
+        let slot = blk.alloca(DOUBLE);
+        if captures_this {
+            let idx_str = this_cap_idx.to_string();
+            let v = blk.call(
+                DOUBLE,
+                "js_closure_get_capture_f64",
+                &[(I64, "%this_closure"), (I32, &idx_str)],
+            );
+            blk.store(DOUBLE, &v, &slot);
+        } else {
+            blk.store(DOUBLE, "0.0", &slot);
+        }
+        vec![slot]
+    } else {
+        Vec::new()
+    };
+    let class_stack = match enclosing_class.clone() {
+        Some(c) => vec![c],
+        None => Vec::new(),
+    };
+
+    // Boxed vars inside the closure body: mutable captures from the
+    // closure's own let-bindings. We don't add the captured-from-outer
+    // ids here because those are already boxed in the outer function;
+    // the closure body just sees them via the capture mechanism.
+    let closure_boxed_vars = module_boxed_vars.clone();
+
+    let mut ctx = FnCtx {
+        func: lf,
+        locals,
+        local_types,
+        current_block: 0,
+        func_names,
+        strings,
+        loop_targets: Vec::new(),
+        label_targets: HashMap::new(),
+        pending_label: None,
+        classes,
+        this_stack,
+        class_stack,
+        methods,
+        module_globals,
+        import_function_prefixes,
+        closure_captures,
+        current_closure_ptr: Some("%this_closure".to_string()),
+        enums,
+        // Closures don't surface their is_async on the body in the
+        // same way functions do. The closure-creation site emits
+        // them as plain double-returning functions; we set false
+        // here to skip the wrap-in-promise behaviour.
+        is_async_fn: false,
+        static_field_globals,
+        class_ids,
+        func_signatures,
+        boxed_vars: closure_boxed_vars,
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
+    };
+
+    stmt::lower_stmts(&mut ctx, body)
+        .with_context(|| format!("lowering closure body func_id={}", func_id))?;
+
+    if !ctx.block().is_terminated() {
+        ctx.block().ret(DOUBLE, "0.0");
+    }
+    Ok(())
+}
+
+/// Compile a class instance method as a top-level LLVM function with the
+/// signature `perry_method_<class>_<name>(this_box: double, args: double…)
+/// -> double`. The first parameter (`this`) is stored in a slot whose
+/// pointer is pushed onto `this_stack`, then `class_stack` is set so
+/// inner `Expr::This` and `super` work correctly.
+fn compile_method(
+    llmod: &mut LlModule,
+    class: &perry_hir::Class,
+    method: &Function,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
+    class_ids: &HashMap<String, u32>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
+    module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
+) -> Result<()> {
+    let llvm_name = methods
+        .get(&(class.name.clone(), method.name.clone()))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(
+                "method '{}::{}' missing from registry",
+                class.name,
+                method.name
+            )
+        })?;
+
+    // Build the param list: (this, arg0, arg1, ...). All are doubles.
+    let mut params: Vec<(LlvmType, String)> = Vec::with_capacity(method.params.len() + 1);
+    params.push((DOUBLE, "%this_arg".to_string()));
+    for p in &method.params {
+        params.push((DOUBLE, format!("%arg{}", p.id)));
+    }
+
+    let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+    let _ = lf.create_block("entry");
+
+    // Allocate slots for `this` and each parameter; pre-populate with
+    // the incoming values.
+    let (this_slot, locals): (String, HashMap<u32, String>) = {
+        let blk = lf.block_mut(0).unwrap();
+        let this_slot = blk.alloca(DOUBLE);
+        blk.store(DOUBLE, "%this_arg", &this_slot);
+        let mut map = HashMap::new();
+        for p in &method.params {
+            let slot = blk.alloca(DOUBLE);
+            blk.store(DOUBLE, &format!("%arg{}", p.id), &slot);
+            map.insert(p.id, slot);
+        }
+        (this_slot, map)
+    };
+
+    let local_types: HashMap<u32, perry_types::Type> = method
+        .params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+
+    let method_boxed_vars = module_boxed_vars.clone();
+
+    let mut ctx = FnCtx {
+        func: lf,
+        locals,
+        local_types,
+        current_block: 0,
+        func_names,
+        strings,
+        loop_targets: Vec::new(),
+        label_targets: HashMap::new(),
+        pending_label: None,
+        classes,
+        this_stack: vec![this_slot],
+        class_stack: vec![class.name.clone()],
+        methods,
+        module_globals,
+        import_function_prefixes,
+        closure_captures: HashMap::new(),
+        current_closure_ptr: None,
+        enums,
+        is_async_fn: method.is_async,
+        static_field_globals,
+        class_ids,
+        func_signatures,
+        boxed_vars: method_boxed_vars,
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
+    };
+
+    stmt::lower_stmts(&mut ctx, &method.body)
+        .with_context(|| format!("lowering body of method '{}::{}'", class.name, method.name))?;
+
+    if !ctx.block().is_terminated() {
+        ctx.block().ret(DOUBLE, "0.0");
+    }
+    Ok(())
+}
+
+/// Emit the module's entry function.
+///
+/// For the **entry module**: emits `int main()` that bootstraps GC, runs
+/// the entry module's own string pool init, then calls every non-entry
+/// module's `<prefix>__init` function in order, then runs the entry
+/// module's top-level statements, then `return 0`.
+///
+/// For **non-entry modules**: emits `void <prefix>__init()` that runs the
+/// non-entry module's string pool init followed by its top-level
+/// statements. The entry module's main calls these via the
+/// `non_entry_module_prefixes` list.
+///
+/// Each module gets its OWN string pool init function
+/// (`__perry_init_strings_<prefix>`) so multiple modules in the same
+/// program don't collide on the symbol name.
+#[allow(clippy::too_many_arguments)]
+fn compile_module_entry(
+    llmod: &mut LlModule,
+    hir: &HirModule,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
+    class_ids: &HashMap<String, u32>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
+    module_prefix: &str,
+    is_entry: bool,
+    non_entry_module_prefixes: &[String],
+    module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
+) -> Result<()> {
+    let strings_init_name = format!("__perry_init_strings_{}", module_prefix);
+
+    if is_entry {
+        // Pre-declare each non-entry module's init function as an
+        // extern so the entry main can call them. The actual definition
+        // lives in the OTHER module's compiled .o file; the linker
+        // resolves the symbols at link time.
+        for prefix in non_entry_module_prefixes {
+            llmod.declare_function(&format!("{}__init", prefix), VOID, &[]);
         }
 
-        // Infer BigInt return types for functions that return new BN(...) in all paths
-        // This enables is_bigint detection for variables assigned from these functions
-        for func in &hir.functions {
-            if matches!(func.return_type, perry_types::Type::Any | perry_types::Type::Unknown) {
-                if all_returns_are_bigint(&func.body) {
-                    self.func_hir_return_types.insert(func.id, perry_types::Type::BigInt);
-                }
+        let main = llmod.define_function("main", I32, vec![]);
+        let _ = main.create_block("entry");
+        {
+            let blk = main.block_mut(0).unwrap();
+            blk.call_void("js_gc_init", &[]);
+            // Entry module's own string pool first.
+            blk.call_void(&strings_init_name, &[]);
+            // Then every non-entry module's init in order. Each
+            // non-entry module's `<prefix>__init` runs its own string
+            // pool init internally before its top-level statements.
+            for prefix in non_entry_module_prefixes {
+                blk.call_void(&format!("{}__init", prefix), &[]);
             }
         }
 
-        // Check for dotenv/config side-effect import (auto-calls dotenv.config())
-        for import in &hir.imports {
-            if import.source == "dotenv/config" && import.is_native {
-                self.needs_dotenv_init = true;
+        let main_boxed_vars = module_boxed_vars.clone();
+        let mut ctx = FnCtx {
+            func: main,
+            locals: HashMap::new(),
+            local_types: HashMap::new(),
+            current_block: 0,
+            func_names,
+            strings,
+            loop_targets: Vec::new(),
+            label_targets: HashMap::new(),
+            pending_label: None,
+            classes,
+            this_stack: Vec::new(),
+            class_stack: Vec::new(),
+            methods,
+            module_globals,
+            import_function_prefixes,
+            closure_captures: HashMap::new(),
+            current_closure_ptr: None,
+            enums,
+            is_async_fn: false,
+            static_field_globals,
+            class_ids,
+            func_signatures,
+            boxed_vars: main_boxed_vars,
+            closure_rest_params: &closure_rest_params,
+            local_closure_func_ids: HashMap::new(),
+            namespace_imports: &cross_module.namespace_imports,
+            imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
+            type_aliases: &cross_module.type_aliases,
+            imported_func_param_counts: &cross_module.imported_func_param_counts,
+            imported_func_return_types: &cross_module.imported_func_return_types,
+        };
+        // Initialize static class fields with their declared init
+        // expressions. Runs once at the top of main, before user code.
+        init_static_fields(&mut ctx, hir)?;
+        stmt::lower_stmts(&mut ctx, &hir.init)
+            .with_context(|| format!("lowering init statements of module '{}'", hir.name))?;
+
+        if !ctx.block().is_terminated() {
+            // Final microtask drain: top-level `promise.then(cb)` calls
+            // (without an awaiting parent) need to flush before main exits,
+            // otherwise their callbacks silently never run. Drain in a
+            // bounded straight-line sequence — sufficient to flush the
+            // typical handful of tail microtasks left behind by
+            // `Array.fromAsync(...).then(...)` and similar fire-and-forget
+            // patterns.
+            for _ in 0..16 {
+                let _ = ctx.block().call(I32, "js_promise_run_microtasks", &[]);
+                let _ = ctx.block().call(I32, "js_timer_tick", &[]);
+                let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
+                let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
+            }
+            ctx.block().ret(I32, "0");
+        }
+    } else {
+        let init_name = format!("{}__init", module_prefix);
+        let init_fn = llmod.define_function(&init_name, VOID, vec![]);
+        let _ = init_fn.create_block("entry");
+        {
+            let blk = init_fn.block_mut(0).unwrap();
+            // Each non-entry module runs its own string pool init at
+            // the start of its module init function. The entry main
+            // calls each module init in order (after running its own
+            // strings init), so by the time user code in any module
+            // executes, every module's strings are alive.
+            blk.call_void(&strings_init_name, &[]);
+        }
+
+        let init_boxed_vars = module_boxed_vars.clone();
+        let mut ctx = FnCtx {
+            func: init_fn,
+            locals: HashMap::new(),
+            local_types: HashMap::new(),
+            current_block: 0,
+            func_names,
+            strings,
+            loop_targets: Vec::new(),
+            label_targets: HashMap::new(),
+            pending_label: None,
+            classes,
+            this_stack: Vec::new(),
+            class_stack: Vec::new(),
+            methods,
+            module_globals,
+            import_function_prefixes,
+            closure_captures: HashMap::new(),
+            current_closure_ptr: None,
+            enums,
+            is_async_fn: false,
+            static_field_globals,
+            class_ids,
+            func_signatures,
+            boxed_vars: init_boxed_vars,
+            closure_rest_params: &closure_rest_params,
+            local_closure_func_ids: HashMap::new(),
+            namespace_imports: &cross_module.namespace_imports,
+            imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
+            type_aliases: &cross_module.type_aliases,
+            imported_func_param_counts: &cross_module.imported_func_param_counts,
+            imported_func_return_types: &cross_module.imported_func_return_types,
+        };
+        init_static_fields(&mut ctx, hir)?;
+        stmt::lower_stmts(&mut ctx, &hir.init)
+            .with_context(|| format!("lowering init statements of non-entry module '{}'", hir.name))?;
+
+        if !ctx.block().is_terminated() {
+            ctx.block().ret_void();
+        }
+    }
+    Ok(())
+}
+
+/// Emit the string pool into the module: byte-array constants, handle
+/// globals, and the `__perry_init_strings_<prefix>` function that
+/// allocates + NaN-boxes + GC-roots each handle exactly once at startup.
+///
+/// The string pool was constructed with a `module_prefix`, so every
+/// `entry.bytes_global` / `entry.handle_global` is already prefixed.
+/// Emission uses those names directly — no extra prefixing here.
+fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool, module_prefix: &str) {
+    for entry in strings.iter() {
+        // .rodata bytes — `[N+1 x i8]` because we include the null terminator.
+        llmod.add_named_string_constant(&entry.bytes_global, entry.byte_len + 1, &entry.escaped_ir);
+        // Mutable handle global initialized to 0.0; populated by
+        // __perry_init_strings_<prefix>.
+        llmod.add_internal_global(&entry.handle_global, DOUBLE, "0.0");
+    }
+
+    let init_name = format!("__perry_init_strings_{}", module_prefix);
+    let init_fn = llmod.define_function(&init_name, VOID, vec![]);
+    let _ = init_fn.create_block("entry");
+    let blk = init_fn.block_mut(0).unwrap();
+
+    for entry in strings.iter() {
+        let bytes_ref = format!("@{}", entry.bytes_global);
+        let handle_ref = format!("@{}", entry.handle_global);
+        let len_str = entry.byte_len.to_string();
+
+        let handle = blk.call(
+            I64,
+            "js_string_from_bytes",
+            &[(PTR, &bytes_ref), (I32, &len_str)],
+        );
+        let nanboxed = blk.call(DOUBLE, "js_nanbox_string", &[(I64, &handle)]);
+        blk.store(DOUBLE, &nanboxed, &handle_ref);
+        let addr_i64 = blk.ptrtoint(&handle_ref, I64);
+        blk.call_void("js_gc_register_global_root", &[(I64, &addr_i64)]);
+    }
+
+    blk.ret_void();
+}
+
+/// Compile a static class method as a top-level LLVM function with
+/// no `this` parameter. Mostly identical to `compile_function` but
+/// the LLVM symbol name is `perry_static_<modprefix>__<class>__<method>`
+/// instead of `perry_fn_<modprefix>__<name>`.
+#[allow(clippy::too_many_arguments)]
+fn compile_static_method(
+    llmod: &mut LlModule,
+    class_name: &str,
+    f: &Function,
+    func_names: &HashMap<u32, String>,
+    strings: &mut StringPool,
+    classes: &HashMap<String, &perry_hir::Class>,
+    methods: &HashMap<(String, String), String>,
+    module_globals: &HashMap<u32, String>,
+    import_function_prefixes: &HashMap<String, String>,
+    enums: &HashMap<(String, String), perry_hir::EnumValue>,
+    static_field_globals: &HashMap<(String, String), String>,
+    class_ids: &HashMap<String, u32>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
+    module_prefix: &str,
+    module_boxed_vars: &std::collections::HashSet<u32>,
+    closure_rest_params: &HashMap<u32, usize>,
+    cross_module: &CrossModuleCtx,
+) -> Result<()> {
+    let llvm_name = format!(
+        "perry_static_{}__{}__{}",
+        module_prefix,
+        sanitize(class_name),
+        sanitize(&f.name),
+    );
+
+    let params: Vec<(LlvmType, String)> = f
+        .params
+        .iter()
+        .map(|p| (DOUBLE, format!("%arg{}", p.id)))
+        .collect();
+
+    let lf = llmod.define_function(&llvm_name, DOUBLE, params);
+    let _ = lf.create_block("entry");
+
+    let locals: HashMap<u32, String> = {
+        let blk = lf.block_mut(0).unwrap();
+        let mut map = HashMap::new();
+        for p in &f.params {
+            let slot = blk.alloca(DOUBLE);
+            blk.store(DOUBLE, &format!("%arg{}", p.id), &slot);
+            map.insert(p.id, slot);
+        }
+        map
+    };
+
+    let local_types: HashMap<u32, perry_types::Type> = f
+        .params
+        .iter()
+        .map(|p| (p.id, p.ty.clone()))
+        .collect();
+
+    let mut ctx = FnCtx {
+        func: lf,
+        locals,
+        local_types,
+        current_block: 0,
+        func_names,
+        strings,
+        loop_targets: Vec::new(),
+        label_targets: HashMap::new(),
+        pending_label: None,
+        classes,
+        this_stack: Vec::new(),
+        // Static methods have no `this` but they CAN reference
+        // sibling static methods/fields via the class name (which
+        // they handle via StaticFieldGet/StaticMethodCall, not via
+        // `this`). The class_stack is empty here.
+        class_stack: Vec::new(),
+        methods,
+        module_globals,
+        import_function_prefixes,
+        closure_captures: HashMap::new(),
+        current_closure_ptr: None,
+        enums,
+        is_async_fn: f.is_async,
+        static_field_globals,
+        class_ids,
+        func_signatures,
+        boxed_vars: module_boxed_vars.clone(),
+        closure_rest_params,
+        local_closure_func_ids: HashMap::new(),
+        namespace_imports: &cross_module.namespace_imports,
+        imported_async_funcs: &cross_module.imported_async_funcs,
+        local_async_funcs: &cross_module.local_async_funcs,
+        type_aliases: &cross_module.type_aliases,
+        imported_func_param_counts: &cross_module.imported_func_param_counts,
+        imported_func_return_types: &cross_module.imported_func_return_types,
+    };
+    stmt::lower_stmts(&mut ctx, &f.body)
+        .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
+
+    if !ctx.block().is_terminated() {
+        if f.is_async {
+            let zero = "0.0".to_string();
+            let handle = ctx.block().call(I64, "js_promise_resolved", &[(DOUBLE, &zero)]);
+            let boxed = crate::expr::nanbox_pointer_inline_pub(ctx.block(), &handle);
+            ctx.block().ret(DOUBLE, &boxed);
+        } else {
+            ctx.block().ret(DOUBLE, "0.0");
+        }
+    }
+    Ok(())
+}
+
+/// Initialize each class's static fields with their declared init
+/// expressions. Called at the top of compile_module_entry's main /
+/// __init function. The static field globals were registered in
+/// compile_module — this just emits the per-field "store init value
+/// to global" sequence.
+fn init_static_fields(
+    ctx: &mut crate::expr::FnCtx<'_>,
+    hir: &HirModule,
+) -> Result<()> {
+    // Phase C.3: register user classes that extend the built-in Error
+    // (or any of its subclasses) with the runtime, so `instanceof Error`
+    // walks the chain and returns true. Without this, `new HttpError(...)
+    // instanceof Error` returns false because the runtime's
+    // `EXTENDS_ERROR_REGISTRY` is empty for user classes.
+    for c in &hir.classes {
+        // Walk this class's extends_name chain; if any ancestor is a
+        // built-in error subclass, register this class's id.
+        let mut cur: Option<String> = c.extends_name.clone();
+        let mut extends_error = false;
+        let mut depth = 0usize;
+        while let Some(name) = cur {
+            if matches!(
+                name.as_str(),
+                "Error"
+                    | "TypeError"
+                    | "RangeError"
+                    | "ReferenceError"
+                    | "SyntaxError"
+                    | "URIError"
+                    | "EvalError"
+                    | "AggregateError"
+            ) {
+                extends_error = true;
                 break;
             }
-        }
-
-        // Identify functions that return closures by scanning their body for return statements
-        for func in &hir.functions {
-            if self.function_returns_closure(&func.body) {
-                self.closure_returning_funcs.insert(func.id);
-            }
-        }
-
-        // First pass: declare all functions
-        for func in &hir.functions {
-            self.declare_function(func)?;
-        }
-
-        // Declare class constructors and methods
-        for class in &hir.classes {
-            self.declare_class_constructor(class)?;
-            self.declare_class_methods(class)?;
-            self.declare_class_getters(class)?;
-            self.declare_class_setters(class)?;
-            self.declare_static_methods(class)?;
-            self.declare_static_fields(class)?;
-        }
-
-        // Now that all methods are declared, resolve method inheritance
-        self.resolve_method_inheritance();
-
-        // Declare external runtime functions
-        self.declare_runtime_functions()?;
-
-        // Map empty-body functions (from `declare function`) to extern FFI functions.
-        // When a TypeScript file has `declare function hone_editor_create(...)`, the lowering
-        // produces a Function with empty body. If the function name matches an extern FFI
-        // function from a native library manifest, remap the func_id to the extern function.
-        // Also override func_param_types with the manifest's declared types so that
-        // call-site argument coercion (f64→i64 for string pointers) works correctly.
-        let native_lib_param_types: HashMap<String, Vec<types::Type>> = self.native_library_functions.iter()
-            .map(|(name, params, _)| {
-                let types: Vec<types::Type> = params.iter().map(|p| Self::parse_cranelift_type(p)).collect();
-                (name.clone(), types)
-            })
-            .collect();
-        for func in &hir.functions {
-            if func.body.is_empty() {
-                if let Some(extern_id) = self.extern_funcs.get(func.name.as_str()) {
-                    self.func_ids.insert(func.id, *extern_id);
-                    // Override param types from the native library manifest
-                    if let Some(manifest_types) = native_lib_param_types.get(&func.name) {
-                        self.func_param_types.insert(func.id, manifest_types.clone());
-                    }
+            // Walk user-defined ancestor chain.
+            if let Some(parent) = ctx.classes.get(&name) {
+                cur = parent.extends_name.clone();
+                depth += 1;
+                if depth > 32 {
+                    break;
                 }
-            }
-        }
-
-        // Collect closures from ALL sources: functions, classes, and init statements
-        // This MUST happen BEFORE compiling class methods that may contain closures
-        // Tuple: (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class)
-        let mut all_closures: Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)> = Vec::new();
-
-        // Collect from function bodies (no enclosing class)
-        for func in &hir.functions {
-            self.collect_closures_from_stmts_into(&func.body, &mut all_closures, None);
-        }
-
-        // Collect from class methods and constructors (pass class name for this capture)
-        for class in &hir.classes {
-            let class_name = class.name.as_str();
-            for method in &class.methods {
-                self.collect_closures_from_stmts_into(&method.body, &mut all_closures, Some(class_name));
-            }
-            for (_, getter) in &class.getters {
-                self.collect_closures_from_stmts_into(&getter.body, &mut all_closures, Some(class_name));
-            }
-            for (_, setter) in &class.setters {
-                self.collect_closures_from_stmts_into(&setter.body, &mut all_closures, Some(class_name));
-            }
-            for method in &class.static_methods {
-                // Static methods don't have `this`, so pass None
-                self.collect_closures_from_stmts_into(&method.body, &mut all_closures, None);
-            }
-            if let Some(ctor) = &class.constructor {
-                self.collect_closures_from_stmts_into(&ctor.body, &mut all_closures, Some(class_name));
-            }
-
-            // Collect from class field initializers
-            for field in &class.fields {
-                if let Some(init) = &field.init {
-                    self.collect_closures_from_expr(init, &mut all_closures, Some(class_name));
-                }
-            }
-
-            // Collect from static field initializers (no enclosing class for static context)
-            for field in &class.static_fields {
-                if let Some(init) = &field.init {
-                    self.collect_closures_from_expr(init, &mut all_closures, None);
-                }
-            }
-        }
-
-        // Collect from init statements (no enclosing class)
-        self.collect_closures_from_stmts_into(&hir.init, &mut all_closures, None);
-
-        // Collect from global variable initializers
-        for global in &hir.globals {
-            if let Some(init) = &global.init {
-                self.collect_closures_from_expr(init, &mut all_closures, None);
-            }
-        }
-
-        // Deduplicate closures by func_id (same closure may appear in class method and init statements)
-        // Prefer entries with enclosing_class set (from class methods) over those without
-        let mut seen_func_ids: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
-        let mut deduped_closures: Vec<(u32, Vec<perry_hir::Param>, Vec<Stmt>, Vec<LocalId>, Vec<LocalId>, bool, Option<String>, bool)> = Vec::new();
-        for closure in all_closures {
-            let func_id = closure.0;
-            if let Some(&existing_idx) = seen_func_ids.get(&func_id) {
-                // If existing has no enclosing_class but this one does, replace it
-                if deduped_closures[existing_idx].6.is_none() && closure.6.is_some() {
-                    deduped_closures[existing_idx] = closure;
-                }
-                // Otherwise keep the existing one
             } else {
-                seen_func_ids.insert(func_id, deduped_closures.len());
-                deduped_closures.push(closure);
+                cur = None;
             }
         }
-
-        // Declare all closures first, then compile them
-        // If captures_this, we need an extra slot for the `this` pointer
-        for (func_id, params, _body, captures, _mutable_captures, captures_this, _enclosing_class, is_async) in &deduped_closures {
-            let capture_count = if *captures_this { captures.len() + 1 } else { captures.len() };
-            self.declare_closure(*func_id, params.len(), capture_count, *is_async)?;
-            // Track rest parameter index for closures (before code generation so callers can see it)
-            for (i, param) in params.iter().enumerate() {
-                if param.is_rest {
-                    self.func_rest_param_index.insert(*func_id, i);
-                }
+        if extends_error {
+            if let Some(&cid) = ctx.class_ids.get(&c.name) {
+                let cid_str = cid.to_string();
+                ctx.block().call_void(
+                    "js_register_class_extends_error",
+                    &[(crate::types::I32, &cid_str)],
+                );
             }
         }
-
-        // Collect FuncRef expressions that need closure-compatible wrappers
-        // NOTE: This must be done BEFORE compiling closures, as closures may use FuncRefs
-        let mut func_refs_needing_wrappers: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        for func in &hir.functions {
-            self.collect_func_refs_needing_wrappers_from_stmts(&func.body, &mut func_refs_needing_wrappers);
-        }
-        for class in &hir.classes {
-            for method in &class.methods {
-                self.collect_func_refs_needing_wrappers_from_stmts(&method.body, &mut func_refs_needing_wrappers);
-            }
-            for method in &class.static_methods {
-                self.collect_func_refs_needing_wrappers_from_stmts(&method.body, &mut func_refs_needing_wrappers);
-            }
-            if let Some(ctor) = &class.constructor {
-                self.collect_func_refs_needing_wrappers_from_stmts(&ctor.body, &mut func_refs_needing_wrappers);
-            }
-        }
-        self.collect_func_refs_needing_wrappers_from_stmts(&hir.init, &mut func_refs_needing_wrappers);
-
-        // Also collect from closure bodies (closures may contain FuncRefs)
-        for (_, _, body, _, _, _, _, _) in &deduped_closures {
-            self.collect_func_refs_needing_wrappers_from_stmts(body, &mut func_refs_needing_wrappers);
-        }
-
-        // Exported functions also need wrappers so they can be passed as values to other modules
-        for (_, func_id) in &hir.exported_functions {
-            func_refs_needing_wrappers.insert(*func_id);
-        }
-
-        // ALL functions should have wrappers generated so they can be used as values
-        // This is necessary because collect_func_refs_from_expr doesn't traverse all expression types
-        // and some functions may be passed as values in ways that aren't detected
-        for func in &hir.functions {
-            func_refs_needing_wrappers.insert(func.id);
-        }
-
-        // Generate wrappers for all FuncRefs that need them
-        for func_id in &func_refs_needing_wrappers {
-            self.get_or_create_func_wrapper(*func_id)?;
-        }
-
-        // Create global data slots for module-level variables that may be accessed from functions/methods/closures
-        // IMPORTANT: This must be done BEFORE compiling closures/methods so the data IDs are available
-        self.create_module_var_globals(&hir.init)?;
-
-        // Pre-compute which module-level variables are pointers
-        self.analyze_module_var_types(&hir.init);
-
-        // Also analyze function body variables for closure capture type propagation
-        // This populates module_level_locals with type info for function-local variables
-        // that may be captured by closures (e.g., bigint variables captured from enclosing functions)
-        for func in &hir.functions {
-            // Analyze function parameter types FIRST (body may reference params via LocalGet)
-            for param in &func.params {
-                let is_bigint = matches!(param.ty, perry_types::Type::BigInt);
-                let is_string = matches!(param.ty, perry_types::Type::String) || {
-                    if let perry_types::Type::Named(name) = &param.ty {
-                        self.enums.iter().any(|((enum_name, _), v)| enum_name == name && matches!(v, EnumMemberValue::String(_)))
-                    } else if let perry_types::Type::Union(types) = &param.ty {
-                        // Union of all strings (e.g. string | string) should be treated as strings
-                        !types.is_empty() && types.iter().all(|t| matches!(t, perry_types::Type::String))
-                    } else {
-                        false
-                    }
-                };
-                let is_array = matches!(param.ty, perry_types::Type::Array(_));
-                let is_closure = matches!(param.ty, perry_types::Type::Function(_));
-                // Check if this Named type is a numeric enum (values are f64, not pointers)
-                let is_numeric_enum = if let perry_types::Type::Named(name) = &param.ty {
-                    self.enums.iter().any(|((en, _), _)| en == name)
-                        && !self.enums.iter().any(|((en, _), v)| en == name && matches!(v, EnumMemberValue::String(_)))
-                } else { false };
-                let is_pointer = !is_numeric_enum && matches!(param.ty, perry_types::Type::String | perry_types::Type::Array(_) |
-                    perry_types::Type::Object(_) | perry_types::Type::Named(_) | perry_types::Type::Generic { .. } |
-                    perry_types::Type::Function(_));
-                let is_map = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Map");
-                let is_set = matches!(&param.ty, perry_types::Type::Generic { base, .. } if base == "Set");
-                let is_union = !is_numeric_enum && matches!(param.ty, perry_types::Type::Union(_) | perry_types::Type::Named(_) |
-                    perry_types::Type::Object(_) | perry_types::Type::Any | perry_types::Type::Unknown);
-                // Only insert if not already present (module-level takes precedence)
-                if !self.module_level_locals.contains_key(&param.id) {
-                    self.module_level_locals.insert(param.id, LocalInfo {
-                        var: Variable::new(0),
-                        name: Some(param.name.clone()),
-                        class_name: resolve_class_name_from_type(&param.ty, &self.classes),
-                        type_args: Vec::new(),
-                        is_pointer,
-                        is_array,
-                        is_string,
-                        is_bigint,
-                        is_closure, closure_func_id: None,
-                        is_boxed: false,
-                        is_map, is_set,
-                        is_buffer: false, is_event_emitter: false, is_union,
-                        is_mixed_array: false,
-                        is_integer: false, is_integer_array: false,
-                        is_i32: false, is_boolean: false, i32_shadow: None,
-                        bounded_by_array: None, bounded_by_constant: None,
-                        scalar_fields: None,
-                        squared_cache: None, product_cache: None, cached_array_ptr: None,
-                        const_value: None, hoisted_element_loads: None, hoisted_i32_products: None,
-                        module_var_data_id: None, class_ref_name: None, object_field_indices: None,
-                    });
-                }
-            }
-            // Now analyze function body variables (after params are registered)
-            self.analyze_module_var_types_recursive(&func.body);
-        }
-
-        // Detect function-local variables captured by inner class methods.
-        // When a class is defined inside a function body (e.g., noble-curves' Point class inside edwards()),
-        // class method bodies may reference variables from the enclosing function scope via LocalGet(id).
-        // These variables don't exist in the class method's locals map. We promote them to module-level
-        // data globals so that:
-        // 1. The function writes to the data global when defining/setting the variable
-        // 2. The class method loads from the data global (via the existing module_var_data_ids loop)
-        {
-            // Collect all LocalIds referenced in class method/constructor/getter/setter bodies
-            let mut class_refs: Vec<LocalId> = Vec::new();
-            let mut visited_closures = std::collections::HashSet::new();
-            for class in &hir.classes {
-                for method in &class.methods {
-                    for stmt in &method.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut class_refs, &mut visited_closures);
-                    }
-                }
-                if let Some(ctor) = &class.constructor {
-                    for stmt in &ctor.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut class_refs, &mut visited_closures);
-                    }
-                }
-                for (_, getter) in &class.getters {
-                    for stmt in &getter.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut class_refs, &mut visited_closures);
-                    }
-                }
-                for (_, setter) in &class.setters {
-                    for stmt in &setter.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut class_refs, &mut visited_closures);
-                    }
-                }
-                for method in &class.static_methods {
-                    for stmt in &method.body {
-                        perry_hir::collect_local_refs_stmt(stmt, &mut class_refs, &mut visited_closures);
-                    }
-                }
-            }
-
-            // Collect all LocalIds that are class-internal parameters (constructor params,
-            // method params, getter/setter params). These should NOT be promoted — they
-            // are local to the class method, not outer-scope captures.
-            // This is needed because function inlining (e.g., assertEq calls inlined at
-            // HIR level) can create LocalIds in function bodies that collide with class
-            // constructor param IDs, causing incorrect promotion of unrelated variables.
-            let mut class_own_param_ids: std::collections::HashSet<LocalId> = std::collections::HashSet::new();
-            for class in &hir.classes {
-                if let Some(ctor) = &class.constructor {
-                    for p in &ctor.params {
-                        class_own_param_ids.insert(p.id);
-                    }
-                }
-                for method in &class.methods {
-                    for p in &method.params {
-                        class_own_param_ids.insert(p.id);
-                    }
-                }
-                for (_, getter) in &class.getters {
-                    for p in &getter.params {
-                        class_own_param_ids.insert(p.id);
-                    }
-                }
-                for (_, setter) in &class.setters {
-                    for p in &setter.params {
-                        class_own_param_ids.insert(p.id);
-                    }
-                }
-                for method in &class.static_methods {
-                    for p in &method.params {
-                        class_own_param_ids.insert(p.id);
-                    }
-                }
-            }
-
-            // Find which of these references are NOT already module-level variables
-            // (i.e., they're function-local variables that need to be promoted)
-            let class_ref_set: std::collections::HashSet<LocalId> = class_refs.into_iter().collect();
-            let mut promoted_count = 0;
-            for id in &class_ref_set {
-                if self.module_var_data_ids.contains_key(id) {
-                    continue; // Already a module-level variable
-                }
-                // Skip class-internal parameters — they are NOT outer-scope captures
-                if class_own_param_ids.contains(id) {
-                    continue;
-                }
-                // Check if this ID exists in module_level_locals (function params/body vars)
-                if !self.module_level_locals.contains_key(id) {
-                    continue; // Unknown variable — skip
-                }
-
-                // This is a function-local variable referenced by a class method.
-                // Promote it to a module-level data global.
-                let var_name = self.module_level_locals.get(id)
-                    .and_then(|info| info.name.clone())
-                    .unwrap_or_else(|| format!("cap_{}", id));
-                let global_name = format!("__class_cap_{}_{}", self.module_symbol_prefix, var_name);
-                match self.module.declare_data(&global_name, Linkage::Local, true, false) {
-                    Ok(data_id) => {
-                        let mut data_desc = DataDescription::new();
-                        data_desc.define_zeroinit(8);
-                        if let Ok(()) = self.module.define_data(data_id, &data_desc) {
-                            self.module_var_data_ids.insert(*id, data_id);
-                            // Update the module_level_locals entry with the data_id
-                            if let Some(info) = self.module_level_locals.get_mut(id) {
-                                info.module_var_data_id = Some(data_id);
-                            }
-                            promoted_count += 1;
-                        }
-                    }
-                    Err(_) => {} // Skip on error
-                }
-            }
-            if promoted_count > 0 {
-                eprintln!("[CLASS_CAPTURE] Promoted {} function-local variables to module-level for class method access", promoted_count);
+    }
+    // Well-known symbol class hooks: HIR lifts `static [Symbol.hasInstance]`
+    // and `get [Symbol.toStringTag]` to top-level functions with the
+    // prefixes `__perry_wk_hasinstance_<class>` / `__perry_wk_tostringtag_<class>`.
+    // Scan `hir.functions`, compute the LLVM symbol via `scoped_fn_name`,
+    // and emit `js_register_class_<hook>(class_id, ptrtoint(@func, i64))`
+    // at module init so the runtime's `js_instanceof` / `js_object_to_string`
+    // can dispatch through them.
+    let module_prefix = ctx.strings.module_prefix().to_string();
+    for f in &hir.functions {
+        let (registrar, class_name): (&str, &str) =
+            if let Some(rest) = f.name.strip_prefix("__perry_wk_hasinstance_") {
+                ("js_register_class_has_instance", rest)
+            } else if let Some(rest) = f.name.strip_prefix("__perry_wk_tostringtag_") {
+                ("js_register_class_to_string_tag", rest)
+            } else {
+                continue;
+            };
+        let Some(&cid) = ctx.class_ids.get(class_name) else { continue };
+        let cid_str = cid.to_string();
+        let llvm_sym = format!("perry_fn_{}__{}", module_prefix, sanitize(&f.name));
+        let func_ref = format!("@{}", llvm_sym);
+        let blk = ctx.block();
+        let func_ptr_i64 = blk.ptrtoint(&func_ref, I64);
+        blk.call_void(
+            registrar,
+            &[
+                (crate::types::I32, &cid_str),
+                (I64, &func_ptr_i64),
+            ],
+        );
+    }
+    for c in &hir.classes {
+        for sf in &c.static_fields {
+            let key = (c.name.clone(), sf.name.clone());
+            let Some(global_name) = ctx.static_field_globals.get(&key).cloned() else {
+                continue;
+            };
+            if let Some(init_expr) = &sf.init {
+                let v = crate::expr::lower_expr(ctx, init_expr)?;
+                let g_ref = format!("@{}", global_name);
+                ctx.block().store(DOUBLE, &v, &g_ref);
             }
         }
-
-        // Publish module-var data IDs to a thread-local for compile_expr's
-        // closure-construction path. This must happen AFTER class capture
-        // promotion (which adds entries) and BEFORE any compile_closure /
-        // compile_function / compile_class_method / compile_init call (which
-        // can build closures whose `captures` list references module-level vars
-        // not yet bound as `locals` at the construction site). Without this,
-        // the construction silently sets the capture slot to 0.0 and the
-        // closure crashes with NULL box pointer the first time it reads it.
-        crate::util::MODULE_VAR_DATA_IDS.with(|p| {
-            let mut map = p.borrow_mut();
-            map.clear();
-            for (k, v) in &self.module_var_data_ids {
-                map.insert(*k, *v);
-            }
-        });
-
-        // Now compile closures (after wrappers are created and module vars are registered)
-        for (func_id, params, body, captures, mutable_captures, captures_this, enclosing_class, is_async) in deduped_closures {
-            self.compile_closure(func_id, &params, &body, &captures, &mutable_captures, captures_this, enclosing_class.as_deref(), is_async)?;
-        }
-
-        // Compile class constructors and methods
-        for class in &hir.classes {
-            if let Some(ref ctor) = class.constructor {
-                self.compile_class_constructor(class, ctor)?;
-            }
-            for method in &class.methods {
-                self.compile_class_method(class, method)?;
-            }
-            // Compile getters
-            for (prop_name, getter) in &class.getters {
-                self.compile_class_getter(class, prop_name, getter)?;
-            }
-            // Compile setters
-            for (prop_name, setter) in &class.setters {
-                self.compile_class_setter(class, prop_name, setter)?;
-            }
-            // Compile static methods
-            for method in &class.static_methods {
-                self.compile_static_method(class, method)?;
-            }
-            // Compile static fields
-            for field in &class.static_fields {
-                self.compile_static_field(class, field)?;
-            }
-        }
-
-        // Create exported globals for native instances (e.g., `export const pool = new Pool(...)`)
-        // These will be filled in during compile_init and accessed by other modules
-        for (export_name, _module_name, _class_name) in &hir.exported_native_instances {
-            let global_name = self.scoped_export_name(export_name);
-            let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
-            // Create a data description with space for one f64 (8 bytes), initialized to 0
-            let mut data_desc = DataDescription::new();
-            data_desc.define_zeroinit(8);
-            self.module.define_data(data_id, &data_desc)?;
-            self.exported_native_instance_ids.insert(export_name.clone(), data_id);
-        }
-
-        // Create exported globals for object literals (e.g., `export const config = { ... }`)
-        // These will be filled in during compile_init and accessed by other modules
-        // Skip exports that are already defined as native instances to avoid duplicate definitions
-        let native_instance_names: std::collections::HashSet<&String> = hir.exported_native_instances
-            .iter()
-            .map(|(name, _, _)| name)
-            .collect();
-        for export_name in &hir.exported_objects {
-            // Skip if already defined as a native instance export
-            if native_instance_names.contains(export_name) {
+    }
+    // Static blocks — emitted as synthetic static methods with the
+    // name prefix `__perry_static_init_`. Call them in registration
+    // order for each class, after that class's static fields are
+    // initialized, so they can reference those fields.
+    for c in &hir.classes {
+        for sm in &c.static_methods {
+            if !sm.name.starts_with("__perry_static_init_") {
                 continue;
             }
-            let global_name = self.scoped_export_name(export_name);
-            let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
-            // Create a data description with space for one f64 (8 bytes), initialized to 0
-            let mut data_desc = DataDescription::new();
-            data_desc.define_zeroinit(8);
-            self.module.define_data(data_id, &data_desc)?;
-            self.exported_object_ids.insert(export_name.clone(), data_id);
-        }
-
-        // Create exported globals for functions (e.g., `export function foo() { ... }`)
-        // These allow functions to be passed as values to other modules
-        // Deduplicate by name to handle TypeScript function overloads (multiple declarations, one implementation)
-        let mut seen_export_func_names = std::collections::HashSet::new();
-        for (func_name, func_id) in &hir.exported_functions {
-            if !seen_export_func_names.insert(func_name.clone()) {
-                continue; // Skip duplicate overload declarations
+            let key = (c.name.clone(), sm.name.clone());
+            if let Some(llvm_name) = ctx.methods.get(&key).cloned() {
+                ctx.block().call(DOUBLE, &llvm_name, &[]);
             }
-            let global_name = self.scoped_export_name(func_name);
-            let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
-            // Create a data description with space for one f64 (8 bytes), initialized to 0
-            let mut data_desc = DataDescription::new();
-            data_desc.define_zeroinit(8);
-            self.module.define_data(data_id, &data_desc)?;
-            self.exported_function_ids.insert(func_name.clone(), (data_id, *func_id));
-        }
-
-        // Create exported globals for exported classes, interfaces, and type aliases.
-        // Importing modules always pre-declare `__export_<module>__<Name>` for every imported symbol.
-        // Without a matching definition in the exporting module, MSVC's linker reports LNK2001.
-        // These globals are zero-initialized data slots — they exist only to satisfy the linker.
-        {
-            let mut already_exported: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for (name, _, _) in &hir.exported_native_instances {
-                already_exported.insert(name.clone());
-            }
-            for name in &hir.exported_objects {
-                already_exported.insert(name.clone());
-            }
-            for (name, _) in &hir.exported_functions {
-                already_exported.insert(name.clone());
-            }
-
-            // Exported classes
-            for class in &hir.classes {
-                if class.is_exported && !already_exported.contains(&class.name) {
-                    let global_name = self.scoped_export_name(&class.name);
-                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
-                    let mut data_desc = DataDescription::new();
-                    data_desc.define_zeroinit(8);
-                    self.module.define_data(data_id, &data_desc)?;
-                    already_exported.insert(class.name.clone());
-                }
-            }
-
-            // Exported interfaces
-            for iface in &hir.interfaces {
-                if iface.is_exported && !already_exported.contains(&iface.name) {
-                    let global_name = self.scoped_export_name(&iface.name);
-                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
-                    let mut data_desc = DataDescription::new();
-                    data_desc.define_zeroinit(8);
-                    self.module.define_data(data_id, &data_desc)?;
-                    already_exported.insert(iface.name.clone());
-                }
-            }
-
-            // Exported type aliases
-            for ta in &hir.type_aliases {
-                if ta.is_exported && !already_exported.contains(&ta.name) {
-                    let global_name = self.scoped_export_name(&ta.name);
-                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
-                    let mut data_desc = DataDescription::new();
-                    data_desc.define_zeroinit(8);
-                    self.module.define_data(data_id, &data_desc)?;
-                    already_exported.insert(ta.name.clone());
-                }
-            }
-
-            // Exported enums
-            for en in &hir.enums {
-                if en.is_exported && !already_exported.contains(&en.name) {
-                    let global_name = self.scoped_export_name(&en.name);
-                    let data_id = self.module.declare_data(&global_name, Linkage::Export, true, false)?;
-                    let mut data_desc = DataDescription::new();
-                    data_desc.define_zeroinit(8);
-                    self.module.define_data(data_id, &data_desc)?;
-                    already_exported.insert(en.name.clone());
-                }
-            }
-        }
-
-        // Second pass: compile all functions
-        // Note: create_module_var_globals and analyze_module_var_types were already called
-        // before compiling closures/methods above
-        // Deduplicate by FuncId (not name) so same-name functions at different scopes each get compiled
-        let mut compiled_func_ids = std::collections::HashSet::new();
-        for func in &hir.functions {
-            if !compiled_func_ids.insert(func.id) {
-                continue; // Skip duplicate declarations with the same FuncId
-            }
-            self.compile_function(func)?;
-        }
-
-        // Generate wrapper functions for all exported functions
-        // This is necessary because cross-module calls use __wrapper_functionName for uniform ABI
-        // Track which wrappers we've generated and their func_ids for aliasing
-        let mut wrapper_aliases_needed: Vec<(String, String, cranelift_module::FuncId)> = Vec::new();
-        let mut seen_wrapper_names = std::collections::HashSet::new();
-
-        for (export_name, func_id) in &hir.exported_functions {
-            if !seen_wrapper_names.insert(export_name.clone()) {
-                continue; // Skip duplicate overload declarations
-            }
-            // This will create the wrapper if it doesn't exist
-            match self.get_or_create_func_wrapper(*func_id) {
-                Ok(wrapper_id) => {
-                    // Check if the exported name differs from the function's actual name
-                    // This handles cases like: export const foo = bar;
-                    // where bar has __wrapper_bar but we also need __wrapper_foo
-                    if let Some(func) = self.hir_functions.iter().find(|f| f.id == *func_id) {
-                        if export_name != &func.name {
-                            wrapper_aliases_needed.push((
-                                export_name.clone(),
-                                func.name.clone(),
-                                wrapper_id
-                            ));
-                        }
-                    }
-                }
-                Err(e) => {
-                    // This is a real error - wrapper generation failed, which means
-                    // cross-module calls to this function will get null/undefined.
-                    // Make it visible so users can diagnose issues.
-                    eprintln!("[WRAPPER ERROR] Could not create wrapper for exported function '{}': {}", export_name, e);
-                    return Err(anyhow!("Failed to create wrapper for exported function '{}': {}", export_name, e));
-                }
-            }
-        }
-
-        // Generate wrapper aliases (trampolines that just call the original wrapper)
-        for (alias_name, _original_name, original_wrapper_id) in wrapper_aliases_needed {
-            let alias_wrapper_name = if self.module_symbol_prefix.is_empty() {
-                format!("__wrapper_{}", alias_name)
-            } else {
-                format!("__wrapper_{}__{}", self.module_symbol_prefix, alias_name)
-            };
-
-            // Get the signature from the original wrapper
-            let sig = self.module.declarations().get_function_decl(original_wrapper_id).signature.clone();
-
-            // Declare the alias function
-            if let Ok(alias_id) = self.module.declare_function(&alias_wrapper_name, Linkage::Export, &sig) {
-                // Build a simple trampoline that tail-calls the original wrapper
-                self.ctx.func.signature = sig.clone();
-                let mut alias_func_ctx = FunctionBuilderContext::new();
-
-                {
-                    let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut alias_func_ctx);
-                    let entry_block = builder.create_block();
-                    builder.append_block_params_for_function_params(entry_block);
-                    builder.switch_to_block(entry_block);
-                    builder.seal_block(entry_block);
-
-                    // Get all block params
-                    let params: Vec<Value> = builder.block_params(entry_block).to_vec();
-
-                    // Declare the original wrapper function
-                    let original_ref = self.module.declare_func_in_func(original_wrapper_id, builder.func);
-
-                    // Call the original wrapper with all args
-                    let call = builder.ins().call(original_ref, &params);
-
-                    // Return the result
-                    if sig.returns.is_empty() {
-                        builder.ins().return_(&[]);
-                    } else {
-                        let results: Vec<Value> = builder.inst_results(call).to_vec();
-                        builder.ins().return_(&results);
-                    }
-
-                    builder.finalize();
-                }
-
-                if let Err(e) = self.module.define_function(alias_id, &mut self.ctx) {
-                    eprintln!("[WRAPPER ALIAS] Failed to define {}: {}", alias_wrapper_name, e);
-                    return Err(anyhow!("Failed to define wrapper alias '{}': {}", alias_wrapper_name, e));
-                }
-                self.module.clear_context(&mut self.ctx);
-            }
-        }
-
-        // Generate wrapper functions for exported closures (export const fn = () => {})
-        // These are stored in exported_objects, not exported_functions, but callers expect
-        // __wrapper_functionName to exist for uniform cross-module calling
-        self.generate_exported_closure_wrappers(&hir.init, &hir.exported_objects)?;
-
-        // Compile init statements as main (entry) or module init function (non-entry)
-        // Non-entry modules always need __perry_init_ generated because the entry module calls it.
-        // Entry module always needs main.
-        let should_compile_init = true;
-
-        if should_compile_init {
-            self.compile_init(&hir.name, &hir.init, &hir.exported_native_instances, &hir.exported_objects, &hir.exported_functions)?;
-        }
-
-        // Emit object file
-        let product = self.module.finish();
-        Ok(product.emit()?)
-    }
-
-    pub(crate) fn parse_cranelift_type(type_str: &str) -> types::Type {
-        match type_str {
-            "i32" => types::I32,
-            "i64" => types::I64,
-            "f32" => types::F32,
-            "f64" => types::F64,
-            _ => types::F64, // Default to f64 (NaN-boxed values)
         }
     }
+    Ok(())
+}
 
+// Collector and boxing-analysis walkers live in dedicated modules.
+use crate::collectors::{
+    collect_closures_in_stmts, collect_extern_func_refs_in_stmts,
+    collect_let_ids, collect_ref_ids_in_stmts,
+};
+use crate::boxed_vars::{collect_boxed_vars, collect_let_types_in_stmts};
+
+/// Mangle a HIR function name into an LLVM symbol, scoped by module prefix.
+///
+/// `perry_fn_<modprefix>__<funcname>`. The double-underscore between
+/// module prefix and function name is the delimiter — picked because
+/// JS identifiers can't contain `__` in user-visible code, so it can't
+/// collide with sanitized user names.
+fn scoped_fn_name(module_prefix: &str, hir_name: &str) -> String {
+    format!("perry_fn_{}__{}", module_prefix, sanitize(hir_name))
+}
+
+/// Mangle a class method name into an LLVM symbol, scoped by module
+/// prefix and class name.
+///
+/// `perry_method_<modprefix>__<class>__<method>`.
+fn scoped_method_name(module_prefix: &str, class_name: &str, method_name: &str) -> String {
+    format!(
+        "perry_method_{}__{}__{}",
+        module_prefix,
+        sanitize(class_name),
+        sanitize(method_name)
+    )
+}
+
+/// Sanitize a name for use in an LLVM symbol — replace anything that isn't
+/// `[A-Za-z0-9_]` with an underscore.
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Host default triple.
+/// Host-default LLVM target triple. Used when `CompileOptions.target`
+/// is `None`. Mirrors Cranelift's native-host detection in
+/// `crates/perry-codegen/src/codegen.rs:223-229`.
+fn default_target_triple() -> String {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "arm64-apple-macosx15.0.0".to_string()
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-macosx15.0.0".to_string()
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu".to_string()
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu".to_string()
+    } else if cfg!(target_os = "windows") {
+        "x86_64-pc-windows-msvc".to_string()
+    } else {
+        "arm64-apple-macosx15.0.0".to_string()
+    }
+}
+
+/// Map a Perry `--target <name>` string to the LLVM triple used by
+/// `clang -target <triple>` / `llc -mtriple=<triple>`. Mirrors the
+/// Cranelift mapping in `perry-codegen/src/codegen.rs:152-230`. The
+/// short names are the public `--target` surface exposed by the CLI;
+/// returning `None` leaves the triple to the host default.
+///
+/// Supported:
+///  * `ios`, `ios-simulator`           → aarch64-apple-ios
+///  * `watchos`, `watchos-simulator`   → aarch64-apple-watchos
+///  * `tvos`, `tvos-simulator`         → aarch64-apple-tvos
+///  * `android`                        → aarch64-unknown-linux-android
+///  * `linux` (x86_64 alias)           → x86_64-unknown-linux-gnu
+///  * `linux-aarch64`                  → aarch64-unknown-linux-gnu
+///  * `macos` (aarch64 alias)          → arm64-apple-macosx15.0.0
+///  * `macos-x86_64`                   → x86_64-apple-macosx15.0.0
+///  * `windows`                        → x86_64-pc-windows-msvc
+///  * anything else                    → None (use host default)
+pub fn resolve_target_triple(name: &str) -> Option<String> {
+    match name {
+        "ios" | "ios-simulator" => Some("aarch64-apple-ios".to_string()),
+        "watchos" | "watchos-simulator" => Some("aarch64-apple-watchos".to_string()),
+        "tvos" | "tvos-simulator" => Some("aarch64-apple-tvos".to_string()),
+        "android" => Some("aarch64-unknown-linux-android".to_string()),
+        "linux" => Some("x86_64-unknown-linux-gnu".to_string()),
+        "linux-aarch64" => Some("aarch64-unknown-linux-gnu".to_string()),
+        "macos" => Some("arm64-apple-macosx15.0.0".to_string()),
+        "macos-x86_64" => Some("x86_64-apple-macosx15.0.0".to_string()),
+        "windows" => Some("x86_64-pc-windows-msvc".to_string()),
+        _ => None,
+    }
 }

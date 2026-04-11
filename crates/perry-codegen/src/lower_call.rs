@@ -71,7 +71,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
 
             if effective_args.len() > 5 {
                 bail!(
-                    "perry-codegen-llvm Phase D.1: closure call with {} args (max 5)",
+                    "perry-codegen Phase D.1: closure call with {} args (max 5)",
                     effective_args.len()
                 );
             }
@@ -1336,7 +1336,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     }
 
     bail!(
-        "perry-codegen-llvm: Call callee shape not supported ({}) with {} args",
+        "perry-codegen: Call callee shape not supported ({}) with {} args",
         variant_name(callee),
         args.len()
     )

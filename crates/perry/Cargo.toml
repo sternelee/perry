@@ -23,7 +23,6 @@ perry-codegen-swiftui.workspace = true
 perry-codegen-glance.workspace = true
 perry-codegen-wear-tiles.workspace = true
 perry-codegen-wasm.workspace = true
-perry-codegen-llvm.workspace = true
 
 clap.workspace = true
 anyhow.workspace = true

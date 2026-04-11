@@ -489,7 +489,7 @@ pub extern "C" fn js_fetch_response_ok(handle: i64) -> f64 {
 /// the promise synchronously via `js_promise_resolve` rather than
 /// routing through the deferred `PENDING_RESOLUTIONS` queue. This
 /// avoids a hang in the LLVM backend's await loop (which does not
-/// drain the pump — see `crates/perry-codegen-llvm/src/expr.rs`
+/// drain the pump — see `crates/perry-codegen/src/expr.rs`
 /// `Expr::Await` for the rationale).
 #[no_mangle]
 pub unsafe extern "C" fn js_fetch_response_text(handle: i64) -> *mut perry_runtime::Promise {

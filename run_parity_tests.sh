@@ -7,21 +7,11 @@ TEST_DIR="$SCRIPT_DIR/test-files"
 OUTPUT_DIR="$SCRIPT_DIR/test-parity/output"
 REPORT_DIR="$SCRIPT_DIR/test-parity/reports"
 
-# Backend selection: set PERRY_BACKEND=llvm or pass --llvm to use the LLVM backend
-BACKEND="${PERRY_BACKEND:-cranelift}"
-for arg in "$@"; do
-    case "$arg" in
-        --llvm) BACKEND="llvm" ;;
-        --cranelift) BACKEND="cranelift" ;;
-    esac
-done
-if [[ "$BACKEND" == "llvm" ]]; then
-    BACKEND_FLAG="--backend llvm"
-    BACKEND_LABEL="LLVM"
-else
-    BACKEND_FLAG=""
-    BACKEND_LABEL="Cranelift"
-fi
+# LLVM is the only backend post-Phase K hard cutover. The --llvm /
+# --cranelift flags and PERRY_BACKEND env var are kept as no-ops for
+# backward compat with existing scripts.
+BACKEND_FLAG=""
+BACKEND_LABEL="LLVM"
 
 # Colors for output
 RED='\033[0;31m'

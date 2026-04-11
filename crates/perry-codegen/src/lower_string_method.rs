@@ -33,7 +33,7 @@ pub(crate) fn lower_string_method(
     match property {
         "indexOf" => {
             if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen-llvm: String.indexOf expects 1 or 2 args, got {}", args.len());
+                bail!("perry-codegen: String.indexOf expects 1 or 2 args, got {}", args.len());
             }
             let needle_box = lower_expr(ctx, &args[0])?;
             // Optional fromIndex.
@@ -65,7 +65,7 @@ pub(crate) fn lower_string_method(
         "slice" | "substring" => {
             if args.is_empty() || args.len() > 2 {
                 bail!(
-                    "perry-codegen-llvm: String.{} expects 1 or 2 args, got {}",
+                    "perry-codegen: String.{} expects 1 or 2 args, got {}",
                     property,
                     args.len()
                 );
@@ -103,7 +103,7 @@ pub(crate) fn lower_string_method(
         }
         "split" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.split expects 1 arg (delimiter), got {}", args.len());
+                bail!("perry-codegen: String.split expects 1 arg (delimiter), got {}", args.len());
             }
             // NOTE: we always call js_string_split here, even for regex
             // delimiters — the runtime will detect regex pointers via
@@ -125,7 +125,7 @@ pub(crate) fn lower_string_method(
         "toLowerCase" | "toUpperCase" | "trim" | "trimStart" | "trimEnd" => {
             if !args.is_empty() {
                 bail!(
-                    "perry-codegen-llvm: String.{} takes no args, got {}",
+                    "perry-codegen: String.{} takes no args, got {}",
                     property,
                     args.len()
                 );
@@ -145,7 +145,7 @@ pub(crate) fn lower_string_method(
         }
         "charAt" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.charAt expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.charAt expects 1 arg, got {}", args.len());
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -160,7 +160,7 @@ pub(crate) fn lower_string_method(
         }
         "repeat" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.repeat expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.repeat expects 1 arg, got {}", args.len());
             }
             let count_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -176,7 +176,7 @@ pub(crate) fn lower_string_method(
         "replace" | "replaceAll" => {
             if args.len() != 2 {
                 bail!(
-                    "perry-codegen-llvm: String.{} expects 2 args, got {}",
+                    "perry-codegen: String.{} expects 2 args, got {}",
                     property,
                     args.len()
                 );
@@ -237,7 +237,7 @@ pub(crate) fn lower_string_method(
         // str.at(i) / str.charCodeAt(i) / str.codePointAt(i)
         "at" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.at expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.at expects 1 arg, got {}", args.len());
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -248,7 +248,7 @@ pub(crate) fn lower_string_method(
         }
         "codePointAt" => {
             if args.is_empty() || args.len() > 1 {
-                bail!("perry-codegen-llvm: String.codePointAt expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.codePointAt expects 1 arg, got {}", args.len());
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -259,7 +259,7 @@ pub(crate) fn lower_string_method(
         }
         "charCodeAt" => {
             if args.is_empty() || args.len() > 1 {
-                bail!("perry-codegen-llvm: String.charCodeAt expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.charCodeAt expects 1 arg, got {}", args.len());
             }
             let idx_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -270,7 +270,7 @@ pub(crate) fn lower_string_method(
         }
         "lastIndexOf" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.lastIndexOf expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.lastIndexOf expects 1 arg, got {}", args.len());
             }
             let needle_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -285,7 +285,7 @@ pub(crate) fn lower_string_method(
         }
         "padStart" | "padEnd" => {
             if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen-llvm: String.{} expects 1 or 2 args, got {}", property, args.len());
+                bail!("perry-codegen: String.{} expects 1 or 2 args, got {}", property, args.len());
             }
             let len_d = lower_expr(ctx, &args[0])?;
             // Optional pad string; defaults to " " when missing.
@@ -319,7 +319,7 @@ pub(crate) fn lower_string_method(
             // 0 or 1 string arg. Empty arg → default ("NFC" handled by
             // the runtime when form is null).
             if args.len() > 1 {
-                bail!("perry-codegen-llvm: String.normalize expects 0 or 1 args, got {}", args.len());
+                bail!("perry-codegen: String.normalize expects 0 or 1 args, got {}", args.len());
             }
             let form_handle = if args.is_empty() {
                 "0".to_string()
@@ -339,7 +339,7 @@ pub(crate) fn lower_string_method(
         }
         "localeCompare" => {
             if args.is_empty() || args.len() > 3 {
-                bail!("perry-codegen-llvm: String.localeCompare expects 1-3 args, got {}", args.len());
+                bail!("perry-codegen: String.localeCompare expects 1-3 args, got {}", args.len());
             }
             let other_box = lower_expr(ctx, &args[0])?;
             // Ignore optional locale/options args.
@@ -358,7 +358,7 @@ pub(crate) fn lower_string_method(
         }
         "search" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.search expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.search expects 1 arg, got {}", args.len());
             }
             // The arg is a regex (literal or local).
             let re_box = lower_expr(ctx, &args[0])?;
@@ -374,7 +374,7 @@ pub(crate) fn lower_string_method(
         }
         "match" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.match expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.match expects 1 arg, got {}", args.len());
             }
             let re_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -401,7 +401,7 @@ pub(crate) fn lower_string_method(
         }
         "matchAll" => {
             if args.len() != 1 {
-                bail!("perry-codegen-llvm: String.matchAll expects 1 arg, got {}", args.len());
+                bail!("perry-codegen: String.matchAll expects 1 arg, got {}", args.len());
             }
             let re_box = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -417,7 +417,7 @@ pub(crate) fn lower_string_method(
         }
         "isWellFormed" => {
             if !args.is_empty() {
-                bail!("perry-codegen-llvm: String.isWellFormed takes no args, got {}", args.len());
+                bail!("perry-codegen: String.isWellFormed takes no args, got {}", args.len());
             }
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
@@ -426,7 +426,7 @@ pub(crate) fn lower_string_method(
         }
         "toWellFormed" => {
             if !args.is_empty() {
-                bail!("perry-codegen-llvm: String.toWellFormed takes no args, got {}", args.len());
+                bail!("perry-codegen: String.toWellFormed takes no args, got {}", args.len());
             }
             let blk = ctx.block();
             let recv_handle = unbox_to_i64(blk, &recv_box);
@@ -454,7 +454,7 @@ pub(crate) fn lower_string_method(
             // Legacy substr(start, length) — map to slice(start, start+length).
             // Without a dedicated runtime helper we approximate with substring.
             if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen-llvm: String.substr expects 1 or 2 args, got {}", args.len());
+                bail!("perry-codegen: String.substr expects 1 or 2 args, got {}", args.len());
             }
             let start_d = lower_expr(ctx, &args[0])?;
             let blk = ctx.block();
@@ -482,7 +482,7 @@ pub(crate) fn lower_string_method(
         "startsWith" | "endsWith" => {
             if args.len() != 1 {
                 bail!(
-                    "perry-codegen-llvm: String.{} expects 1 arg, got {}",
+                    "perry-codegen: String.{} expects 1 arg, got {}",
                     property,
                     args.len()
                 );
@@ -507,7 +507,7 @@ pub(crate) fn lower_string_method(
             // str.includes(sub) -> boolean. Implemented as
             // js_string_index_of(str, sub) != -1, then NaN-tagged.
             if args.is_empty() || args.len() > 2 {
-                bail!("perry-codegen-llvm: String.includes expects 1 or 2 args, got {}", args.len());
+                bail!("perry-codegen: String.includes expects 1 or 2 args, got {}", args.len());
             }
             let needle_box = lower_expr(ctx, &args[0])?;
             // Optional fromIndex param is ignored for the boolean form.

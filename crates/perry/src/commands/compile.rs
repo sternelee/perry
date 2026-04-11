@@ -58,14 +58,6 @@ pub struct CompileArgs {
     #[arg(long, default_value = "executable")]
     pub output_type: String,
 
-    /// Codegen backend: llvm (default, production) or cranelift (deprecated).
-    /// The LLVM backend is the primary build path. Cranelift remains
-    /// available during a grace period for regression reports but will be
-    /// removed in a future release — passing `--backend cranelift`
-    /// explicitly now emits a deprecation warning.
-    #[arg(long, default_value = "llvm")]
-    pub backend: String,
-
     /// Bundle TypeScript extensions from directory.
     /// Scans subdirectories for package.json with openclaw.extensions entries
     /// and compiles them into the binary as static plugins.
@@ -3450,13 +3442,8 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             },
             OutputFormat::Json => {}
         }
-        // Set the thread-local i18n table for codegen
-        perry_codegen::set_i18n_table(
-            table.translations.clone(),
-            table.keys.len(),
-            table.locale_count,
-            table.locale_codes.clone(),
-        );
+        // The LLVM backend threads i18n through `CompileOptions::i18n_table`
+        // (set per-job at the dispatch site below). No thread-local needed.
         Some(table)
     } else {
         None
@@ -4202,374 +4189,102 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         (table.translations.clone(), table.keys.len(), table.locale_count, table.locale_codes.clone())
     });
 
-    let use_llvm_backend = args.backend == "llvm";
-    // Phase K soft cutover: LLVM is now the default backend. Warn when
-    // the user explicitly passed `--backend cranelift` so they know the
-    // path is on its way out. The warning is a one-liner to stderr so
-    // it doesn't pollute stdout output (scripts that capture compile
-    // output stay clean).
-    if args.backend == "cranelift" {
-        eprintln!(
-            "warning: --backend cranelift is deprecated and will be removed \
-             in a future release. LLVM is the default backend as of \
-             Perry 0.4.139. Please report any LLVM regressions at \
-             https://github.com/PerryTS/perry/issues."
-        );
-    }
     // Phase J: detect bitcode-link mode. The actual .bc paths aren't known
     // yet (build_optimized_libs runs after compilation), but we decide the
     // mode here so the per-module codegen can emit .ll instead of .o.
-    let bitcode_link = use_llvm_backend
-        && std::env::var("PERRY_LLVM_BITCODE_LINK").ok().as_deref() == Some("1");
+    let bitcode_link =
+        std::env::var("PERRY_LLVM_BITCODE_LINK").ok().as_deref() == Some("1");
     let compile_results: Vec<Result<(PathBuf, Vec<u8>), String>> = ctx.native_modules.par_iter()
         .map(|(path, hir_module)| {
-            // --backend llvm: experimental path. Phase 1 only supports single-
-            // module programs with no imports/classes — the LLVM backend
-            // currently bails with a clear error for anything more complex.
-            // We intentionally skip every Cranelift setter below; they're
-            // irrelevant to the LLVM scaffold and will be plumbed through as
-            // later phases need them.
-            if use_llvm_backend {
-                let is_entry = path == &entry_path;
-                // Compute the prefix list of non-entry modules so the
-                // entry main can call each `<prefix>__init` in order.
-                // The prefix derivation must match what
-                // `perry_codegen_llvm::compile_module` does internally
-                // (sanitize(hir.name)) so the symbols match.
-                let sanitize_name = |s: &str| -> String {
-                    s.chars()
-                        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-                        .collect()
-                };
-                let non_entry_module_prefixes: Vec<String> = if is_entry {
-                    ctx.native_modules
-                        .iter()
-                        .filter_map(|(p, m)| {
-                            if p == &entry_path {
-                                None
-                            } else {
-                                Some(sanitize_name(&m.name))
-                            }
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                // Build import → source-prefix table for cross-module
-                // ExternFuncRef calls. For each Named import in this
-                // module, look up the source module's HIR by resolved
-                // path and capture its name. The LLVM codegen uses this
-                // to generate `perry_fn_<source_prefix>__<name>`.
-                let mut import_function_prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-                let mut namespace_imports: Vec<String> = Vec::new();
-                let mut imported_classes: Vec<perry_codegen_llvm::ImportedClass> = Vec::new();
-                let mut imported_enums: Vec<(String, Vec<(String, perry_hir::EnumValue)>)> = Vec::new();
-                let mut imported_async_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let mut imported_param_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-                let mut imported_return_types: std::collections::HashMap<String, perry_types::Type> = std::collections::HashMap::new();
-
-                for import in &hir_module.imports {
-                    if import.module_kind != perry_hir::ModuleKind::NativeCompiled {
-                        continue;
-                    }
-                    let resolved_path = match &import.resolved_path {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let resolved_path_str = resolved_path.clone();
-                    let source_module = ctx
-                        .native_modules
-                        .iter()
-                        .find(|(p, _)| p.to_string_lossy() == *resolved_path)
-                        .map(|(_, m)| m);
-                    let source_prefix = match &source_module {
-                        Some(m) => sanitize_name(&m.name),
-                        None => continue,
-                    };
-
-                    for spec in &import.specifiers {
-                        // Handle namespace imports (import * as X)
-                        if let perry_hir::ImportSpecifier::Namespace { local } = spec {
-                            namespace_imports.push(local.clone());
-                            // Register all exports from the source module
-                            if let Some(exports) = all_module_exports.get(&resolved_path_str) {
-                                for (export_name, origin_path) in exports {
-                                    let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
-                                    import_function_prefixes.insert(export_name.clone(), origin_prefix.clone());
-
-                                    let key = (origin_path.clone(), export_name.clone());
-                                    if let Some(&param_count) = exported_func_param_counts.get(&key) {
-                                        imported_param_counts.insert(export_name.clone(), param_count);
-                                    }
-                                    if let Some(class) = exported_classes.get(&key) {
-                                        imported_classes.push(perry_codegen_llvm::ImportedClass {
-                                            name: class.name.clone(),
-                                            local_alias: None,
-                                            source_prefix: origin_prefix.clone(),
-                                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
-                                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
-                                            parent_name: class.extends_name.clone(),
-                                        });
-                                    }
-                                    if let Some(members) = exported_enums.get(&key) {
-                                        imported_enums.push((export_name.clone(), members.clone()));
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-
-                        let (local_name, exported_name) = match spec {
-                            perry_hir::ImportSpecifier::Named { imported, local } => (local.clone(), imported.clone()),
-                            perry_hir::ImportSpecifier::Default { local } => (local.clone(), "default".to_string()),
-                            perry_hir::ImportSpecifier::Namespace { .. } => unreachable!(),
-                        };
-
-                        let key = (resolved_path_str.clone(), exported_name.clone());
-
-                        // Resolve effective prefix (follow re-exports)
-                        let effective_prefix = if let Some(exports) = all_module_exports.get(&resolved_path_str) {
-                            if let Some(origin_path) = exports.get(&exported_name) {
-                                if origin_path != &resolved_path_str {
-                                    compute_module_prefix(origin_path, &ctx.project_root)
-                                } else {
-                                    source_prefix.clone()
-                                }
-                            } else {
-                                source_prefix.clone()
-                            }
-                        } else {
-                            source_prefix.clone()
-                        };
-
-                        import_function_prefixes.insert(exported_name.clone(), effective_prefix.clone());
-                        if local_name != exported_name {
-                            import_function_prefixes.insert(local_name.clone(), effective_prefix.clone());
-                        }
-
-                        // Imported classes
-                        if let Some(class) = exported_classes.get(&key) {
-                            imported_classes.push(perry_codegen_llvm::ImportedClass {
-                                name: class.name.clone(),
-                                local_alias: if local_name != class.name { Some(local_name.clone()) } else { None },
-                                source_prefix: effective_prefix.clone(),
-                                constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
-                                method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
-                                parent_name: class.extends_name.clone(),
-                            });
-                        }
-
-                        // Imported param counts
-                        if let Some(&param_count) = exported_func_param_counts.get(&key) {
-                            imported_param_counts.insert(exported_name.clone(), param_count);
-                            if local_name != exported_name {
-                                imported_param_counts.insert(local_name.clone(), param_count);
-                            }
-                        }
-
-                        // Imported return types
-                        if let Some(return_type) = exported_func_return_types.get(&key) {
-                            imported_return_types.insert(local_name.clone(), return_type.clone());
-                        }
-
-                        // Imported async functions
-                        if exported_async_funcs.contains(&key) {
-                            imported_async_set.insert(local_name.clone());
-                            if local_name != exported_name {
-                                imported_async_set.insert(exported_name.clone());
-                            }
-                        }
-
-                        // Imported enums
-                        if let Some(members) = exported_enums.get(&key) {
-                            imported_enums.push((local_name.clone(), members.clone()));
-                        }
-                    }
-                }
-
-                // Type aliases from all modules
-                let type_alias_map: std::collections::HashMap<String, perry_types::Type> =
-                    all_type_aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-                // Resolve the CLI's short target name (ios/android/etc.) to
-                // an LLVM triple. `None` falls through to the host default
-                // inside `compile_module`.
-                let resolved_triple = target
-                    .as_deref()
-                    .and_then(perry_codegen_llvm::resolve_target_triple);
-                // ── Feature plumbing ──
-                // Mirror every setter the Cranelift dispatch site calls
-                // below (lines ~4435-4471) so the LLVM backend honors
-                // the same project configuration. Without this, the
-                // auto-optimize feature detection + linker flag
-                // construction can't see which modules the program
-                // actually uses and strips too much from libperry_stdlib.a.
-                let bundled_ext_vec: Vec<(String, String)> = if is_entry {
-                    bundled_extensions
-                        .iter()
-                        .map(|(ext_path, _plugin_id)| {
-                            let ext_prefix = compute_module_prefix(
-                                &ext_path.to_string_lossy(),
-                                &ctx.project_root,
-                            );
-                            (ext_path.to_string_lossy().to_string(), ext_prefix)
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                let native_module_init_names_vec: Vec<String> = if is_entry {
-                    non_entry_module_names.clone()
-                } else {
-                    Vec::new()
-                };
-                let js_module_specifiers_vec: Vec<String> = if needs_js_runtime {
-                    js_module_specifiers.clone()
-                } else {
-                    Vec::new()
-                };
-
-                let opts = perry_codegen_llvm::CompileOptions {
-                    target: resolved_triple,
-                    is_entry_module: is_entry,
-                    non_entry_module_prefixes,
-                    import_function_prefixes,
-                    emit_ir_only: bitcode_link,
-                    namespace_imports,
-                    imported_classes,
-                    imported_enums,
-                    imported_async_funcs: imported_async_set,
-                    type_aliases: type_alias_map,
-                    imported_func_param_counts: imported_param_counts,
-                    imported_func_return_types: imported_return_types,
-
-                    // Feature plumbing
-                    output_type: args.output_type.clone(),
-                    needs_stdlib: ctx.needs_stdlib,
-                    needs_ui: ctx.needs_ui,
-                    needs_geisterhand: ctx.needs_geisterhand,
-                    geisterhand_port: ctx.geisterhand_port,
-                    needs_js_runtime,
-                    enabled_features: compiled_features.clone(),
-                    native_module_init_names: native_module_init_names_vec,
-                    js_module_specifiers: js_module_specifiers_vec,
-                    bundled_extensions: bundled_ext_vec,
-                    native_library_functions: ffi_functions.clone(),
-                    i18n_table: i18n_snapshot.clone(),
-                };
-                let object_code = perry_codegen_llvm::compile_module(hir_module, opts)
-                    .map_err(|e| format!(
-                        "Error compiling module '{}' ({}) with --backend llvm: {:#}",
-                        hir_module.name, path.display(), e
-                    ))?;
-                let obj_name = hir_module.name
-                    .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
-                    .trim_matches('_')
-                    .to_string();
-                // In bitcode mode the bytes are .ll text; use .ll extension.
-                let ext = if bitcode_link { "ll" } else { "o" };
-                let obj_path = PathBuf::from(format!("{}.{}", obj_name, ext));
-                return Ok((obj_path, object_code));
-            }
-
-            // Propagate i18n table to this rayon worker thread
-            if let Some((ref translations, key_count, locale_count, ref locale_codes)) = i18n_snapshot {
-                perry_codegen::set_i18n_table(translations.clone(), key_count, locale_count, locale_codes.clone());
-            }
-
-            let mut compiler = perry_codegen::Compiler::new(target.as_deref())
-                .map_err(|e| format!("Failed to create compiler: {}", e))?;
-
+            // Compile this module to LLVM IR (or .ll text in bitcode-link mode)
+            // and return the object bytes for the linker to consume.
             let is_entry = path == &entry_path;
-            compiler.set_is_entry_module(is_entry);
-            compiler.set_output_type(args.output_type.clone());
+            // Compute the prefix list of non-entry modules so the
+            // entry main can call each `<prefix>__init` in order.
+            // The prefix derivation must match what
+            // `perry_codegen::compile_module` does internally
+            // (sanitize(hir.name)) so the symbols match.
+            let sanitize_name = |s: &str| -> String {
+                s.chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+                    .collect()
+            };
+            let non_entry_module_prefixes: Vec<String> = if is_entry {
+                ctx.native_modules
+                    .iter()
+                    .filter_map(|(p, m)| {
+                        if p == &entry_path {
+                            None
+                        } else {
+                            Some(sanitize_name(&m.name))
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Build import → source-prefix table for cross-module
+            // ExternFuncRef calls. For each Named import in this
+            // module, look up the source module's HIR by resolved
+            // path and capture its name. The LLVM codegen uses this
+            // to generate `perry_fn_<source_prefix>__<name>`.
+            let mut import_function_prefixes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            let mut namespace_imports: Vec<String> = Vec::new();
+            let mut imported_classes: Vec<perry_codegen::ImportedClass> = Vec::new();
+            let mut imported_enums: Vec<(String, Vec<(String, perry_hir::EnumValue)>)> = Vec::new();
+            let mut imported_async_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut imported_param_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut imported_return_types: std::collections::HashMap<String, perry_types::Type> = std::collections::HashMap::new();
 
-            if !compiled_features.is_empty() {
-                compiler.set_enabled_features(compiled_features.clone());
-            }
-
-            if is_entry {
-                for module_name in &non_entry_module_names {
-                    compiler.add_native_module_init(module_name.clone());
-                }
-                if !bundled_extensions.is_empty() {
-                    for (ext_path, _plugin_id) in &bundled_extensions {
-                        let ext_prefix = compute_module_prefix(
-                            &ext_path.to_string_lossy(),
-                            &ctx.project_root,
-                        );
-                        compiler.add_bundled_extension(
-                            ext_path.to_string_lossy().to_string(),
-                            ext_prefix,
-                        );
-                    }
-                }
-            }
-
-            compiler.set_needs_stdlib(ctx.needs_stdlib);
-            compiler.set_needs_ui(ctx.needs_ui);
-            compiler.set_needs_geisterhand(ctx.needs_geisterhand);
-            compiler.set_geisterhand_port(ctx.geisterhand_port);
-
-            if !ffi_functions.is_empty() {
-                compiler.set_native_library_functions(ffi_functions.clone());
-            }
-
-            if needs_js_runtime {
-                compiler.set_needs_js_runtime(true);
-                for specifier in &js_module_specifiers {
-                    compiler.add_js_module(specifier.clone());
-                }
-            }
-
-            // Register all type aliases so type_to_abi can resolve Named types.
-            // Type aliases may come from any module (e.g., `type BlockTag = ... | number`)
-            // and affect function parameter ABI when used across modules.
-            for (name, ty) in &all_type_aliases {
-                compiler.register_type_alias(name.clone(), ty.clone());
-            }
-
-            // Register imported classes from other native modules
             for import in &hir_module.imports {
                 if import.module_kind != perry_hir::ModuleKind::NativeCompiled {
                     continue;
                 }
-
                 let resolved_path = match &import.resolved_path {
-                    Some(p) => p.clone(),
+                    Some(p) => p,
+                    None => continue,
+                };
+                let resolved_path_str = resolved_path.clone();
+                let source_module = ctx
+                    .native_modules
+                    .iter()
+                    .find(|(p, _)| p.to_string_lossy() == *resolved_path)
+                    .map(|(_, m)| m);
+                let source_prefix = match &source_module {
+                    Some(m) => sanitize_name(&m.name),
                     None => continue,
                 };
 
-                let resolved_path_str = resolved_path.clone();
-                let source_module_prefix = compute_module_prefix(&resolved_path_str, &ctx.project_root);
-
                 for spec in &import.specifiers {
-                    match spec {
-                        perry_hir::ImportSpecifier::Namespace { local } => {
-                            compiler.register_namespace_import(local.clone());
-                            if let Some(exports) = all_module_exports.get(&resolved_path_str) {
-                                for (export_name, origin_path) in exports {
-                                    let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
-                                    let _ = compiler.pre_declare_import_export(export_name, export_name, &origin_prefix);
+                    // Handle namespace imports (import * as X)
+                    if let perry_hir::ImportSpecifier::Namespace { local } = spec {
+                        namespace_imports.push(local.clone());
+                        // Register all exports from the source module
+                        if let Some(exports) = all_module_exports.get(&resolved_path_str) {
+                            for (export_name, origin_path) in exports {
+                                let origin_prefix = compute_module_prefix(origin_path, &ctx.project_root);
+                                import_function_prefixes.insert(export_name.clone(), origin_prefix.clone());
 
-                                    let key = (origin_path.clone(), export_name.clone());
-                                    if let Some(&param_count) = exported_func_param_counts.get(&key) {
-                                        compiler.register_imported_func_param_count(export_name.clone(), param_count);
-                                        let _ = compiler.pre_declare_import_wrapper(export_name, &origin_prefix, param_count);
-                                    }
-
-                                    if let Some(class) = exported_classes.get(&key) {
-                                        let _ = compiler.register_imported_class(class, None, &origin_prefix);
-                                    }
-
-                                    if let Some(members) = exported_enums.get(&key) {
-                                        compiler.register_imported_enum(export_name, members);
-                                    }
+                                let key = (origin_path.clone(), export_name.clone());
+                                if let Some(&param_count) = exported_func_param_counts.get(&key) {
+                                    imported_param_counts.insert(export_name.clone(), param_count);
+                                }
+                                if let Some(class) = exported_classes.get(&key) {
+                                    imported_classes.push(perry_codegen::ImportedClass {
+                                        name: class.name.clone(),
+                                        local_alias: None,
+                                        source_prefix: origin_prefix.clone(),
+                                        constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                                        method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                                        parent_name: class.extends_name.clone(),
+                                    });
+                                }
+                                if let Some(members) = exported_enums.get(&key) {
+                                    imported_enums.push((export_name.clone(), members.clone()));
                                 }
                             }
-                            continue;
                         }
-                        _ => {}
+                        continue;
                     }
 
                     let (local_name, exported_name) = match spec {
@@ -4580,80 +4295,149 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
 
                     let key = (resolved_path_str.clone(), exported_name.clone());
 
+                    // Resolve effective prefix (follow re-exports)
                     let effective_prefix = if let Some(exports) = all_module_exports.get(&resolved_path_str) {
                         if let Some(origin_path) = exports.get(&exported_name) {
                             if origin_path != &resolved_path_str {
                                 compute_module_prefix(origin_path, &ctx.project_root)
                             } else {
-                                source_module_prefix.clone()
+                                source_prefix.clone()
                             }
                         } else {
-                            source_module_prefix.clone()
+                            source_prefix.clone()
                         }
                     } else {
-                        source_module_prefix.clone()
+                        source_prefix.clone()
                     };
 
+                    import_function_prefixes.insert(exported_name.clone(), effective_prefix.clone());
+                    if local_name != exported_name {
+                        import_function_prefixes.insert(local_name.clone(), effective_prefix.clone());
+                    }
+
+                    // Imported classes
                     if let Some(class) = exported_classes.get(&key) {
-                        let _ = compiler.register_imported_class(class, Some(&local_name), &effective_prefix);
+                        imported_classes.push(perry_codegen::ImportedClass {
+                            name: class.name.clone(),
+                            local_alias: if local_name != class.name { Some(local_name.clone()) } else { None },
+                            source_prefix: effective_prefix.clone(),
+                            constructor_param_count: class.constructor.as_ref().map(|c| c.params.len()).unwrap_or(0),
+                            method_names: class.methods.iter().map(|m| m.name.clone()).collect(),
+                            parent_name: class.extends_name.clone(),
+                        });
                     }
 
+                    // Imported param counts
                     if let Some(&param_count) = exported_func_param_counts.get(&key) {
-                        compiler.register_imported_func_param_count(exported_name.clone(), param_count);
-                        let _ = compiler.pre_declare_import_wrapper(&exported_name, &effective_prefix, param_count);
+                        imported_param_counts.insert(exported_name.clone(), param_count);
                         if local_name != exported_name {
-                            compiler.register_imported_func_param_count(local_name.clone(), param_count);
-                            compiler.register_import_wrapper_alias(&local_name, &exported_name, param_count);
+                            imported_param_counts.insert(local_name.clone(), param_count);
                         }
                     }
+
+                    // Imported return types
                     if let Some(return_type) = exported_func_return_types.get(&key) {
-                        compiler.register_imported_func_return_type(local_name.clone(), return_type.clone());
+                        imported_return_types.insert(local_name.clone(), return_type.clone());
                     }
+
+                    // Imported async functions
                     if exported_async_funcs.contains(&key) {
-                        compiler.register_imported_async_func(local_name.clone());
-                        // Also register under the exported name (e.g. for re-exports where the
-                        // call site references the original symbol).
+                        imported_async_set.insert(local_name.clone());
                         if local_name != exported_name {
-                            compiler.register_imported_async_func(exported_name.clone());
+                            imported_async_set.insert(exported_name.clone());
                         }
                     }
 
-                    let _ = compiler.pre_declare_import_export(&exported_name, &local_name, &effective_prefix);
-
+                    // Imported enums
                     if let Some(members) = exported_enums.get(&key) {
-                        compiler.register_imported_enum(&local_name, members);
+                        imported_enums.push((local_name.clone(), members.clone()));
                     }
                 }
             }
 
-            let module_name = hir_module.name.clone();
-            let module_path = path.display().to_string();
-            let object_code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                compiler.compile_module(hir_module)
-            })) {
-                Ok(Ok(code)) => code,
-                Ok(Err(e)) => {
-                    return Err(format!("Error compiling module '{}' ({}): {}", module_name, module_path, e));
-                }
-                Err(panic_info) => {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    return Err(format!("PANIC compiling module '{}' ({}): {}", module_name, module_path, msg));
-                }
+            // Type aliases from all modules
+            let type_alias_map: std::collections::HashMap<String, perry_types::Type> =
+                all_type_aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+            // Resolve the CLI's short target name (ios/android/etc.) to
+            // an LLVM triple. `None` falls through to the host default
+            // inside `compile_module`.
+            let resolved_triple = target
+                .as_deref()
+                .and_then(perry_codegen::resolve_target_triple);
+            // ── Feature plumbing ──
+            // Mirror every setter the Cranelift dispatch site calls
+            // below (lines ~4435-4471) so the LLVM backend honors
+            // the same project configuration. Without this, the
+            // auto-optimize feature detection + linker flag
+            // construction can't see which modules the program
+            // actually uses and strips too much from libperry_stdlib.a.
+            let bundled_ext_vec: Vec<(String, String)> = if is_entry {
+                bundled_extensions
+                    .iter()
+                    .map(|(ext_path, _plugin_id)| {
+                        let ext_prefix = compute_module_prefix(
+                            &ext_path.to_string_lossy(),
+                            &ctx.project_root,
+                        );
+                        (ext_path.to_string_lossy().to_string(), ext_prefix)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let native_module_init_names_vec: Vec<String> = if is_entry {
+                non_entry_module_names.clone()
+            } else {
+                Vec::new()
+            };
+            let js_module_specifiers_vec: Vec<String> = if needs_js_runtime {
+                js_module_specifiers.clone()
+            } else {
+                Vec::new()
             };
 
+            let opts = perry_codegen::CompileOptions {
+                target: resolved_triple,
+                is_entry_module: is_entry,
+                non_entry_module_prefixes,
+                import_function_prefixes,
+                emit_ir_only: bitcode_link,
+                namespace_imports,
+                imported_classes,
+                imported_enums,
+                imported_async_funcs: imported_async_set,
+                type_aliases: type_alias_map,
+                imported_func_param_counts: imported_param_counts,
+                imported_func_return_types: imported_return_types,
+
+                // Feature plumbing
+                output_type: args.output_type.clone(),
+                needs_stdlib: ctx.needs_stdlib,
+                needs_ui: ctx.needs_ui,
+                needs_geisterhand: ctx.needs_geisterhand,
+                geisterhand_port: ctx.geisterhand_port,
+                needs_js_runtime,
+                enabled_features: compiled_features.clone(),
+                native_module_init_names: native_module_init_names_vec,
+                js_module_specifiers: js_module_specifiers_vec,
+                bundled_extensions: bundled_ext_vec,
+                native_library_functions: ffi_functions.clone(),
+                i18n_table: i18n_snapshot.clone(),
+            };
+            let object_code = perry_codegen::compile_module(hir_module, opts)
+                .map_err(|e| format!(
+                    "Error compiling module '{}' ({}) with --backend llvm: {:#}",
+                    hir_module.name, path.display(), e
+                ))?;
             let obj_name = hir_module.name
                 .replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
                 .trim_matches('_')
                 .to_string();
-            let obj_path = PathBuf::from(format!("{}.o", obj_name));
-
-            Ok((obj_path, object_code))
+            // In bitcode mode the bytes are .ll text; use .ll extension.
+            let ext = if bitcode_link { "ll" } else { "o" };
+            let obj_path = PathBuf::from(format!("{}.{}", obj_name, ext));
+            return Ok((obj_path, object_code));
         })
         .collect();
 
@@ -4823,7 +4607,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
                 }
             }
             if let OutputFormat::Text = format { eprintln!("  Generating stubs for {} missing symbols ({} data, {} functions, {} identity)", missing.len(), md.len(), mf.len(), mi.len()); for s in &missing { eprintln!("    - {}", s); } }
-            let stub_bytes = perry_codegen::generate_stub_object(&md, &mf, &mi, target.as_deref())?;
+            let stub_bytes = perry_codegen::stubs::generate_stub_object(&md, &mf, &mi, target.as_deref())?;
             let stub_path = PathBuf::from("_perry_stubs.o");
             fs::write(&stub_path, &stub_bytes)?;
             obj_paths.push(stub_path);
@@ -4854,7 +4638,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             let runtime_bc = optimized_libs.runtime_bc.as_ref().unwrap();
             let stdlib_bc = optimized_libs.stdlib_bc.as_deref();
 
-            match perry_codegen_llvm::linker::bitcode_link_pipeline(
+            match perry_codegen::linker::bitcode_link_pipeline(
                 &ll_files,
                 runtime_bc,
                 stdlib_bc,
@@ -4898,7 +4682,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
         for p in &obj_paths {
             if p.extension().and_then(|e| e.to_str()) == Some("ll") {
                 let ll_text = fs::read_to_string(p)?;
-                let obj_bytes = perry_codegen_llvm::linker::compile_ll_to_object(
+                let obj_bytes = perry_codegen::linker::compile_ll_to_object(
                     &ll_text,
                     target.as_deref(),
                 )?;
@@ -4962,7 +4746,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             format!("_perry_init_{}", sanitized)
         }).collect();
         if !stub_init_names.is_empty() {
-            let stub_bytes = perry_codegen::generate_stub_object(&[], &stub_init_names, &[], target.as_deref())?;
+            let stub_bytes = perry_codegen::stubs::generate_stub_object(&[], &stub_init_names, &[], target.as_deref())?;
             let stub_path = PathBuf::from("_perry_failed_stubs.o");
             fs::write(&stub_path, &stub_bytes)?;
             obj_paths.push(stub_path);

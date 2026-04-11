@@ -160,7 +160,6 @@ pub fn run(args: RunArgs, format: OutputFormat, use_color: bool, verbose: u8) ->
         target: target.clone(),
         app_bundle_id: Some(bundle_id),
         output_type: "executable".to_string(),
-        backend: "cranelift".to_string(),
         bundle_extensions: None,
         type_check: args.type_check,
         minify: target.as_deref() == Some("web"),
