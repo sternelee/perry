@@ -341,7 +341,19 @@ pub(crate) fn is_numeric_expr(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         // incorrectly (NaN compared with 0.0 is unordered → false).
         // Comparisons go through the slow path (js_is_truthy) which
         // dispatches on the NaN tag.
-        Expr::Binary { op, .. } => !matches!(op, BinaryOp::Add), // Add may concat strings
+        //
+        // For Add: only numeric when BOTH operands are statically
+        // numeric (otherwise it could be string concatenation). The
+        // recursive check is critical for nested arithmetic like
+        // `sum + p.x + p.y` which parses as `((sum + p.x) + p.y)` —
+        // the inner Add must be recognized as numeric for the outer
+        // Add to also be numeric, otherwise the outer one wraps the
+        // inner result in `js_number_coerce` and prevents LLVM from
+        // doing GVN/LICM on the chain.
+        Expr::Binary { op: BinaryOp::Add, left, right } => {
+            is_numeric_expr(ctx, left) && is_numeric_expr(ctx, right)
+        }
+        Expr::Binary { op, .. } => !matches!(op, BinaryOp::Add),
         Expr::Update { .. } => true,
         Expr::DateNow => true,
         // `obj.field` where the field is declared as `number` on the
