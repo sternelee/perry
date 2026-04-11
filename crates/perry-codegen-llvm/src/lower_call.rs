@@ -1562,6 +1562,27 @@ pub(crate) fn lower_builtin_new(
             Ok(Some(handle))
         }
 
+        "Promise" => {
+            // `new Promise((resolve, reject) => { ... })` — the runtime's
+            // `js_promise_new_with_executor` takes the closure, allocates
+            // the resolve/reject helper closures, and invokes the executor
+            // synchronously. The executor must actually run to honor
+            // imperative patterns like `new Promise(r => { setTimeout(r,1) })`
+            // that are common in the tests.
+            if args.is_empty() {
+                let p = ctx.block().call(I64, "js_promise_new", &[]);
+                return Ok(Some(nanbox_pointer_inline(ctx.block(), &p)));
+            }
+            let exec_box = lower_expr(ctx, &args[0])?;
+            let blk = ctx.block();
+            let exec_handle = unbox_to_i64(blk, &exec_box);
+            let p = blk.call(
+                I64,
+                "js_promise_new_with_executor",
+                &[(I64, &exec_handle)],
+            );
+            Ok(Some(nanbox_pointer_inline(blk, &p)))
+        }
         "WeakMap" => {
             // Lower init iterable args for side effects; the runtime's
             // js_weakmap_new takes no args and the HIR lowering of

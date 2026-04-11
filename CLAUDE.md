@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.129
+**Current Version:** 0.4.130
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,10 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.130 (llvm-backend)
+- feat: `new Promise((resolve, reject) => {...})` now runs the executor via `js_promise_new_with_executor`. Previously `lower_builtin_new` had no Promise case, so `new Promise(...)` fell through to `js_object_alloc` which returned an empty object — the executor callback never ran, meaning `new Promise(r => { r(42); })` produced an unresolved promise. `test_gap_node_process` DIFF 2 → MATCH.
+- NOTE: Tests that schedule `setTimeout(resolve, N)` inside the executor and then `await` the promise now HANG or CRASH because the event loop doesn't drive timers during `await`'s busy-wait. Affected: `test_gap_encoding_timers`, `test_gap_node_fs`, `test_gap_async_advanced` (regress from DIFF → CRASH). Net sweep: 102 → 103 MATCH.
 
 ### v0.4.129 (llvm-backend)
 - fix: Map/Set method dispatch on `this.field` receivers. HIR lowering only folds `m.set(k,v)` → `MapSet` when `m` is a plain Ident; class methods accessing a Map-typed field (`this.handlers.set(...)`) fell through to the generic Call path which `js_native_call_method` couldn't resolve (set/get returned undefined). Two fixes:

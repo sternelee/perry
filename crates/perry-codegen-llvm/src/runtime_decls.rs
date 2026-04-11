@@ -557,6 +557,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_leave_finally", VOID, &[]);
     module.declare_function("js_await_any_promise", DOUBLE, &[DOUBLE]);
     module.declare_function("js_promise_new", I64, &[]);
+    module.declare_function("js_promise_new_with_executor", I64, &[I64]);
     module.declare_function("js_promise_resolve", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_reject", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_resolved", I64, &[DOUBLE]);
