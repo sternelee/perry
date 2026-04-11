@@ -302,9 +302,15 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // Exit type parameter scope
     ctx.exit_type_param_scope();
 
-    // Track generator functions so for-of can use iterator protocol
+    // Track generator functions so for-of can use iterator protocol.
+    // Async generators are tracked separately so for-of paths can wrap
+    // `__iter.next()` in `Expr::Await` (`async function*` returns
+    // `Promise<{value, done}>`).
     if fn_decl.function.is_generator {
         ctx.generator_func_names.insert(name.clone());
+        if fn_decl.function.is_async {
+            ctx.async_generator_func_names.insert(name.clone());
+        }
     }
 
     Ok(Function {
@@ -2066,6 +2072,117 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             result.push(Stmt::Switch { discriminant, cases });
         }
         ast::Stmt::ForOf(for_of_stmt) => {
+            // --- Iterator-protocol path for generator function calls ---
+            // Detect: `for [await] (const x of genFunc(...))` where genFunc is
+            // function* / async function*. Without this path the for-of falls
+            // through to the array-index desugar which segfaults on a real
+            // iterator object. Mirrors `lower::lower_stmt`'s ForOf branch.
+            let is_generator_call = if let ast::Expr::Call(call) = &*for_of_stmt.right {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = &**callee_expr {
+                        ctx.generator_func_names.contains(ident.sym.as_ref())
+                    } else { false }
+                } else { false }
+            } else { false };
+            let callee_is_async_gen = if let ast::Expr::Call(call) = &*for_of_stmt.right {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = &**callee_expr {
+                        ctx.async_generator_func_names.contains(ident.sym.as_ref())
+                    } else { false }
+                } else { false }
+            } else { false };
+            let needs_await = for_of_stmt.is_await || callee_is_async_gen;
+
+            let iter_from_class: Option<perry_types::FuncId> = if let ast::Expr::New(new_expr) = &*for_of_stmt.right {
+                if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
+                    let class_name = ident.sym.to_string();
+                    ctx.iterator_func_for_class.get(&class_name).copied()
+                } else { None }
+            } else { None };
+
+            if is_generator_call || iter_from_class.is_some() {
+                let scope_mark = ctx.push_block_scope();
+                let iter_expr_raw = lower_expr(ctx, &for_of_stmt.right)?;
+                let iter_expr = if let Some(iter_fn_id) = iter_from_class {
+                    Expr::Call {
+                        callee: Box::new(Expr::FuncRef(iter_fn_id)),
+                        args: vec![iter_expr_raw],
+                        type_args: vec![],
+                    }
+                } else { iter_expr_raw };
+                let iter_id = ctx.fresh_local();
+                ctx.locals.push((format!("__iter_{}", iter_id), iter_id, Type::Any));
+                result.push(Stmt::Let {
+                    id: iter_id,
+                    name: format!("__iter_{}", iter_id),
+                    ty: Type::Any,
+                    mutable: false,
+                    init: Some(iter_expr),
+                });
+
+                let result_id = ctx.fresh_local();
+                ctx.locals.push((format!("__result_{}", result_id), result_id, Type::Any));
+                let raw_next_call = Expr::Call {
+                    callee: Box::new(Expr::PropertyGet {
+                        object: Box::new(Expr::LocalGet(iter_id)),
+                        property: "next".to_string(),
+                    }),
+                    args: vec![],
+                    type_args: vec![],
+                };
+                let next_call = if needs_await {
+                    Expr::Await(Box::new(raw_next_call))
+                } else { raw_next_call };
+                result.push(Stmt::Let {
+                    id: result_id,
+                    name: format!("__result_{}", result_id),
+                    ty: Type::Any,
+                    mutable: true,
+                    init: Some(next_call.clone()),
+                });
+
+                let item_name = if let ast::ForHead::VarDecl(var_decl) = &for_of_stmt.left {
+                    if let Some(decl) = var_decl.decls.first() {
+                        if let ast::Pat::Ident(ident) = &decl.name {
+                            ident.id.sym.to_string()
+                        } else { "__gen_item".to_string() }
+                    } else { "__gen_item".to_string() }
+                } else { "__gen_item".to_string() };
+                let item_id = ctx.define_local(item_name.clone(), Type::Any);
+
+                let mut body_stmts: Vec<Stmt> = Vec::new();
+                body_stmts.push(Stmt::Let {
+                    id: item_id,
+                    name: item_name,
+                    ty: Type::Any,
+                    mutable: false,
+                    init: Some(Expr::PropertyGet {
+                        object: Box::new(Expr::LocalGet(result_id)),
+                        property: "value".to_string(),
+                    }),
+                });
+                let user_body = lower_body_stmt(ctx, &for_of_stmt.body)?;
+                body_stmts.extend(user_body);
+                body_stmts.push(Stmt::Expr(Expr::LocalSet(
+                    result_id,
+                    Box::new(next_call),
+                )));
+
+                result.push(Stmt::While {
+                    condition: Expr::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(Expr::PropertyGet {
+                            object: Box::new(Expr::LocalGet(result_id)),
+                            property: "done".to_string(),
+                        }),
+                    },
+                    body: body_stmts,
+                });
+
+                ctx.pop_block_scope(scope_mark);
+                return Ok(result);
+            }
+
             // Desugar for-of to a regular for loop (same as in lower_stmt).
             // Push a block scope so loop variables and internal temporaries don't leak.
             let for_scope_mark = ctx.push_block_scope();
