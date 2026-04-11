@@ -152,6 +152,17 @@ pub(crate) struct FnCtx<'a> {
     /// unique non-zero id (anonymous objects use 0). Used by
     /// `lower_new` and the virtual method dispatch helper.
     pub class_ids: &'a std::collections::HashMap<String, u32>,
+    /// Per-class `keys_array` global variable names. Each entry is
+    /// `class_name → @perry_class_keys_<modprefix>__<sanitized_class>`.
+    /// Built once at module init via `js_build_class_keys_array` and
+    /// stored in the global. `compile_new` looks up the class here
+    /// and emits a direct global load + `js_object_alloc_class_inline_keys`
+    /// call (skipping the SHAPE_CACHE lookup AND the
+    /// `js_object_alloc_class_with_keys` runtime function entirely on
+    /// the hot allocation path). When a class is missing from this
+    /// map, `compile_new` falls back to the slower
+    /// `js_object_alloc_class_with_keys` path.
+    pub class_keys_globals: &'a std::collections::HashMap<String, String>,
     /// Per-function param signature: `(declared_param_count,
     /// has_rest_param)`. Used by FuncRef call sites to know whether
     /// to bundle trailing arguments into a rest array.

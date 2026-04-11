@@ -118,7 +118,13 @@ pub fn arena_alloc(size: usize, align: usize) -> *mut u8 {
 /// Returns pointer to usable memory AFTER the GcHeader.
 /// The object is NOT added to any tracking list — arena objects are discovered
 /// by walking arena blocks linearly.
-#[inline]
+///
+/// `#[inline(always)]` so the bitcode-link path can fully inline
+/// this into user IR — the bump-pointer pattern is small enough
+/// (~10 instructions on the fast path) that inlining is a clear win
+/// and the slow path (free-list walk + new arena block) is gated
+/// behind a cold branch.
+#[inline(always)]
 pub fn arena_alloc_gc(size: usize, align: usize, obj_type: u8) -> *mut u8 {
     use crate::gc::{GcHeader, GC_HEADER_SIZE, GC_FLAG_ARENA};
 

@@ -185,6 +185,14 @@ pub(crate) struct CrossModuleCtx {
     pub type_aliases: std::collections::HashMap<String, perry_types::Type>,
     pub imported_func_param_counts: std::collections::HashMap<String, usize>,
     pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+    /// Per-class `keys_array` global variable names. Each entry maps
+    /// `class_name → @perry_class_keys_<modprefix>__<sanitized_class>`.
+    /// Built once in `compile_module` (one entry per class — local
+    /// definitions + imported stubs). `compile_new` looks up the
+    /// class here and emits a direct global load + the inline-keys
+    /// allocator. See `js_object_alloc_class_inline_keys` in
+    /// `perry-runtime/src/object.rs`.
+    pub class_keys_globals: std::collections::HashMap<String, String>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -346,6 +354,76 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
     }
 
+    // Per-class keys-array globals: each class gets a single internal
+    // global `@perry_class_keys_<modprefix>__<class>` that holds the
+    // shared keys_array pointer (built ONCE at module init via
+    // js_build_class_keys_array). Every `new ClassName()` site then
+    // emits a direct global load + inline allocator call, bypassing
+    // the per-call SHAPE_CACHE lookup AND the runtime
+    // js_object_alloc_class_with_keys function entirely on the hot
+    // allocation path.
+    //
+    // Per-class init data: (global_name, packed_keys_string, total_field_count).
+    // Used by emit_string_pool to emit the build-call sequence.
+    let mut class_keys_init_data: Vec<(String, String, u32)> = Vec::new();
+    let mut class_keys_globals_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for c in &hir.classes {
+        let global_name = format!(
+            "perry_class_keys_{}__{}",
+            module_prefix,
+            sanitize(&c.name),
+        );
+        llmod.add_internal_global(&global_name, I64, "0");
+
+        // Build the packed-keys string. Format: each field name
+        // followed by `\0`. Parent classes contribute their fields
+        // first (walking from deepest ancestor down) so the slot
+        // order matches `class_field_global_index`'s assumption.
+        let mut packed_keys = String::new();
+        let mut total_field_count = c.fields.len() as u32;
+        let mut parent_chain: Vec<String> = Vec::new();
+        let mut p = c.extends_name.clone();
+        while let Some(parent_name) = p {
+            if let Some(parent) = hir.classes.iter().find(|cls| cls.name == parent_name) {
+                parent_chain.push(parent_name.clone());
+                total_field_count += parent.fields.len() as u32;
+                p = parent.extends_name.clone();
+            } else {
+                break;
+            }
+        }
+        // Walk from deepest ancestor to direct parent.
+        for parent_name in parent_chain.iter().rev() {
+            if let Some(parent) = hir.classes.iter().find(|cls| cls.name == *parent_name) {
+                for f in &parent.fields {
+                    packed_keys.push_str(&f.name);
+                    packed_keys.push('\0');
+                }
+            }
+        }
+        for f in &c.fields {
+            packed_keys.push_str(&f.name);
+            packed_keys.push('\0');
+        }
+        class_keys_globals_map.insert(c.name.clone(), global_name.clone());
+        class_keys_init_data.push((global_name, packed_keys, total_field_count));
+    }
+    // Same naming convention for IMPORTED class stubs.
+    for c in imported_class_stubs.iter() {
+        if hir.classes.iter().any(|local| local.name == c.name) {
+            continue;
+        }
+        let global_name = format!(
+            "perry_class_keys_{}__{}",
+            module_prefix,
+            sanitize(&c.name),
+        );
+        llmod.add_internal_global(&global_name, I64, "0");
+        class_keys_globals_map.insert(c.name.clone(), global_name.clone());
+        class_keys_init_data.push((global_name, String::new(), 0));
+    }
+
     // Build the cross-module context bundle from CompileOptions.
     let cross_module = CrossModuleCtx {
         namespace_imports: opts.namespace_imports.iter().cloned().collect(),
@@ -354,6 +432,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         type_aliases: opts.type_aliases,
         imported_func_param_counts: opts.imported_func_param_counts,
         imported_func_return_types: opts.imported_func_return_types,
+        class_keys_globals: class_keys_globals_map,
     };
 
     // Module-level globals registry. Pre-walk:
@@ -446,6 +525,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             static_field_globals.insert((c.name.clone(), sf.name.clone()), name);
         }
     }
+
 
     // Method registry: (class_name, method_name) → LLVM function name.
     // Built from `class.methods` so the dispatch in `lower_call` knows
@@ -840,7 +920,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // `__perry_init_strings_<prefix>` function that runs once at startup.
     // The function name is scoped by module prefix so multiple modules
     // can each have their own string-pool init without colliding.
-    emit_string_pool(&mut llmod, &strings, &module_prefix);
+    emit_string_pool(&mut llmod, &strings, &module_prefix, &class_keys_init_data, &class_ids);
 
     let ll_text = llmod.to_ir();
     log::debug!(
@@ -942,6 +1022,7 @@ fn compile_function(
         is_async_fn: f.is_async,
         static_field_globals,
         class_ids,
+        class_keys_globals: &cross_module.class_keys_globals,
         func_signatures,
         boxed_vars,
         closure_rest_params,
@@ -1158,6 +1239,7 @@ fn compile_closure(
         is_async_fn: false,
         static_field_globals,
         class_ids,
+        class_keys_globals: &cross_module.class_keys_globals,
         func_signatures,
         boxed_vars: closure_boxed_vars,
         closure_rest_params,
@@ -1268,6 +1350,7 @@ fn compile_method(
         is_async_fn: method.is_async,
         static_field_globals,
         class_ids,
+        class_keys_globals: &cross_module.class_keys_globals,
         func_signatures,
         boxed_vars: method_boxed_vars,
         closure_rest_params,
@@ -1374,6 +1457,7 @@ fn compile_module_entry(
             is_async_fn: false,
             static_field_globals,
             class_ids,
+            class_keys_globals: &cross_module.class_keys_globals,
             func_signatures,
             boxed_vars: main_boxed_vars,
             closure_rest_params: &closure_rest_params,
@@ -1444,6 +1528,7 @@ fn compile_module_entry(
             is_async_fn: false,
             static_field_globals,
             class_ids,
+            class_keys_globals: &cross_module.class_keys_globals,
             func_signatures,
             boxed_vars: init_boxed_vars,
             closure_rest_params: &closure_rest_params,
@@ -1473,13 +1558,46 @@ fn compile_module_entry(
 /// The string pool was constructed with a `module_prefix`, so every
 /// `entry.bytes_global` / `entry.handle_global` is already prefixed.
 /// Emission uses those names directly — no extra prefixing here.
-fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool, module_prefix: &str) {
+fn emit_string_pool(
+    llmod: &mut LlModule,
+    strings: &StringPool,
+    module_prefix: &str,
+    class_keys_init_data: &[(String, String, u32)],
+    class_ids: &HashMap<String, u32>,
+) {
     for entry in strings.iter() {
         // .rodata bytes — `[N+1 x i8]` because we include the null terminator.
         llmod.add_named_string_constant(&entry.bytes_global, entry.byte_len + 1, &entry.escaped_ir);
         // Mutable handle global initialized to 0.0; populated by
         // __perry_init_strings_<prefix>.
         llmod.add_internal_global(&entry.handle_global, DOUBLE, "0.0");
+    }
+
+    // Per-class packed-keys constants (rodata) — referenced by the
+    // js_build_class_keys_array call below at module init.
+    // Naming: `@perry_class_keys_packed_<modprefix>__<idx>` so we
+    // don't collide with anything else.
+    let mut packed_global_names: Vec<String> = Vec::with_capacity(class_keys_init_data.len());
+    for (idx, (_global_name, packed, _fc)) in class_keys_init_data.iter().enumerate() {
+        if packed.is_empty() {
+            packed_global_names.push(String::new());
+            continue;
+        }
+        let bytes = packed.as_bytes();
+        let mut lit = String::with_capacity(bytes.len() + 8);
+        lit.push_str("c\"");
+        for &b in bytes {
+            if (32..127).contains(&b) && b != b'"' && b != b'\\' {
+                lit.push(b as char);
+            } else {
+                lit.push('\\');
+                lit.push_str(&format!("{:02X}", b));
+            }
+        }
+        lit.push_str("\\00\"");
+        let name = format!("perry_class_keys_packed_{}__{}", module_prefix, idx);
+        llmod.add_named_string_constant(&name, bytes.len() + 1, &lit);
+        packed_global_names.push(name);
     }
 
     let init_name = format!("__perry_init_strings_{}", module_prefix);
@@ -1501,6 +1619,43 @@ fn emit_string_pool(llmod: &mut LlModule, strings: &StringPool, module_prefix: &
         blk.store(DOUBLE, &nanboxed, &handle_ref);
         let addr_i64 = blk.ptrtoint(&handle_ref, I64);
         blk.call_void("js_gc_register_global_root", &[(I64, &addr_i64)]);
+    }
+
+    // Build per-class keys arrays via js_build_class_keys_array,
+    // store the result in the per-class keys global. Done ONCE at
+    // module init; every `new ClassName()` call from then on does a
+    // single global load + inline allocator call (no SHAPE_CACHE
+    // lookup, no js_build_class_keys_array overhead).
+    for (idx, (global_name, packed, field_count)) in class_keys_init_data.iter().enumerate() {
+        // Resolve class id from the global name. The global name is
+        // `perry_class_keys_<modprefix>__<class>` so we strip the
+        // prefix to recover the sanitized class name and look up
+        // the id by walking class_ids. Since multiple classes might
+        // have the same sanitized name (rare but possible), we just
+        // pick the first matching one — class_ids is keyed by the
+        // pre-sanitized name so a direct lookup works for ASCII.
+        let prefix = format!("perry_class_keys_{}__", module_prefix);
+        let sanitized_class = global_name.strip_prefix(&prefix).unwrap_or("");
+        let class_id = class_ids
+            .iter()
+            .find(|(k, _)| sanitize(k) == sanitized_class)
+            .map(|(_, &v)| v)
+            .unwrap_or(0);
+
+        let cid_str = class_id.to_string();
+        let fc_str = field_count.to_string();
+        let packed_ref = if packed.is_empty() {
+            "null".to_string()
+        } else {
+            format!("@{}", packed_global_names[idx])
+        };
+        let len_str = packed.len().to_string();
+        let arr = blk.call(
+            I64,
+            "js_build_class_keys_array",
+            &[(I32, &cid_str), (I32, &fc_str), (PTR, &packed_ref), (I32, &len_str)],
+        );
+        blk.store(I64, &arr, &format!("@{}", global_name));
     }
 
     blk.ret_void();
@@ -1589,6 +1744,7 @@ fn compile_static_method(
         is_async_fn: f.is_async,
         static_field_globals,
         class_ids,
+        class_keys_globals: &cross_module.class_keys_globals,
         func_signatures,
         boxed_vars: module_boxed_vars.clone(),
         closure_rest_params,

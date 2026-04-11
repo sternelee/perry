@@ -1444,48 +1444,69 @@ pub(crate) fn lower_new(
     let parent_cid_str = parent_cid.to_string();
     let n_str = field_count.to_string();
 
-    // Build the packed-keys string. Format: each field name followed
-    // by `\0`. Parent classes contribute their fields first (deepest
-    // ancestor → root → own), matching the slot order assumed by the
-    // PropertyGet/Set fast path in `class_field_global_index`.
-    let mut packed_keys = String::new();
-    let mut parent_chain: Vec<&perry_hir::Class> = Vec::new();
-    let mut p = class.extends_name.as_deref();
-    while let Some(parent_name) = p {
-        if let Some(pc) = ctx.classes.get(parent_name).copied() {
-            parent_chain.push(pc);
-            p = pc.extends_name.as_deref();
-        } else {
-            break;
+    // Fast path: if the class has a per-class keys global (built once
+    // at module init via `js_build_class_keys_array`), load the
+    // pointer and call the inline-keys allocator. This bypasses the
+    // SHAPE_CACHE lookup AND the runtime `js_object_alloc_class_with_keys`
+    // function entirely on the hot allocation path. The global is
+    // pre-populated in `__perry_init_strings_<modprefix>`.
+    let obj_handle = if let Some(keys_global_name) = ctx.class_keys_globals.get(class_name).cloned() {
+        let keys_global_ref = format!("@{}", keys_global_name);
+        let keys_ptr = ctx.block().load(I64, &keys_global_ref);
+        ctx.block().call(
+            I64,
+            "js_object_alloc_class_inline_keys",
+            &[
+                (I32, &cid_str),
+                (I32, &parent_cid_str),
+                (I32, &n_str),
+                (I64, &keys_ptr),
+            ],
+        )
+    } else {
+        // Fallback: build the packed-keys string at this site and
+        // call the slower SHAPE_CACHE-aware allocator. Used when the
+        // class isn't in `class_keys_globals` (e.g. anonymous /
+        // synthetic classes that compile_module doesn't pre-emit a
+        // global for).
+        let mut packed_keys = String::new();
+        let mut parent_chain: Vec<&perry_hir::Class> = Vec::new();
+        let mut p = class.extends_name.as_deref();
+        while let Some(parent_name) = p {
+            if let Some(pc) = ctx.classes.get(parent_name).copied() {
+                parent_chain.push(pc);
+                p = pc.extends_name.as_deref();
+            } else {
+                break;
+            }
         }
-    }
-    // Walk from deepest ancestor to direct parent.
-    for pc in parent_chain.iter().rev() {
-        for f in &pc.fields {
+        for pc in parent_chain.iter().rev() {
+            for f in &pc.fields {
+                packed_keys.push_str(&f.name);
+                packed_keys.push('\0');
+            }
+        }
+        for f in &class.fields {
             packed_keys.push_str(&f.name);
             packed_keys.push('\0');
         }
-    }
-    for f in &class.fields {
-        packed_keys.push_str(&f.name);
-        packed_keys.push('\0');
-    }
-    let keys_idx = ctx.strings.intern(&packed_keys);
-    let keys_entry = ctx.strings.entry(keys_idx);
-    let keys_global = format!("@{}", keys_entry.bytes_global);
-    let keys_len_str = keys_entry.byte_len.to_string();
+        let keys_idx = ctx.strings.intern(&packed_keys);
+        let keys_entry = ctx.strings.entry(keys_idx);
+        let keys_global = format!("@{}", keys_entry.bytes_global);
+        let keys_len_str = keys_entry.byte_len.to_string();
 
-    let obj_handle = ctx.block().call(
-        I64,
-        "js_object_alloc_class_with_keys",
-        &[
-            (I32, &cid_str),
-            (I32, &parent_cid_str),
-            (I32, &n_str),
-            (PTR, &keys_global),
-            (I32, &keys_len_str),
-        ],
-    );
+        ctx.block().call(
+            I64,
+            "js_object_alloc_class_with_keys",
+            &[
+                (I32, &cid_str),
+                (I32, &parent_cid_str),
+                (I32, &n_str),
+                (PTR, &keys_global),
+                (I32, &keys_len_str),
+            ],
+        )
+    };
     let obj_box = nanbox_pointer_inline(ctx.block(), &obj_handle);
 
     // Allocate a `this` slot and store the new object there.

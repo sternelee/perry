@@ -781,7 +781,13 @@ pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_i
 /// + RefCell::borrow_mut + HashMap::get cost from the hot
 /// allocation path — for benchmarks like `object_create` (1M
 /// `new Point(...)` calls) the SHAPE_CACHE lookup was ~30ns/alloc.
+///
+/// `#[inline]` lets the bitcode-link path
+/// (`PERRY_LLVM_BITCODE_LINK=1`) inline the entire body — including
+/// the `arena_alloc_gc` call — into the user's `new ClassName()`
+/// site, eliminating function-call overhead from the hot loop.
 #[no_mangle]
+#[inline]
 pub extern "C" fn js_object_alloc_class_inline_keys(
     class_id: u32,
     parent_class_id: u32,
