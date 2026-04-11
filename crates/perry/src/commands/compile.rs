@@ -2028,7 +2028,13 @@ fn compute_module_prefix(resolved_path: &str, project_root: &Path) -> String {
             .and_then(|n| n.to_str())
             .unwrap_or("module")
             .to_string());
-    source_module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+    let mut prefix = source_module_name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_");
+    // LLVM IR identifiers cannot start with a digit. Prefix with `_`
+    // if the first character would be one (e.g. `05_fibonacci.ts`).
+    if prefix.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        prefix.insert(0, '_');
+    }
+    prefix
 }
 
 /// Cached wrapper around resolve_import to avoid redundant I/O
@@ -4203,11 +4209,19 @@ pub fn run(args: CompileArgs, format: OutputFormat, _use_color: bool, _verbose: 
             // entry main can call each `<prefix>__init` in order.
             // The prefix derivation must match what
             // `perry_codegen::compile_module` does internally
-            // (sanitize(hir.name)) so the symbols match.
+            // (sanitize(hir.name)) so the symbols match. LLVM IR
+            // identifiers cannot start with a digit, so prefix with
+            // `_` if the first character would be one (handles module
+            // names like `05_fibonacci.ts`).
             let sanitize_name = |s: &str| -> String {
-                s.chars()
+                let mut out: String = s
+                    .chars()
                     .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-                    .collect()
+                    .collect();
+                if out.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    out.insert(0, '_');
+                }
+                out
             };
             let non_entry_module_prefixes: Vec<String> = if is_entry {
                 ctx.native_modules

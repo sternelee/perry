@@ -1765,11 +1765,18 @@ fn scoped_method_name(module_prefix: &str, class_name: &str, method_name: &str) 
 }
 
 /// Sanitize a name for use in an LLVM symbol — replace anything that isn't
-/// `[A-Za-z0-9_]` with an underscore.
+/// `[A-Za-z0-9_]` with an underscore. LLVM IR identifiers cannot start with
+/// a digit, so prefix with `_` if the first character would be one (this
+/// happens with module names like `05_fibonacci.ts`).
 fn sanitize(name: &str) -> String {
-    name.chars()
+    let mut s: String = name
+        .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-        .collect()
+        .collect();
+    if s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        s.insert(0, '_');
+    }
+    s
 }
 
 /// Host default triple.
