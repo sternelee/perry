@@ -3215,9 +3215,45 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let v = lower_expr(ctx, o)?;
             Ok(ctx.block().call(DOUBLE, "js_weakref_deref", &[(DOUBLE, &v)]))
         }
-        Expr::Uint8ArrayNew(_) => Ok(double_literal(0.0)),
-        Expr::Uint8ArrayLength(_) => Ok(double_literal(0.0)),
-        Expr::Uint8ArrayGet { .. } => Ok(double_literal(0.0)),
+        // `new Uint8Array([1, 2, 3])` — materialize an Array<number>
+        // and convert to a BufferHeader via js_buffer_from_array so
+        // `TextDecoder.decode(new Uint8Array([...]))` works and
+        // `encoder.encode(...)` result can be used interchangeably.
+        Expr::Uint8ArrayNew(arg) => {
+            let arr_box = match arg {
+                Some(e) => lower_expr(ctx, e)?,
+                None => {
+                    // `new Uint8Array()` — allocate an empty array.
+                    let zero = "0".to_string();
+                    let h = ctx.block().call(I64, "js_array_alloc", &[(I32, &zero)]);
+                    nanbox_pointer_inline(ctx.block(), &h)
+                }
+            };
+            let blk = ctx.block();
+            let arr_handle = unbox_to_i64(blk, &arr_box);
+            let buf_handle = blk.call(
+                I64,
+                "js_buffer_from_array",
+                &[(I64, &arr_handle)],
+            );
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
+        }
+        Expr::Uint8ArrayLength(arr) => {
+            let v = lower_expr(ctx, arr)?;
+            let blk = ctx.block();
+            let handle = unbox_to_i64(blk, &v);
+            let len_i32 = blk.call(I32, "js_buffer_length", &[(I64, &handle)]);
+            Ok(blk.sitofp(I32, &len_i32, DOUBLE))
+        }
+        Expr::Uint8ArrayGet { array, index } => {
+            let a = lower_expr(ctx, array)?;
+            let i = lower_expr(ctx, index)?;
+            let blk = ctx.block();
+            let handle = unbox_to_i64(blk, &a);
+            let idx_i32 = blk.fptosi(DOUBLE, &i, I32);
+            let val_i32 = blk.call(I32, "js_buffer_get", &[(I64, &handle), (I32, &idx_i32)]);
+            Ok(blk.sitofp(I32, &val_i32, DOUBLE))
+        }
         Expr::Uint8ArraySet { value, .. } => lower_expr(ctx, value),
 
         // -------- arr.unshift(value) --------
