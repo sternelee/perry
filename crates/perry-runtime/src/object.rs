@@ -191,16 +191,85 @@ static NULL_OBJECT_BYTES: NullObjectBytes = NullObjectBytes {
     keys_array: 0,
 };
 
+/// Fast direct-mapped inline cache for class shape keys arrays.
+/// Indexed by `shape_id mod CACHE_SIZE`. Each slot stores
+/// `(shape_id, keys_array_ptr)`. A 256-entry direct-mapped cache costs
+/// 4KB, fits in L1d, and gives ~99% hit rate for typical Perry programs
+/// (each class has a unique shape_id, and most programs use <50 classes).
+///
+/// Misses fall through to the SHAPE_CACHE_OVERFLOW HashMap, which is
+/// the original lazy-allocated map for the long tail.
+const SHAPE_INLINE_CACHE_SIZE: usize = 256;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ShapeCacheEntry {
+    shape_id: u32,
+    keys_array: *mut ArrayHeader,
+}
+
 thread_local! {
-    static SHAPE_CACHE: RefCell<HashMap<u32, *mut ArrayHeader>> = RefCell::new(HashMap::new());
+    /// Direct-mapped inline cache. Empty entries have shape_id == 0
+    /// and keys_array == null.
+    static SHAPE_INLINE_CACHE: std::cell::UnsafeCell<[ShapeCacheEntry; SHAPE_INLINE_CACHE_SIZE]> =
+        std::cell::UnsafeCell::new([ShapeCacheEntry {
+            shape_id: 0,
+            keys_array: std::ptr::null_mut(),
+        }; SHAPE_INLINE_CACHE_SIZE]);
+
+    /// Overflow map for shape_ids that collide in the inline cache.
+    static SHAPE_CACHE_OVERFLOW: RefCell<HashMap<u32, *mut ArrayHeader>> = RefCell::new(HashMap::new());
+}
+
+/// Look up a keys_array by shape_id. Returns `null` on miss.
+/// Hot-path: ~3 ALU ops + 1 load + 1 cmp + 1 branch (no RefCell, no HashMap).
+#[inline(always)]
+fn shape_cache_get(shape_id: u32) -> *mut ArrayHeader {
+    SHAPE_INLINE_CACHE.with(|cache| {
+        let slot = (shape_id as usize) & (SHAPE_INLINE_CACHE_SIZE - 1);
+        // Safety: this thread-local is single-threaded by definition;
+        // the UnsafeCell allows zero-overhead reads on the hot path.
+        let entry = unsafe { (*cache.get())[slot] };
+        if entry.shape_id == shape_id {
+            return entry.keys_array;
+        }
+        // Miss — check the overflow map.
+        SHAPE_CACHE_OVERFLOW.with(|m| {
+            m.borrow().get(&shape_id).copied().unwrap_or(std::ptr::null_mut())
+        })
+    })
+}
+
+/// Insert a keys_array into the cache. Updates the inline slot
+/// (evicting any prior entry there) and also writes to the overflow
+/// map so misses on the inline cache still find the value.
+fn shape_cache_insert(shape_id: u32, keys_array: *mut ArrayHeader) {
+    SHAPE_INLINE_CACHE.with(|cache| {
+        let slot = (shape_id as usize) & (SHAPE_INLINE_CACHE_SIZE - 1);
+        unsafe {
+            (*cache.get())[slot] = ShapeCacheEntry { shape_id, keys_array };
+        }
+    });
+    SHAPE_CACHE_OVERFLOW.with(|m| {
+        m.borrow_mut().insert(shape_id, keys_array);
+    });
 }
 
 /// GC root scanner: mark all cached shape keys arrays so they're not freed.
-/// SHAPE_CACHE holds raw *mut ArrayHeader pointers shared across objects with the same shape.
-/// Without this scanner, GC would free those arrays, leaving all objects with that shape
-/// holding a dangling keys_array pointer.
+/// The inline cache + overflow map both hold the raw `*mut ArrayHeader`
+/// pointers; without this scanner, GC would free those arrays, leaving
+/// every object with that shape holding a dangling `keys_array` pointer.
 pub fn scan_shape_cache_roots(mark: &mut dyn FnMut(f64)) {
-    SHAPE_CACHE.with(|cache| {
+    SHAPE_INLINE_CACHE.with(|cache| {
+        let entries = unsafe { *cache.get() };
+        for entry in entries.iter() {
+            if !entry.keys_array.is_null() {
+                let jsval = JSValue::pointer(entry.keys_array as *const u8);
+                mark(f64::from_bits(jsval.bits()));
+            }
+        }
+    });
+    SHAPE_CACHE_OVERFLOW.with(|cache| {
         let cache = cache.borrow();
         for &arr_ptr in cache.values() {
             if !arr_ptr.is_null() {
@@ -703,6 +772,83 @@ pub extern "C" fn js_object_alloc_fast_with_parent(class_id: u32, parent_class_i
     ptr
 }
 
+/// Fast class instance allocator that takes a pre-built keys_array
+/// pointer directly, skipping the per-call SHAPE_CACHE lookup. The
+/// codegen pre-builds the keys_array ONCE at module init time
+/// (via `js_build_class_keys_array`) and stores the result in a
+/// per-class global, then passes that global to this allocator on
+/// every `new ClassName()` call. This eliminates the thread-local
+/// + RefCell::borrow_mut + HashMap::get cost from the hot
+/// allocation path — for benchmarks like `object_create` (1M
+/// `new Point(...)` calls) the SHAPE_CACHE lookup was ~30ns/alloc.
+#[no_mangle]
+pub extern "C" fn js_object_alloc_class_inline_keys(
+    class_id: u32,
+    parent_class_id: u32,
+    field_count: u32,
+    keys_array: *mut ArrayHeader,
+) -> *mut ObjectHeader {
+    if parent_class_id != 0 {
+        register_class(class_id, parent_class_id);
+    }
+    let header_size = std::mem::size_of::<ObjectHeader>();
+    let alloc_field_count = std::cmp::max(field_count as usize, 8);
+    let fields_size = alloc_field_count * std::mem::size_of::<JSValue>();
+    let total_size = header_size + fields_size;
+
+    let ptr = arena_alloc_gc(total_size, 8, crate::gc::GC_TYPE_OBJECT) as *mut ObjectHeader;
+
+    unsafe {
+        (*ptr).object_type = crate::error::OBJECT_TYPE_REGULAR;
+        (*ptr).class_id = class_id;
+        (*ptr).parent_class_id = parent_class_id;
+        (*ptr).field_count = field_count;
+        (*ptr).keys_array = keys_array;
+    }
+    ptr
+}
+
+/// Build (or fetch from SHAPE_CACHE) the keys_array for a class.
+/// Called ONCE per class at module init time; the resulting pointer
+/// is cached in a per-class global by the codegen and then passed
+/// to `js_object_alloc_class_inline_keys` on each `new` call.
+///
+/// Same packed-keys format as `js_object_alloc_class_with_keys`:
+/// null-separated UTF-8 field names.
+#[no_mangle]
+pub extern "C" fn js_build_class_keys_array(
+    class_id: u32,
+    field_count: u32,
+    packed_keys: *const u8,
+    packed_keys_len: u32,
+) -> *mut ArrayHeader {
+    let shape_id = class_id
+        .wrapping_mul(10007)
+        .wrapping_add(field_count.wrapping_mul(100003))
+        .wrapping_add(1000000);
+    let cached = shape_cache_get(shape_id);
+    if !cached.is_null() {
+        return cached;
+    }
+    let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
+    let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+    let num_keys = keys.len();
+    let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+    let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
+    for (i, key_bytes) in keys.iter().enumerate() {
+        let str_ptr = crate::string::js_string_from_bytes(
+            key_bytes.as_ptr(),
+            key_bytes.len() as u32,
+        );
+        let nanboxed = f64::from_bits(
+            crate::value::STRING_TAG | (str_ptr as u64 & crate::value::POINTER_MASK),
+        );
+        unsafe { *elements_ptr.add(i) = nanboxed; }
+    }
+    shape_cache_insert(shape_id, arr);
+    arr
+}
+
 /// Allocate a class instance with a shape-cached keys array for field names.
 /// This allows dynamic property access (obj.field1) to work on class instances,
 /// not just object literals. Uses class_id as the shape_id for caching.
@@ -733,25 +879,22 @@ pub extern "C" fn js_object_alloc_class_with_keys(
         (*ptr).field_count = field_count;
     }
 
-    // Use class_id as shape_id for caching the keys array
-    let keys_arr = SHAPE_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        // Use hash of (class_id, field_count) as shape_id to avoid collisions between
-        // classes from different modules that might have the same class_id
-        // This ensures unique shape_ids across all classes regardless of module
-        let shape_id = class_id.wrapping_mul(10007).wrapping_add(field_count.wrapping_mul(100003)).wrapping_add(1000000);
-        if let Some(&arr) = cache.get(&shape_id) {
-            return arr;
-        }
-
-        // Create keys array from packed field names
+    // Use class_id as shape_id for caching the keys array.
+    // Hot path: direct-mapped inline cache lookup (no RefCell, no
+    // HashMap). Miss path: lazy-build from packed_keys.
+    let shape_id = class_id
+        .wrapping_mul(10007)
+        .wrapping_add(field_count.wrapping_mul(100003))
+        .wrapping_add(1000000);
+    let cached = shape_cache_get(shape_id);
+    let keys_arr = if !cached.is_null() {
+        cached
+    } else {
         let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
         let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
         let num_keys = keys.len();
-
         let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
         let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
-
         for (i, key_bytes) in keys.iter().enumerate() {
             let str_ptr = crate::string::js_string_from_bytes(
                 key_bytes.as_ptr(), key_bytes.len() as u32,
@@ -761,10 +904,9 @@ pub extern "C" fn js_object_alloc_class_with_keys(
             );
             unsafe { *elements_ptr.add(i) = nanboxed; }
         }
-
-        cache.insert(shape_id, arr);
+        shape_cache_insert(shape_id, arr);
         arr
-    });
+    };
 
     unsafe { (*ptr).keys_array = keys_arr; }
     ptr
@@ -803,11 +945,10 @@ pub extern "C" fn js_object_alloc_with_shape(
         }
     }
 
-    let keys_arr = SHAPE_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(&arr) = cache.get(&shape_id) {
-            return arr;
-        }
+    let cached = shape_cache_get(shape_id);
+    let keys_arr = if !cached.is_null() {
+        cached
+    } else {
         let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
         let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
         let num_keys = keys.len();
@@ -822,9 +963,9 @@ pub extern "C" fn js_object_alloc_with_shape(
             );
             unsafe { *elements_ptr.add(i) = nanboxed; }
         }
-        cache.insert(shape_id, arr);
+        shape_cache_insert(shape_id, arr);
         arr
-    });
+    };
 
     unsafe { (*obj_ptr).keys_array = keys_arr; }
 

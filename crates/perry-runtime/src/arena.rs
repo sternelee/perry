@@ -122,28 +122,41 @@ pub fn arena_alloc(size: usize, align: usize) -> *mut u8 {
 pub fn arena_alloc_gc(size: usize, align: usize, obj_type: u8) -> *mut u8 {
     use crate::gc::{GcHeader, GC_HEADER_SIZE, GC_FLAG_ARENA};
 
-    // First, try reusing a slot from the free list
-    let reused = crate::gc::ARENA_FREE_LIST.with(|fl| {
-        let mut fl = fl.borrow_mut();
-        // Find a slot that fits (exact or slightly larger)
-        let mut best_idx = None;
-        let mut best_waste = usize::MAX;
-        for (idx, &(_, slot_size)) in fl.iter().enumerate() {
-            if slot_size >= size && slot_size - size < best_waste {
-                best_waste = slot_size - size;
-                best_idx = Some(idx);
-                if best_waste == 0 {
-                    break; // Perfect fit
+    // Hot path: bump-allocate from the current arena block, skipping the
+    // free-list walk entirely. The free-list-nonempty `Cell` is a single
+    // unboxed load (no `RefCell::borrow_mut` cost) and is `false` for the
+    // first GC cycle of every benchmark — which is when allocation-heavy
+    // micro-benchmarks like object_create / binary_trees run their tight
+    // loops. Walking an empty Vec was costing ~10ns per alloc (borrow,
+    // iterate, drop) for nothing; this `Cell` check is ~1ns.
+    let reused = if crate::gc::ARENA_FREE_LIST_NONEMPTY.with(|c| c.get()) {
+        crate::gc::ARENA_FREE_LIST.with(|fl| {
+            let mut fl = fl.borrow_mut();
+            // Find a slot that fits (exact or slightly larger)
+            let mut best_idx = None;
+            let mut best_waste = usize::MAX;
+            for (idx, &(_, slot_size)) in fl.iter().enumerate() {
+                if slot_size >= size && slot_size - size < best_waste {
+                    best_waste = slot_size - size;
+                    best_idx = Some(idx);
+                    if best_waste == 0 {
+                        break; // Perfect fit
+                    }
                 }
             }
-        }
-        if let Some(idx) = best_idx {
-            let (ptr, _slot_size) = fl.swap_remove(idx);
-            Some(ptr)
-        } else {
-            None
-        }
-    });
+            if let Some(idx) = best_idx {
+                let (ptr, _slot_size) = fl.swap_remove(idx);
+                if fl.is_empty() {
+                    crate::gc::ARENA_FREE_LIST_NONEMPTY.with(|c| c.set(false));
+                }
+                Some(ptr)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
 
     if let Some(user_ptr) = reused {
         // Reusing a free-list slot: the GcHeader is already in place (before user_ptr)

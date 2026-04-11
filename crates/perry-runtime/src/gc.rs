@@ -72,6 +72,14 @@ thread_local! {
     /// Free list of arena slots available for reuse: (user_ptr, payload_size)
     pub(crate) static ARENA_FREE_LIST: RefCell<Vec<(*mut u8, usize)>> = RefCell::new(Vec::new());
 
+    /// Fast empty-check for `ARENA_FREE_LIST` — kept in sync with the Vec
+    /// length. The hot allocation path checks this `Cell` (a single load,
+    /// no `RefCell::borrow_mut` cost) and skips the free-list lookup
+    /// entirely when it's empty. Maintained by the GC sweep (sets) and
+    /// `arena_alloc_gc` (clears when the Vec drains).
+    pub(crate) static ARENA_FREE_LIST_NONEMPTY: std::cell::Cell<bool> =
+        std::cell::Cell::new(false);
+
     /// GC statistics
     static GC_STATS: RefCell<GcStats> = RefCell::new(GcStats {
         collection_count: 0,
@@ -973,10 +981,13 @@ fn sweep() -> u64 {
                 // Zero the memory to prevent stale pointer retention
                 std::ptr::write_bytes(user_ptr, 0, payload_size);
 
-                // Add to free list for reuse
+                // Add to free list for reuse — also flip the
+                // ARENA_FREE_LIST_NONEMPTY flag so the alloc fast path
+                // knows to consult the free list on the next call.
                 ARENA_FREE_LIST.with(|fl| {
                     fl.borrow_mut().push((user_ptr, payload_size));
                 });
+                ARENA_FREE_LIST_NONEMPTY.with(|c| c.set(true));
             } else {
                 // Surviving object — clear mark bit inline to avoid separate heap walk
                 (*header).gc_flags &= !GC_FLAG_MARKED;

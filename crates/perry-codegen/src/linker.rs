@@ -41,7 +41,11 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
 
     let mut cmd = Command::new(&clang);
     cmd.arg("-c")
-        .arg("-O2")
+        // -O3 unlocks LLVM's auto-vectorizer, aggressive inlining, and
+        // better SLP / loop unrolling. The compile-time cost vs -O2 is
+        // small for typical user programs (<1s of overhead) compared
+        // to the runtime perf wins on tight loops.
+        .arg("-O3")
         .arg(&ll_path)
         .arg("-o")
         .arg(&obj_path);

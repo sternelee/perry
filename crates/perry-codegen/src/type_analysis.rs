@@ -24,6 +24,26 @@ use crate::expr::FnCtx;
 /// - **PropertyGet on a known class field** → the field's declared type
 pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirType> {
     match init {
+        // Numeric literals + arithmetic results: refine to Number so the
+        // for-loop counter `let i = 0` (and any other untyped numeric
+        // local) gets recognized by `is_numeric_expr`. Without this,
+        // `i + 1` wraps the `i` load in `js_number_coerce` per iteration
+        // because the local stays at type Any. Critical for hot loops
+        // in object_create / binary_trees / fibonacci where the counter
+        // is a "let i = 0" with no explicit annotation.
+        Expr::Number(_) | Expr::Integer(_) => Some(HirType::Number),
+        Expr::Binary { op, left, right } => {
+            // Numeric arithmetic produces Number when both operands are
+            // statically numeric (matches `is_numeric_expr`'s rule).
+            // Sub/Mul/Div/etc. always produce Number; Add only does so
+            // when neither operand is a string.
+            if is_numeric_expr(ctx, left) && is_numeric_expr(ctx, right) {
+                let _ = op;
+                Some(HirType::Number)
+            } else {
+                None
+            }
+        }
         Expr::Array(_) | Expr::ArraySpread(_) => {
             Some(HirType::Array(Box::new(HirType::Any)))
         }
