@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.11
+**Current Version:** 0.5.12
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,13 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.12 (llvm-backend) — perry/ui widget dispatch — mango renders its full UI
+- **feat**: follow-up to v0.5.10 which landed only `App({...})`. This commit adds the rest of the perry/ui surface to `lower_native_method_call` via a table-driven dispatcher (`PERRY_UI_TABLE` of `UiSig { method, runtime, args, ret }` entries using `UiArgKind::{Widget,Str,F64,Closure,I64Raw}` / `UiReturnKind::{Widget,F64,Void}`). ~40 widget methods covered in one pass: `Text` / `TextField` / `TextArea` / `Spacer` / `Divider` / `ScrollView` constructors; `menuCreate` / `menuAddItem` / `menuBarCreate` / `menuBarAttach` / `menuBarAddMenu`; text setters (`textSetFontSize` / `textSetColor` / `textSetString` / `textSetFontFamily` / `textSetFontWeight` / `textSetWraps`); button setters (`buttonSetBordered` / `buttonSetTextColor` / `buttonSetTitle`); widget mutators (`widgetAddChild` / `widgetClearChildren` / `widgetSetHidden` / `widgetSetWidth` / `widgetSetHeight` / `widgetSetHugging` / `widgetMatchParentWidth` / `widgetMatchParentHeight` / `widgetSetBackgroundColor` / `widgetSetBackgroundGradient` / `setCornerRadius`); stack mutators (`stackSetAlignment` / `stackSetDistribution`); `scrollviewSetChild`; `textfieldSetString` / `textareaSetString`. Runtime fns lazy-declared via `ctx.pending_declares`.
+- **feat**: `VStack` / `HStack` get a dedicated special case because the TS call shape (`VStack(spacing, [children])` or `VStack([children])`) doesn't fit the table — spacing is optional and children is a variadic array that needs one `perry_ui_widget_add_child` call per element. We stash the parent handle in an entry alloca so subsequent blocks reload it, then walk the array fast path.
+- **feat**: `Button` also gets a special case because the handler closure arg must stay NaN-boxed (f64), not unboxed to i64, and the label is a raw cstr pointer — neither shape is expressible as a single `UiArgKind` row.
+- **fix**: one naming inconsistency found while building the table — the runtime fn is `perry_ui_set_widget_hidden` (with `set` first, unlike every other `widget_*` setter). Fixed in the table.
+- **result**: `mango/src/app.ts -o Mango` now launches and renders the full UI tree — title bar, "Welcome to Mango" heading, "MongoDB Study Tool" subtitle, "Databases & Collections / Query & Plan / Edit & Insert / Index Viewer" menu items, and the orange "+ New Connection" button all visible in the screenshot. Verified by launching the compiled binary, positioning the window onscreen via osascript, and `/usr/sbin/screencapture`. The v0.5.0 LLVM cutover regression (mango compiled clean but exited silently with an empty window) is fully resolved.
 
 ### v0.5.11 (llvm-backend) — inline-allocator regression fixes (parity 80% → 94%)
 - **fix**: the inline bump-allocator hoist (v0.5.0-followup) cached `@perry_class_keys_<class>` in a function-entry stack slot, but the entry-block hoist ran BEFORE `__perry_init_strings_*` (which is what populates the global). So freshly-allocated objects had a null `keys_array` and `js_object_get_field_by_name` returned `undefined` for every field — `test_array_of_objects` showed `sorted[0].name → undefined`. New `LlFunction::entry_init_boundary` + `entry_post_init_setup`: alloca stays at the very top (dominates), but the load+store splices in AFTER the init prelude. `mark_entry_init_boundary()` is called immediately after `js_gc_init` / `__perry_init_strings_*` / non-entry module inits in `compile_module_entry`.

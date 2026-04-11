@@ -1929,6 +1929,137 @@ pub(crate) fn lower_native_method_call(
     // HStack, etc.) are NOT dispatched yet so the body is the
     // zero-sentinel — the window appears with the right title/size but
     // no widget tree. Full widget dispatch is a separate followup.
+    // perry/ui VStack/HStack — special-case because the TS shape is
+    // `VStack(spacing, [child1, child2, ...])` (or just `VStack([...])`),
+    // but the runtime takes only `(spacing) -> handle` and children get
+    // added one by one via `perry_ui_widget_add_child`. We can't express
+    // this with the per-method table because it's variadic in arg shape
+    // *and* needs sequential calls per child.
+    if module == "perry/ui"
+        && (method == "VStack" || method == "HStack")
+        && object.is_none()
+    {
+        let runtime_create = if method == "VStack" {
+            "perry_ui_vstack_create"
+        } else {
+            "perry_ui_hstack_create"
+        };
+        // First arg may be the spacing number OR the children array
+        // (when the user calls `VStack([children])` without an explicit
+        // spacing). Detect which by checking the type.
+        let (spacing_d, children_idx) = match args.first() {
+            Some(Expr::Array(_)) | Some(Expr::ArraySpread(_)) => ("8.0".to_string(), 0),
+            Some(other) => {
+                // Could be a number (spacing) — lower it. The children
+                // are then in args[1] (if present).
+                let v = lower_expr(ctx, other)?;
+                (v, 1)
+            }
+            None => ("8.0".to_string(), 0),
+        };
+        ctx.pending_declares.push((
+            runtime_create.to_string(),
+            I64,
+            vec![DOUBLE],
+        ));
+        let blk = ctx.block();
+        let parent_handle = blk.call(I64, runtime_create, &[(DOUBLE, &spacing_d)]);
+        // Stash so add_child has it; we'll need to reload later because
+        // calls between here and the loop may invalidate `parent_handle`'s
+        // SSA name in subsequent blocks.
+        let parent_slot = ctx.func.alloca_entry(I64);
+        ctx.block().store(I64, &parent_handle, &parent_slot);
+
+        // Walk the children array (if present). For each element, lower
+        // to a JSValue, unbox to widget handle, call
+        // `perry_ui_widget_add_child(parent, child)`.
+        ctx.pending_declares.push((
+            "perry_ui_widget_add_child".to_string(),
+            crate::types::VOID,
+            vec![I64, I64],
+        ));
+        if let Some(children_expr) = args.get(children_idx) {
+            let elements_owned: Option<Vec<Expr>> = match children_expr {
+                Expr::Array(elems) => Some(elems.clone()),
+                _ => None,
+            };
+            if let Some(elements) = elements_owned {
+                for child in &elements {
+                    let child_box = lower_expr(ctx, child)?;
+                    let blk = ctx.block();
+                    let child_handle = unbox_to_i64(blk, &child_box);
+                    let parent_reload = blk.load(I64, &parent_slot);
+                    blk.call_void(
+                        "perry_ui_widget_add_child",
+                        &[(I64, &parent_reload), (I64, &child_handle)],
+                    );
+                }
+            } else {
+                // Children expression isn't a literal array — lower for
+                // side effects so closures still get collected.
+                let _ = lower_expr(ctx, children_expr)?;
+            }
+        }
+        let blk = ctx.block();
+        let parent_final = blk.load(I64, &parent_slot);
+        return Ok(nanbox_pointer_inline(blk, &parent_final));
+    }
+
+    // perry/ui Button — TS shape is `Button(label, handler)` where
+    // handler is a closure. The simple positional form is what mango
+    // uses. The Object-config form (`Button(label, { onPress: cb })`)
+    // is a followup.
+    if module == "perry/ui" && method == "Button" && object.is_none() {
+        let label_ptr = if let Some(label) = args.first() {
+            get_raw_string_ptr(ctx, label)?
+        } else {
+            "0".to_string()
+        };
+        let handler_d = if let Some(handler) = args.get(1) {
+            lower_expr(ctx, handler)?
+        } else {
+            "0.0".to_string()
+        };
+        ctx.pending_declares.push((
+            "perry_ui_button_create".to_string(),
+            I64,
+            vec![I64, DOUBLE],
+        ));
+        let blk = ctx.block();
+        let handle = blk.call(
+            I64,
+            "perry_ui_button_create",
+            &[(I64, &label_ptr), (DOUBLE, &handler_d)],
+        );
+        return Ok(nanbox_pointer_inline(blk, &handle));
+    }
+
+    // Generic perry/ui receiver-less dispatch via a per-method table.
+    // Constructors and setters that don't need special arg shape handling
+    // (object literals, children arrays, closures stored in side tables)
+    // route through here. Each entry declares the runtime function name
+    // plus the arg coercion + return boxing rules.
+    //
+    // The table covers ~80% of mango's perry/ui surface. Special cases
+    // (App with object literal, VStack/HStack with children array,
+    // Button with optional Object config) are handled in dedicated
+    // arms BELOW so they short-circuit before this table is consulted.
+    //
+    // Extending: add a row to PERRY_UI_TABLE matching the TS method name
+    // to the perry_ui_* runtime function and arg shape. Most setters
+    // follow `(widget, …number args)` and most constructors return a
+    // widget handle that gets NaN-boxed as POINTER on the way out.
+    if module == "perry/ui"
+        && object.is_none()
+        && method != "App"
+        && method != "VStack"
+        && method != "HStack"
+    {
+        if let Some(sig) = perry_ui_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
     if module == "perry/ui" && method == "App" && object.is_none() && args.len() == 1 {
         if let Expr::Object(props) = &args[0] {
             let mut title_ptr: String = "0".to_string();
@@ -2675,4 +2806,283 @@ fn lower_fetch_native_method(
     }
 
     Ok(None)
+}
+
+// =============================================================================
+// perry/ui generic dispatch table
+// =============================================================================
+
+/// How a perry/ui FFI function expects each argument to be passed.
+#[derive(Copy, Clone, Debug)]
+enum UiArgKind {
+    /// Widget handle: lower the JSValue, unbox the POINTER bits as i64.
+    /// Used for the `handle` first arg of every setter, plus child / parent
+    /// handle args. The runtime gets the raw 1-based widget handle.
+    Widget,
+    /// String pointer: lower the JSValue, then call
+    /// `js_get_string_pointer_unified` to extract the underlying StringHeader
+    /// pointer as i64. Handles both literal strings and runtime-built ones.
+    Str,
+    /// Raw f64 number. The JSValue is already a NaN-boxed double for numbers,
+    /// so we pass it as-is. Used for sizes, colors, weights, alignment ids.
+    F64,
+    /// Closure handle: lower the JSValue (which is a `js_closure_alloc`
+    /// pointer NaN-boxed as POINTER) and pass it as a raw f64. The runtime
+    /// extracts the closure pointer via the same NaN-boxing convention.
+    Closure,
+    /// Raw i64 (rare; some setters take an enum tag as i64).
+    I64Raw,
+}
+
+/// What the perry/ui FFI function returns and how to box it.
+#[derive(Copy, Clone, Debug)]
+enum UiReturnKind {
+    /// Widget handle: NaN-box the i64 result with POINTER_TAG.
+    Widget,
+    /// Raw f64: pass through unchanged. Used by `scrollviewGetOffset` etc.
+    F64,
+    /// Void return: emit `call void` and return the `0.0` sentinel f64.
+    Void,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct UiSig {
+    /// TypeScript method name as it appears in the import (e.g. "Text",
+    /// "textSetFontSize"). Matched against `method` from
+    /// `lower_native_method_call` for `module == "perry/ui"`.
+    method: &'static str,
+    /// `perry_ui_*` runtime function symbol. Lazily declared via
+    /// `pending_declares` so the linker picks it up from
+    /// `libperry_ui_macos.a` (or the equivalent platform-specific lib).
+    runtime: &'static str,
+    /// Per-argument coercion rules. Length must equal `args.len()` at
+    /// the call site, otherwise the dispatch falls through to the
+    /// receiver-less early-out (which lowers everything as side effects
+    /// and returns 0.0).
+    args: &'static [UiArgKind],
+    ret: UiReturnKind,
+}
+
+/// Static dispatch table for perry/ui receiver-less calls. Covers the
+/// constructors + setters mango uses, plus the most common widgets from
+/// the cross-cutting "any perry/ui app" surface. Keep alphabetized by
+/// `method` for easy scanning.
+///
+/// Entries NOT in this table fall through to the receiver-less early-out
+/// in `lower_native_method_call` (which lowers args for side effects and
+/// returns the zero-sentinel). That's the behavior the entire perry/ui
+/// surface had pre-v0.5.10 — adding a row here flips one method from
+/// "silent no-op" to "real call into libperry_ui_macos.a".
+const PERRY_UI_TABLE: &[UiSig] = &[
+    // ---- Constructors (return widget handle) ----
+    UiSig { method: "Divider", runtime: "perry_ui_divider_create",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "ScrollView", runtime: "perry_ui_scrollview_create",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "Spacer", runtime: "perry_ui_spacer_create",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "Text", runtime: "perry_ui_text_create",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Widget },
+    UiSig { method: "TextArea", runtime: "perry_ui_textarea_create",
+            args: &[UiArgKind::Str, UiArgKind::Closure], ret: UiReturnKind::Widget },
+    UiSig { method: "TextField", runtime: "perry_ui_textfield_create",
+            args: &[UiArgKind::Str, UiArgKind::Closure], ret: UiReturnKind::Widget },
+
+    // ---- Menu / menu bar ----
+    UiSig { method: "menuAddItem", runtime: "perry_ui_menu_add_item",
+            args: &[UiArgKind::Widget, UiArgKind::Str, UiArgKind::Closure],
+            ret: UiReturnKind::Void },
+    UiSig { method: "menuAddSeparator", runtime: "perry_ui_menu_add_separator",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "menuAddStandardAction", runtime: "perry_ui_menu_add_standard_action",
+            args: &[UiArgKind::Widget, UiArgKind::Str, UiArgKind::Str, UiArgKind::Str],
+            ret: UiReturnKind::Void },
+    UiSig { method: "menuBarAddMenu", runtime: "perry_ui_menubar_add_menu",
+            args: &[UiArgKind::Widget, UiArgKind::Str, UiArgKind::Widget],
+            ret: UiReturnKind::Void },
+    UiSig { method: "menuBarAttach", runtime: "perry_ui_menubar_attach",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "menuBarCreate", runtime: "perry_ui_menubar_create",
+            args: &[], ret: UiReturnKind::Widget },
+    UiSig { method: "menuCreate", runtime: "perry_ui_menu_create",
+            args: &[], ret: UiReturnKind::Widget },
+
+    // ---- ScrollView ----
+    UiSig { method: "scrollviewSetChild", runtime: "perry_ui_scrollview_set_child",
+            args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
+
+    // ---- Stack layout ----
+    UiSig { method: "stackSetAlignment", runtime: "perry_ui_stack_set_alignment",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "stackSetDistribution", runtime: "perry_ui_stack_set_distribution",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+
+    // ---- Text setters ----
+    UiSig { method: "textSetColor", runtime: "perry_ui_text_set_color",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
+            ret: UiReturnKind::Void },
+    UiSig { method: "textSetFontFamily", runtime: "perry_ui_text_set_font_family",
+            args: &[UiArgKind::Widget, UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "textSetFontSize", runtime: "perry_ui_text_set_font_size",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "textSetFontWeight", runtime: "perry_ui_text_set_font_weight",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "textSetString", runtime: "perry_ui_text_set_string",
+            args: &[UiArgKind::Widget, UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "textSetWraps", runtime: "perry_ui_text_set_wraps",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+
+    // ---- Button setters ----
+    UiSig { method: "buttonSetBordered", runtime: "perry_ui_button_set_bordered",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "buttonSetTextColor", runtime: "perry_ui_button_set_text_color",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
+            ret: UiReturnKind::Void },
+    UiSig { method: "buttonSetTitle", runtime: "perry_ui_button_set_title",
+            args: &[UiArgKind::Widget, UiArgKind::Str], ret: UiReturnKind::Void },
+
+    // ---- TextField / TextArea ----
+    UiSig { method: "textfieldSetString", runtime: "perry_ui_textfield_set_string",
+            args: &[UiArgKind::Widget, UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "textareaSetString", runtime: "perry_ui_textarea_set_string",
+            args: &[UiArgKind::Widget, UiArgKind::Str], ret: UiReturnKind::Void },
+
+    // ---- Generic widget ops ----
+    UiSig { method: "setCornerRadius", runtime: "perry_ui_widget_set_corner_radius",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "widgetAddChild", runtime: "perry_ui_widget_add_child",
+            args: &[UiArgKind::Widget, UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "widgetClearChildren", runtime: "perry_ui_widget_clear_children",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "widgetMatchParentHeight", runtime: "perry_ui_widget_match_parent_height",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "widgetMatchParentWidth", runtime: "perry_ui_widget_match_parent_width",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::Void },
+    UiSig { method: "widgetSetBackgroundColor", runtime: "perry_ui_widget_set_background_color",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64],
+            ret: UiReturnKind::Void },
+    UiSig { method: "widgetSetBackgroundGradient", runtime: "perry_ui_widget_set_background_gradient",
+            args: &[
+                UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64,
+                UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64, UiArgKind::F64,
+            ], ret: UiReturnKind::Void },
+    UiSig { method: "widgetSetHeight", runtime: "perry_ui_widget_set_height",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "widgetSetHidden", runtime: "perry_ui_set_widget_hidden",
+            args: &[UiArgKind::Widget, UiArgKind::I64Raw], ret: UiReturnKind::Void },
+    UiSig { method: "widgetSetHugging", runtime: "perry_ui_widget_set_hugging",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "widgetSetWidth", runtime: "perry_ui_widget_set_width",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
+];
+
+fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_UI_TABLE.iter().find(|s| s.method == method)
+}
+
+/// Lower a perry/ui call described by `sig`. Walks each arg, applies
+/// the per-kind coercion to produce an LLVM SSA value of the right type,
+/// lazy-declares the runtime function, emits the call, and boxes the
+/// return value per `sig.ret`.
+///
+/// Args length mismatch (caller passed wrong number of args) → falls
+/// back to lowering all args for side effects + returning the
+/// zero-sentinel. The catch-all is intentional: TS users may write
+/// `Text()` (no arg) or `Text(s, extra)` and we don't want to bail
+/// the entire compilation.
+fn lower_perry_ui_table_call(
+    ctx: &mut FnCtx<'_>,
+    sig: &UiSig,
+    args: &[Expr],
+) -> Result<String> {
+    if args.len() != sig.args.len() {
+        // Mismatched arity — fall back to side-effect lowering only.
+        for a in args {
+            let _ = lower_expr(ctx, a)?;
+        }
+        return Ok(double_literal(0.0));
+    }
+
+    // Lower each arg according to its declared kind. Build two parallel
+    // vectors so we can pass them through to `blk.call(...)` in one shot
+    // without intermediate borrows.
+    let mut llvm_args: Vec<(crate::types::LlvmType, String)> =
+        Vec::with_capacity(args.len());
+    let mut runtime_param_types: Vec<crate::types::LlvmType> =
+        Vec::with_capacity(args.len());
+    for (kind, arg) in sig.args.iter().zip(args.iter()) {
+        match kind {
+            UiArgKind::Widget => {
+                // Widgets are NaN-boxed pointers. Lower as JSValue,
+                // strip the POINTER_TAG bits to get the raw 1-based
+                // handle as i64.
+                let v = lower_expr(ctx, arg)?;
+                let blk = ctx.block();
+                let h = unbox_to_i64(blk, &v);
+                llvm_args.push((I64, h));
+                runtime_param_types.push(I64);
+            }
+            UiArgKind::Str => {
+                let h = get_raw_string_ptr(ctx, arg)?;
+                llvm_args.push((I64, h));
+                runtime_param_types.push(I64);
+            }
+            UiArgKind::F64 => {
+                let v = lower_expr(ctx, arg)?;
+                llvm_args.push((DOUBLE, v));
+                runtime_param_types.push(DOUBLE);
+            }
+            UiArgKind::Closure => {
+                // Closures are NaN-boxed pointers passed as f64. The
+                // runtime side calls `js_closure_call0` (or callN) on
+                // them, so it expects the f64 representation.
+                let v = lower_expr(ctx, arg)?;
+                llvm_args.push((DOUBLE, v));
+                runtime_param_types.push(DOUBLE);
+            }
+            UiArgKind::I64Raw => {
+                // Numeric arg the runtime wants as i64 (e.g. enum tag,
+                // boolean flag). `fptosi` converts the f64 to a signed
+                // integer.
+                let v = lower_expr(ctx, arg)?;
+                let blk = ctx.block();
+                let i = blk.fptosi(DOUBLE, &v, I64);
+                llvm_args.push((I64, i));
+                runtime_param_types.push(I64);
+            }
+        }
+    }
+
+    // Lazy-declare the runtime function so the linker pulls in the
+    // libperry_ui_*.a symbol. Same pending_declares mechanism the
+    // cross-module call site uses for `perry_fn_*`.
+    let return_type = match sig.ret {
+        UiReturnKind::Widget => I64,
+        UiReturnKind::F64 => DOUBLE,
+        UiReturnKind::Void => crate::types::VOID,
+    };
+    ctx.pending_declares.push((
+        sig.runtime.to_string(),
+        return_type,
+        runtime_param_types,
+    ));
+
+    // Emit the call. Slices need a borrow of `llvm_args` because the
+    // tuple's second field is `String` and `blk.call` expects `&str`.
+    let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+        llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
+    match sig.ret {
+        UiReturnKind::Widget => {
+            let blk = ctx.block();
+            let handle = blk.call(I64, sig.runtime, &arg_slices);
+            Ok(nanbox_pointer_inline(blk, &handle))
+        }
+        UiReturnKind::F64 => {
+            Ok(ctx.block().call(DOUBLE, sig.runtime, &arg_slices))
+        }
+        UiReturnKind::Void => {
+            ctx.block().call_void(sig.runtime, &arg_slices);
+            Ok(double_literal(0.0))
+        }
+    }
 }
