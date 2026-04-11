@@ -142,6 +142,10 @@ pub struct LoweringContext {
     /// calls in `for...of` so the iterator protocol loop is emitted instead of
     /// the array-index loop.
     pub(crate) generator_func_names: HashSet<String>,
+    /// Subset of `generator_func_names` that were `async function*`. Used by
+    /// the for-of generator-call path so it can wrap `__iter.next()` in
+    /// `await` (async generators always return `Promise<{value, done}>`).
+    pub(crate) async_generator_func_names: HashSet<String>,
     /// Classes that define `*[Symbol.iterator]()`. Maps class name →
     /// `FuncId` of the synthesized top-level generator function that
     /// takes `this` as its first parameter. Consumed by `for...of` to
@@ -230,6 +234,7 @@ impl LoweringContext {
             weakmap_locals: HashSet::new(),
             weakset_locals: HashSet::new(),
             generator_func_names: HashSet::new(),
+            async_generator_func_names: HashSet::new(),
             iterator_func_for_class: std::collections::HashMap::new(),
             regex_exec_locals: HashSet::new(),
             proxy_locals: HashSet::new(),
@@ -3650,6 +3655,21 @@ fn lower_stmt(
                 } else { false }
             } else { false };
 
+            // Detect whether the called generator was an `async function*`.
+            // Async generators always return `Promise<{value, done}>` from
+            // `.next()`, so the iterator-protocol loop must `await` each
+            // call before reading `.value` / `.done`. Either the user
+            // wrote `for await (...)` (SWC `is_await`) or the callee was
+            // declared async — both must trigger awaiting.
+            let callee_is_async_gen = if let ast::Expr::Call(call) = &*for_of_stmt.right {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = &**callee_expr {
+                        ctx.async_generator_func_names.contains(ident.sym.as_ref())
+                    } else { false }
+                } else { false }
+            } else { false };
+            let needs_await = for_of_stmt.is_await || callee_is_async_gen;
+
             // Also detect: for (const x of new Range(...)) where Range
             // defines `*[Symbol.iterator]()`. We lowered that method as
             // a synthesized top-level generator function taking `this`
@@ -3699,13 +3719,21 @@ fn lower_stmt(
                 let result_id = ctx.fresh_local();
                 ctx.locals.push((format!("__result_{}", result_id), result_id, Type::Any));
                 // __result = __iter.next()
-                let next_call = Expr::Call {
+                // For async generators / `for await ... of`, wrap the
+                // call in `Expr::Await` so the resolved iter-result
+                // (`{value, done}`) is what's stored, not the Promise.
+                let raw_next_call = Expr::Call {
                     callee: Box::new(Expr::PropertyGet {
                         object: Box::new(Expr::LocalGet(iter_id)),
                         property: "next".to_string(),
                     }),
                     args: vec![],
                     type_args: vec![],
+                };
+                let next_call = if needs_await {
+                    Expr::Await(Box::new(raw_next_call))
+                } else {
+                    raw_next_call
                 };
                 module.init.push(Stmt::Let {
                     id: result_id,
@@ -4361,7 +4389,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     && name != "Error" && name != "TypeError" && name != "RangeError" && name != "Promise"
                     && name != "Map" && name != "Set" && name != "RegExp" && name != "Symbol"
                     && name != "WeakMap" && name != "WeakSet" && name != "WeakRef" && name != "FinalizationRegistry" && name != "Proxy" && name != "Reflect"
-                    && name != "Uint8Array" && name != "Int8Array" && name != "TextEncoder" && name != "TextDecoder"
+                    && name != "Uint8Array" && name != "Int8Array" && name != "Int16Array" && name != "Uint16Array"
+                    && name != "Int32Array" && name != "Uint32Array" && name != "Float32Array" && name != "Float64Array"
+                    && name != "TextEncoder" && name != "TextDecoder"
                     && name != "URL" && name != "URLSearchParams" && name != "AbortController" && name != "FormData"
                     && name != "Headers" && name != "fetch" && name != "crypto" && name != "performance"
                     && name != "queueMicrotask" && name != "structuredClone" && name != "atob" && name != "btoa"
@@ -9347,6 +9377,26 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                         }
                         // 2+ args: fall through to Expr::New to handle
                         // new Uint8Array(buffer, byteOffset, length) etc.
+                    }
+
+                    // Handle other typed-array constructors (Int8/16/32, Uint16/32, Float32/64).
+                    // Uint8Array stays on the Buffer path above.
+                    if let Some(kind) = crate::ir::typed_array_kind_for_name(class_name.as_str()) {
+                        if class_name != "Uint8Array" && class_name != "Uint8ClampedArray" {
+                            let args = new_expr.args.as_ref()
+                                .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
+                                .transpose()?
+                                .unwrap_or_default();
+                            if args.is_empty() {
+                                return Ok(Expr::TypedArrayNew { kind, arg: None });
+                            } else if args.len() == 1 {
+                                return Ok(Expr::TypedArrayNew {
+                                    kind,
+                                    arg: Some(Box::new(args.into_iter().next().unwrap())),
+                                });
+                            }
+                            // Multi-arg form (buffer, byteOffset, length): fall through.
+                        }
                     }
 
                     let args = new_expr.args.as_ref()

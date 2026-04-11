@@ -174,14 +174,28 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         // `.then()` / `.catch()` chains.
         Expr::Call { callee, .. } => {
             if is_promise_expr(ctx, init) {
-                Some(HirType::Promise(Box::new(HirType::Any)))
-            } else {
-                // Check if callee is a known function whose name is
-                // an async fn — those return promises.
-                match callee.as_ref() {
-                    _ => None,
+                return Some(HirType::Promise(Box::new(HirType::Any)));
+            }
+            // fs.readdirSync(path) → Array<String>. HIR lowers this as
+            // `Call { callee: PropertyGet { object: NativeModuleRef("fs"),
+            // property: "readdirSync" } }` — refine so `entries.includes(...)`
+            // hits the array fast path via is_array_expr.
+            // Same for realpathSync/mkdtempSync (string-returning).
+            if let Expr::PropertyGet { object, property } = callee.as_ref() {
+                if matches!(object.as_ref(), Expr::NativeModuleRef(m) if m == "fs") {
+                    match property.as_str() {
+                        "readdirSync" => {
+                            return Some(HirType::Array(Box::new(HirType::String)));
+                        }
+                        "realpathSync" | "mkdtempSync" | "readlinkSync"
+                        | "readFileSync" => {
+                            return Some(HirType::String);
+                        }
+                        _ => {}
+                    }
                 }
             }
+            None
         }
         _ => None,
     }

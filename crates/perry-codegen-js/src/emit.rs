@@ -1591,6 +1591,27 @@ impl JsEmitter {
                 if let Some(s) = size { self.emit_expr(s); }
                 self.output.push(')');
             }
+            Expr::TypedArrayNew { kind, arg } => {
+                let name = match *kind {
+                    0 => "Int8Array",
+                    1 => "Uint8Array",
+                    2 => "Uint8ClampedArray",
+                    3 => "Int16Array",
+                    4 => "Uint16Array",
+                    5 => "Int32Array",
+                    6 => "Uint32Array",
+                    7 => "Float32Array",
+                    8 => "Float64Array",
+                    9 => "BigInt64Array",
+                    10 => "BigUint64Array",
+                    _ => "Int32Array",
+                };
+                self.output.push_str("new ");
+                self.output.push_str(name);
+                self.output.push('(');
+                if let Some(a) = arg { self.emit_expr(a); }
+                self.output.push(')');
+            }
             Expr::Uint8ArrayFrom(src) => {
                 self.output.push_str("Uint8Array.from(");
                 self.emit_expr(src);

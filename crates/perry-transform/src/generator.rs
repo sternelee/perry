@@ -123,7 +123,53 @@ fn scan_expr_for_max_func(expr: &Expr, max_id: &mut FuncId) {
             *max_id = (*max_id).max(*func_id);
             scan_stmts_for_max_func(body, max_id);
         }
-        _ => {} // Could recurse deeper but this covers the main cases
+        Expr::Call { callee, args, .. } => {
+            scan_expr_for_max_func(callee, max_id);
+            for a in args { scan_expr_for_max_func(a, max_id); }
+        }
+        Expr::New { args, .. } => {
+            for a in args { scan_expr_for_max_func(a, max_id); }
+        }
+        Expr::Await(inner) | Expr::Unary { operand: inner, .. } => {
+            scan_expr_for_max_func(inner, max_id);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            scan_expr_for_max_func(left, max_id);
+            scan_expr_for_max_func(right, max_id);
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            scan_expr_for_max_func(condition, max_id);
+            scan_expr_for_max_func(then_expr, max_id);
+            scan_expr_for_max_func(else_expr, max_id);
+        }
+        Expr::PropertyGet { object, .. } => scan_expr_for_max_func(object, max_id),
+        Expr::IndexGet { object, index } => {
+            scan_expr_for_max_func(object, max_id);
+            scan_expr_for_max_func(index, max_id);
+        }
+        Expr::PropertySet { object, value, .. } => {
+            scan_expr_for_max_func(object, max_id);
+            scan_expr_for_max_func(value, max_id);
+        }
+        Expr::IndexSet { object, index, value } => {
+            scan_expr_for_max_func(object, max_id);
+            scan_expr_for_max_func(index, max_id);
+            scan_expr_for_max_func(value, max_id);
+        }
+        Expr::LocalSet(_, v) => scan_expr_for_max_func(v, max_id),
+        Expr::Array(items) => {
+            for item in items { scan_expr_for_max_func(item, max_id); }
+        }
+        Expr::Object(fields) => {
+            for (_, v) in fields { scan_expr_for_max_func(v, max_id); }
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs { scan_expr_for_max_func(e, max_id); }
+        }
+        Expr::Yield { value: Some(v), .. } => scan_expr_for_max_func(v, max_id),
+        _ => {} // Other variants don't carry FuncIds
     }
 }
 
