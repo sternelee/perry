@@ -594,6 +594,14 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_console_group_begin", VOID, &[]);
     module.declare_function("js_console_group_end", VOID, &[]);
     module.declare_function("js_console_clear", VOID, &[]);
+    // Universal PropertyGet method dispatch fallback — routes
+    // `recv.method(args)` to the runtime's dispatcher when no static
+    // codegen path fires. Used by Map/Set methods on plain object fields.
+    module.declare_function(
+        "js_native_call_method",
+        DOUBLE,
+        &[DOUBLE, PTR, I64, PTR, I64],
+    );
     module.declare_function("js_promise_resolve", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_reject", VOID, &[I64, DOUBLE]);
     module.declare_function("js_promise_resolved", I64, &[DOUBLE]);
