@@ -9638,6 +9638,41 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             return Ok(Expr::DateNew(Some(Box::new(args.into_iter().next().unwrap()))));
                         }
                     }
+                    if class_name == "RegExp" {
+                        // new RegExp(pattern[, flags]) — for string-literal args,
+                        // route to the same `Expr::RegExp { pattern, flags }`
+                        // variant the literal `/foo/g` syntax produces. The
+                        // codegen interns both strings and calls
+                        // `js_regexp_new(pattern_handle, flags_handle)`.
+                        //
+                        // Without this branch, the New expression falls through
+                        // to generic class instantiation, which silently fails
+                        // (no user class named RegExp), leaving an unusable
+                        // ObjectHeader that makes regex.exec() return null and
+                        // any subsequent indexing on that null crash.
+                        let args_ast = new_expr.args.as_ref();
+                        let pattern_lit = args_ast
+                            .and_then(|args| args.first())
+                            .and_then(|a| match a.expr.as_ref() {
+                                ast::Expr::Lit(ast::Lit::Str(s)) => Some(s.value.as_str().unwrap_or("").to_string()),
+                                _ => None,
+                            });
+                        let flags_lit = args_ast
+                            .and_then(|args| args.get(1))
+                            .and_then(|a| match a.expr.as_ref() {
+                                ast::Expr::Lit(ast::Lit::Str(s)) => Some(s.value.as_str().unwrap_or("").to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        if let Some(pattern) = pattern_lit {
+                            return Ok(Expr::RegExp { pattern, flags: flags_lit });
+                        }
+                        // Fall through to generic class instantiation for
+                        // non-literal args (e.g. `new RegExp(userInput)`).
+                        // That path is currently broken too, but at least
+                        // doesn't regress on the literal case which is far
+                        // more common.
+                    }
                     if class_name == "Proxy" {
                         let args = new_expr.args.as_ref()
                             .map(|args| args.iter().map(|a| lower_expr(ctx, &a.expr)).collect::<Result<Vec<_>>>())
