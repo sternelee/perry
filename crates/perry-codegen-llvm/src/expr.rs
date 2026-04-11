@@ -3463,9 +3463,66 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // -------- ClassRef stub (returns class id 0 as a sentinel) --------
         Expr::ClassRef(_) => Ok(double_literal(0.0)),
 
-        // -------- CallSpread: lower callee + args, ignore spread semantics --------
+        // -------- CallSpread: function call with spread arguments --------
+        // The common shape is `fn(...args)` — single spread, no regular
+        // args, callee is a known FuncRef whose declared param count we
+        // can read. Lower the spread source as an array, then extract
+        // expected_count elements via `js_array_get_f64` and call the
+        // function with the unpacked args. Mirrors Cranelift's strategy
+        // in `crates/perry-codegen/src/expr.rs::CallSpread`.
+        //
+        // For unsupported shapes (multiple spread args, mixed regular
+        // + spread, non-FuncRef callees, unknown signature) we fall
+        // through to the previous stub behavior so the program at
+        // least compiles. Those cases need their own follow-up.
         Expr::CallSpread { callee, args, .. } => {
             use perry_hir::CallArg;
+            let spread_count = args.iter().filter(|a| matches!(a, CallArg::Spread(_))).count();
+            let regular_count = args.iter().filter(|a| matches!(a, CallArg::Expr(_))).count();
+
+            if let Expr::FuncRef(fid) = callee.as_ref() {
+                if spread_count == 1 && regular_count == 0 {
+                    if let (Some(fname), Some(sig)) = (
+                        ctx.func_names.get(fid).cloned(),
+                        ctx.func_signatures.get(fid).copied(),
+                    ) {
+                        let (declared_count, _has_rest) = sig;
+
+                        // Find the spread source expression.
+                        let spread_expr = args.iter().find_map(|a| match a {
+                            CallArg::Spread(e) => Some(e),
+                            _ => None,
+                        }).expect("spread_count == 1 guarantees one Spread");
+
+                        // Lower the spread source as an array.
+                        let arr_box = lower_expr(ctx, spread_expr)?;
+                        let blk = ctx.block();
+                        let arr_handle = unbox_to_i64(blk, &arr_box);
+
+                        // Extract `declared_count` elements from the array.
+                        let mut lowered: Vec<String> = Vec::with_capacity(declared_count);
+                        for i in 0..declared_count {
+                            let idx = format!("{}", i);
+                            let blk = ctx.block();
+                            let elem = blk.call(
+                                DOUBLE,
+                                "js_array_get_f64",
+                                &[(I64, &arr_handle), (I32, &idx)],
+                            );
+                            lowered.push(elem);
+                        }
+
+                        let arg_slices: Vec<(crate::types::LlvmType, &str)> =
+                            lowered.iter().map(|s| (DOUBLE, s.as_str())).collect();
+                        return Ok(ctx.block().call(DOUBLE, &fname, &arg_slices));
+                    }
+                }
+            }
+
+            // Fallback: stub behavior. Lower everything for side effects,
+            // return undefined-equivalent. This keeps the program compiling
+            // for unsupported spread shapes while still being obviously
+            // wrong if executed.
             let _ = lower_expr(ctx, callee)?;
             for a in args {
                 match a {
