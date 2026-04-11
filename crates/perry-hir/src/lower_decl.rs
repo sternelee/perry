@@ -28,6 +28,108 @@ pub(crate) fn is_symbol_iterator_key(expr: &ast::Expr) -> bool {
     false
 }
 
+/// Pre-scan a function body to detect references to the `arguments` identifier.
+/// Stops descent at nested function declarations and arrow functions, since
+/// those have their own `arguments` binding (or, for arrows, inherit the
+/// enclosing function's). For our purposes, "uses arguments anywhere in the
+/// direct body or nested arrows" is sufficient — nested regular functions
+/// shadow with their own arguments object.
+pub(crate) fn body_uses_arguments(body: &[ast::Stmt]) -> bool {
+    for stmt in body {
+        if stmt_uses_arguments(stmt) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_uses_arguments(stmt: &ast::Stmt) -> bool {
+    match stmt {
+        ast::Stmt::Block(b) => body_uses_arguments(&b.stmts),
+        ast::Stmt::Expr(e) => expr_uses_arguments(&e.expr),
+        ast::Stmt::Return(r) => r.arg.as_deref().map(expr_uses_arguments).unwrap_or(false),
+        ast::Stmt::If(i) => {
+            expr_uses_arguments(&i.test)
+                || stmt_uses_arguments(&i.cons)
+                || i.alt.as_deref().map(stmt_uses_arguments).unwrap_or(false)
+        }
+        ast::Stmt::While(w) => expr_uses_arguments(&w.test) || stmt_uses_arguments(&w.body),
+        ast::Stmt::DoWhile(w) => expr_uses_arguments(&w.test) || stmt_uses_arguments(&w.body),
+        ast::Stmt::For(f) => {
+            f.test.as_deref().map(expr_uses_arguments).unwrap_or(false)
+                || f.update.as_deref().map(expr_uses_arguments).unwrap_or(false)
+                || stmt_uses_arguments(&f.body)
+        }
+        ast::Stmt::ForIn(f) => expr_uses_arguments(&f.right) || stmt_uses_arguments(&f.body),
+        ast::Stmt::ForOf(f) => expr_uses_arguments(&f.right) || stmt_uses_arguments(&f.body),
+        ast::Stmt::Try(t) => {
+            body_uses_arguments(&t.block.stmts)
+                || t.handler.as_ref().map(|h| body_uses_arguments(&h.body.stmts)).unwrap_or(false)
+                || t.finalizer.as_ref().map(|f| body_uses_arguments(&f.stmts)).unwrap_or(false)
+        }
+        ast::Stmt::Switch(s) => {
+            expr_uses_arguments(&s.discriminant)
+                || s.cases.iter().any(|c| body_uses_arguments(&c.cons))
+        }
+        ast::Stmt::Decl(ast::Decl::Var(v)) => {
+            v.decls.iter().any(|d| d.init.as_deref().map(expr_uses_arguments).unwrap_or(false))
+        }
+        ast::Stmt::Throw(t) => expr_uses_arguments(&t.arg),
+        ast::Stmt::Labeled(l) => stmt_uses_arguments(&l.body),
+        _ => false,
+    }
+}
+
+fn expr_uses_arguments(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::Ident(i) => i.sym.as_ref() == "arguments",
+        ast::Expr::Call(c) => {
+            let callee_uses = match &c.callee {
+                ast::Callee::Expr(e) => expr_uses_arguments(e),
+                _ => false,
+            };
+            callee_uses || c.args.iter().any(|a| expr_uses_arguments(&a.expr))
+        }
+        ast::Expr::Member(m) => {
+            expr_uses_arguments(&m.obj)
+                || matches!(&m.prop, ast::MemberProp::Computed(c) if expr_uses_arguments(&c.expr))
+        }
+        ast::Expr::Bin(b) => expr_uses_arguments(&b.left) || expr_uses_arguments(&b.right),
+        ast::Expr::Unary(u) => expr_uses_arguments(&u.arg),
+        ast::Expr::Update(u) => expr_uses_arguments(&u.arg),
+        ast::Expr::Cond(c) => {
+            expr_uses_arguments(&c.test)
+                || expr_uses_arguments(&c.cons)
+                || expr_uses_arguments(&c.alt)
+        }
+        ast::Expr::Assign(a) => expr_uses_arguments(&a.right),
+        ast::Expr::Paren(p) => expr_uses_arguments(&p.expr),
+        ast::Expr::TsAs(t) => expr_uses_arguments(&t.expr),
+        ast::Expr::TsNonNull(t) => expr_uses_arguments(&t.expr),
+        ast::Expr::TsTypeAssertion(t) => expr_uses_arguments(&t.expr),
+        ast::Expr::Tpl(t) => t.exprs.iter().any(|e| expr_uses_arguments(e)),
+        ast::Expr::Array(a) => a.elems.iter().any(|el| {
+            el.as_ref().map(|e| expr_uses_arguments(&e.expr)).unwrap_or(false)
+        }),
+        ast::Expr::Object(o) => o.props.iter().any(|p| match p {
+            ast::PropOrSpread::Spread(s) => expr_uses_arguments(&s.expr),
+            ast::PropOrSpread::Prop(p) => {
+                if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                    expr_uses_arguments(&kv.value)
+                } else {
+                    false
+                }
+            }
+        }),
+        ast::Expr::New(n) => {
+            n.args.as_ref().map(|args| args.iter().any(|a| expr_uses_arguments(&a.expr))).unwrap_or(false)
+        }
+        // Don't descend into nested function declarations or arrow function
+        // bodies — those have their own (or shadowed) `arguments` binding.
+        _ => false,
+    }
+}
+
 pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Function> {
     let name = fn_decl.ident.sym.to_string();
     let func_id = ctx.lookup_func(&name).unwrap_or_else(|| ctx.fresh_func());
@@ -42,6 +144,22 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     ctx.enter_type_param_scope(&type_params);
 
     let scope_mark = ctx.enter_scope();
+
+    // Pre-scan body for `arguments` references. If the function references
+    // `arguments`, we synthesize a trailing rest parameter named "arguments"
+    // so callers automatically bundle their args into an array — and
+    // `Expr::Ident("arguments")` resolves to a LocalGet at lowering time.
+    // Skipped if the user already declared a parameter named `arguments` or
+    // already has a rest param (which would conflict with the synthetic one).
+    let user_has_arguments_param = fn_decl.function.params.iter().any(|p| {
+        get_pat_name(&p.pat).ok().as_deref() == Some("arguments")
+    });
+    let user_has_rest = fn_decl.function.params.iter().any(|p| is_rest_param(&p.pat));
+    let needs_arguments_synth = !user_has_arguments_param
+        && !user_has_rest
+        && fn_decl.function.body.as_ref()
+            .map(|b| body_uses_arguments(&b.stmts))
+            .unwrap_or(false);
 
     // Lower parameters with type extraction (using context for type param resolution)
     let mut params = Vec::new();
@@ -68,6 +186,21 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         if is_destructuring_pattern(inner_pat) {
             destructuring_params.push((param_id, inner_pat.clone()));
         }
+    }
+
+    // If the body references `arguments`, append a synthetic trailing
+    // rest parameter named "arguments". The call site already bundles
+    // trailing args into an array for any rest param, and `Expr::Ident("arguments")`
+    // resolves to a LocalGet of this param.
+    if needs_arguments_synth {
+        let arguments_id = ctx.define_local("arguments".to_string(), Type::Any);
+        params.push(Param {
+            id: arguments_id,
+            name: "arguments".to_string(),
+            ty: Type::Any,
+            default: None,
+            is_rest: true,
+        });
     }
 
     // Register parameters with known native types as native instances
@@ -1014,6 +1147,12 @@ pub(crate) fn lower_type_alias_decl(ctx: &mut LoweringContext, alias_decl: &ast:
 pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, ctor: &ast::Constructor) -> Result<Function> {
     let scope_mark = ctx.enter_scope();
 
+    // Track that we're inside a constructor body so `new.target` can resolve
+    // to a placeholder object with `.name = class_name`. Saved/restored in
+    // case constructors are nested via class expressions.
+    let saved_ctor_class = ctx.in_constructor_class.take();
+    ctx.in_constructor_class = Some(class_name.to_string());
+
     // Add 'this' as a special local
     let _this_id = ctx.define_local("this".to_string(), Type::Any);
 
@@ -1092,6 +1231,7 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
     }
 
     ctx.exit_scope(scope_mark);
+    ctx.in_constructor_class = saved_ctor_class;
 
     Ok(Function {
         id: ctx.fresh_func(),

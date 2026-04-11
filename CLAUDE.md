@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.4.136
+**Current Version:** 0.4.138
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,22 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.80 and earlier), see CHANGELOG.md.
+
+### v0.4.138 (llvm-backend)
+- feat: `test_gap_class_advanced` DIFF (8) → MATCH. Three coordinated fixes:
+  1. `new.target` inside a class constructor body now lowers to `Expr::Object([("name", <class_name>)])` instead of `Expr::Undefined`. New `in_constructor_class: Option<String>` in `LoweringContext`, set/restored by `lower_constructor` (in `lower_decl.rs`), consumed by the `MetaPropKind::NewTarget` arm in `lower.rs`. Outside a constructor it remains `undefined`, so `new.target ? new.target.name : ...` and `new.target === undefined` both work.
+  2. `arguments` identifier in regular function bodies. New `body_uses_arguments` pre-scan in `lower_decl.rs` walks stmts/exprs (skipping nested function declarations and arrow bodies) for `Ident("arguments")` references. If found, `lower_fn_decl` appends a synthetic trailing rest parameter named `arguments` (`is_rest: true`); the existing call-site rest-bundling path automatically wraps trailing args into an array, and `Expr::Ident("arguments")` resolves to a normal `LocalGet`.
+  3. Mixin pattern `function Mix<T>(Base: T) { return class extends Base { ... } }`. New `pre_scan_mixin_functions` walks top-level FnDecls for the exact shape (single param, single return, class extending the param) and stores `(param_name, class_ast)` in `ctx.mixin_funcs`. `const Mixed = Mix(BaseClass)` at variable-decl lowering time clones the captured class AST, rewrites its `extends` to point at the concrete base, and lowers it via `lower_class_from_ast` so `new Mixed()` and inherited fields/methods work normally.
+
+### v0.4.137 (llvm-backend)
+- feat: `test_gap_global_apis` DIFF (~30) → DIFF (1, only UTF-16/UTF-8 length). Five coordinated changes:
+  1. `js_structured_clone` (`builtins.rs`) handles GC_TYPE_MAP, GC_TYPE_OBJECT+REGEX_POINTERS, and SET_REGISTRY (raw alloc). Map clones via `js_map_alloc` + entry copy at 16-byte stride; Set via `js_set_alloc` + element copy; RegExp via `js_regexp_new(source, flags)` so the new copy is a real compiled regex.
+  2. `js_object_get_field_by_name` (`object.rs`) early-outs on `is_registered_set` (no GcHeader to read) and routes Map/RegExp via the GcHeader type. `.size` works for Map/Set fields stored in plain objects; `.source`/`.flags`/`.lastIndex`/`.global`/`.ignoreCase`/`.multiline` work for RegExp fields. Without this, `wrap.m.size` and `wrap.r.source` returned undefined.
+  3. `js_instanceof` (`object.rs`) recognizes new reserved class IDs `0xFFFF0020..0023` for Date/RegExp/Map/Set. Date is a finite f64; the rest check the per-type registries. LLVM `expr.rs::InstanceOf` maps the names to the new IDs alongside the existing Error subclass mapping.
+  4. New `js_native_call_method` fallback dispatch in `lower_call.rs`: when the callee is a `PropertyGet` and the receiver isn't a known class instance / global, lower the receiver as f64, intern the method name, stack-alloc the args buffer, and call the runtime universal dispatcher. The runtime walks Map/Set/RegExp/Buffer/Error registries and routes to the right helper. Map/Set `has`/`delete` runtime arms now NaN-box the i32 result so `console.log(set.has(2))` prints `true` instead of `1`.
+  5. `Atob`/`Btoa` added to `type_analysis.rs` (`refine_type_from_init`, `is_string_expr`, `is_definitely_string_expr`) so `const decoded = atob(...)` is typed as String and `decoded.length`/`decoded.charCodeAt(i)` hit the string fast path.
+- feat: `AbortSignal.timeout(ms)` now lowers via `js_abort_signal_timeout` in `expr.rs::StaticMethodCall` (was returning 0.0 stub), so `signal.aborted` flows through the normal field-by-name dispatch.
+- known limitation: `String.fromCharCode(0,1,2,255)` produces a 5-byte UTF-8 string in Perry vs 4 UTF-16 code units in Node, so `binaryDecoded.length` is 5 not 4. Fundamental string-representation gap, out of scope.
 
 ### v0.4.136 (llvm-backend)
 - feat: `test_gap_object_methods` DIFF (9) → MATCH. Two coordinated fixes:

@@ -10021,8 +10021,20 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                     ]))
                 }
                 ast::MetaPropKind::NewTarget => {
-                    // new.target - not commonly used, return undefined for now
-                    Ok(Expr::Undefined)
+                    // Inside a class constructor, `new.target` evaluates to the
+                    // class itself. We approximate this with a small object
+                    // literal `{ name: <class_name> }` so:
+                    //   - `new.target ? a : b` is truthy → takes the `a` branch
+                    //   - `new.target.name` returns the class name string
+                    // Outside a constructor (e.g., a regular function called
+                    // without `new`), `new.target` is `undefined`.
+                    if let Some(class_name) = ctx.in_constructor_class.clone() {
+                        Ok(Expr::Object(vec![
+                            ("name".to_string(), Expr::String(class_name)),
+                        ]))
+                    } else {
+                        Ok(Expr::Undefined)
+                    }
                 }
             }
         }
