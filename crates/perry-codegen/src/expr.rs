@@ -1315,6 +1315,32 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             //   3. Anything else → fall back to dynamic object field
             //      access by stringifying the index at runtime
             if is_array_expr(ctx, object) {
+                // Bounded-index fast path (mirrors the IndexSet
+                // optimization in the same file): if the surrounding
+                // for-loop registered `(counter_id, arr_id)` as
+                // bounded via `lower_for`'s `classify_for_length_hoist`,
+                // we can skip the bound check + OOB phi entirely.
+                // The loop already proved `i < arr.length` and the
+                // body provably can't change `arr.length`.
+                if let (Expr::LocalGet(arr_id), Expr::LocalGet(idx_id)) =
+                    (object.as_ref(), index.as_ref())
+                {
+                    if ctx.bounded_index_pairs.contains(&(*idx_id, *arr_id)) {
+                        let arr_box = lower_expr(ctx, object)?;
+                        let idx_double = lower_expr(ctx, index)?;
+                        let blk = ctx.block();
+                        let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                        let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                        let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                        let idx_i64 = blk.zext(I32, &idx_i32, I64);
+                        let byte_offset = blk.shl(I64, &idx_i64, "3");
+                        let with_header = blk.add(I64, &byte_offset, "8");
+                        let element_addr = blk.add(I64, &arr_handle, &with_header);
+                        let element_ptr = blk.inttoptr(I64, &element_addr);
+                        return Ok(blk.load(DOUBLE, &element_ptr));
+                    }
+                }
+
                 let arr_box = lower_expr(ctx, object)?;
                 let idx_double = lower_expr(ctx, index)?;
                 let blk = ctx.block();
