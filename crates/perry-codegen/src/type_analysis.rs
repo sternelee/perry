@@ -279,6 +279,19 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
                     return Some(HirType::String);
                 }
             }
+            // Cross-module function calls: refine from the imported return
+            // type table. Without this, `const name = getFileName(path)`
+            // stays typed as Any even though `getFileName` declares
+            // `return_type: String` in the source module. This causes
+            // `name.charCodeAt(i)` to fall through to the generic method
+            // dispatcher (which returns [object Object] for strings).
+            if let Expr::ExternFuncRef { name, .. } = callee.as_ref() {
+                if let Some(ret_ty) = ctx.imported_func_return_types.get(name) {
+                    if !matches!(ret_ty, HirType::Any | HirType::Void) {
+                        return Some(ret_ty.clone());
+                    }
+                }
+            }
             None
         }
         _ => None,
