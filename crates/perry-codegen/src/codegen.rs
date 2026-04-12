@@ -682,12 +682,11 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // forward/recursive calls without worrying about emission order.
     // Names are scoped by module prefix to avoid cross-module collisions.
     let mut func_names: HashMap<u32, String> = HashMap::new();
-    let mut func_signatures: HashMap<u32, (usize, bool, bool)> = HashMap::new();
+    let mut func_signatures: HashMap<u32, (usize, bool)> = HashMap::new();
     for f in &hir.functions {
         func_names.insert(f.id, scoped_fn_name(&module_prefix, &f.name));
         let has_rest = f.params.iter().any(|p| p.is_rest);
-        let returns_number = matches!(f.return_type, perry_types::Type::Number | perry_types::Type::Int32);
-        func_signatures.insert(f.id, (f.params.len(), has_rest, returns_number));
+        func_signatures.insert(f.id, (f.params.len(), has_rest));
     }
 
     // Module-level boxed_vars: union of every per-function/method/
@@ -1106,7 +1105,7 @@ fn compile_function(
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
     static_field_globals: &HashMap<(String, String), String>,
     class_ids: &HashMap<String, u32>,
-    func_signatures: &HashMap<u32, (usize, bool, bool)>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
     cross_module: &CrossModuleCtx,
@@ -1258,7 +1257,7 @@ fn compile_closure(
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
     static_field_globals: &HashMap<(String, String), String>,
     class_ids: &HashMap<String, u32>,
-    func_signatures: &HashMap<u32, (usize, bool, bool)>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
     module_prefix: &str,
     module_boxed_vars: &std::collections::HashSet<u32>,
     module_local_types: &HashMap<u32, perry_types::Type>,
@@ -1472,7 +1471,7 @@ fn compile_method(
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
     static_field_globals: &HashMap<(String, String), String>,
     class_ids: &HashMap<String, u32>,
-    func_signatures: &HashMap<u32, (usize, bool, bool)>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,
     cross_module: &CrossModuleCtx,
@@ -1610,7 +1609,7 @@ fn compile_module_entry(
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
     static_field_globals: &HashMap<(String, String), String>,
     class_ids: &HashMap<String, u32>,
-    func_signatures: &HashMap<u32, (usize, bool, bool)>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
     module_prefix: &str,
     is_entry: bool,
     non_entry_module_prefixes: &[String],
@@ -1972,7 +1971,7 @@ fn compile_static_method(
     enums: &HashMap<(String, String), perry_hir::EnumValue>,
     static_field_globals: &HashMap<(String, String), String>,
     class_ids: &HashMap<String, u32>,
-    func_signatures: &HashMap<u32, (usize, bool, bool)>,
+    func_signatures: &HashMap<u32, (usize, bool)>,
     module_prefix: &str,
     module_boxed_vars: &std::collections::HashSet<u32>,
     closure_rest_params: &HashMap<u32, usize>,

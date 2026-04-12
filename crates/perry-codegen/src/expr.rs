@@ -226,7 +226,7 @@ pub(crate) struct FnCtx<'a> {
     /// Per-function param signature: `(declared_param_count,
     /// has_rest_param)`. Used by FuncRef call sites to know whether
     /// to bundle trailing arguments into a rest array.
-    pub func_signatures: &'a std::collections::HashMap<u32, (usize, bool, bool)>,
+    pub func_signatures: &'a std::collections::HashMap<u32, (usize, bool)>,
     /// LocalIds that must be stored in heap boxes (`js_box_alloc`)
     /// instead of stack allocas. A local gets boxed when at least
     /// one closure captures it AND it's written to (either by the
@@ -4108,7 +4108,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         ctx.func_names.get(fid).cloned(),
                         ctx.func_signatures.get(fid).copied(),
                     ) {
-                        let (declared_count, _has_rest, _) = sig;
+                        let (declared_count, _has_rest) = sig;
 
                         // Find the spread source expression.
                         let spread_expr = args.iter().find_map(|a| match a {

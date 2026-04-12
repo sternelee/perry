@@ -101,7 +101,7 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // beyond the rest position) into an array literal and
         // pass that as a single argument.
         let sig = ctx.func_signatures.get(fid).copied();
-        let (declared_count, has_rest, _) = sig.unwrap_or((args.len(), false, false));
+        let (declared_count, has_rest) = sig.unwrap_or((args.len(), false));
         let mut lowered: Vec<String> = Vec::with_capacity(declared_count);
         if has_rest {
             // Rest is always the LAST declared param. Pass the
