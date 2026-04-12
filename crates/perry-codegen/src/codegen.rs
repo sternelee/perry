@@ -368,6 +368,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     }
     // Add imported class stubs to the class_table (references into the
     // Vec we just built — the Vec lives for the remainder of compile_module).
+    // Also build a map from class name → source module prefix so method
+    // dispatch generates the correct cross-module symbol name.
+    let mut imported_class_prefix: HashMap<String, String> = HashMap::new();
+    for ic in &opts.imported_classes {
+        let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
+        imported_class_prefix.insert(effective_name.to_string(), ic.source_prefix.clone());
+    }
     for stub in &imported_class_stubs {
         class_table.entry(stub.name.clone()).or_insert(stub);
     }
@@ -651,11 +658,16 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     // which mangled function name to call for `obj.method(args)`. Method
     // names are also scoped by module prefix.
     let mut method_names: HashMap<(String, String), String> = HashMap::new();
-    for c in &hir.classes {
+    for c in class_table.values() {
+        // Use the source module prefix for imported classes so the method
+        // symbol name matches where the method was actually compiled.
+        let class_prefix = imported_class_prefix
+            .get(&c.name)
+            .unwrap_or(&module_prefix);
         for m in &c.methods {
             method_names.insert(
                 (c.name.clone(), m.name.clone()),
-                scoped_method_name(&module_prefix, &c.name, &m.name),
+                scoped_method_name(class_prefix, &c.name, &m.name),
             );
         }
         // Constructor: register as a method so compile_method can find it.
@@ -665,7 +677,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             let ctor_method_name = format!("{}_constructor", c.name);
             method_names.insert(
                 (c.name.clone(), ctor_method_name.clone()),
-                format!("{}__{}_constructor", module_prefix, c.name),
+                format!("{}__{}_constructor", class_prefix, c.name),
             );
         }
         // Getters: register under the property name with a `__get_`
@@ -675,13 +687,13 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         for (prop, f) in &c.getters {
             method_names.insert(
                 (c.name.clone(), format!("__get_{}", prop)),
-                scoped_method_name(&module_prefix, &c.name, &format!("__get_{}", f.name)),
+                scoped_method_name(class_prefix, &c.name, &format!("__get_{}", f.name)),
             );
         }
         for (prop, f) in &c.setters {
             method_names.insert(
                 (c.name.clone(), format!("__set_{}", prop)),
-                scoped_method_name(&module_prefix, &c.name, &format!("__set_{}", f.name)),
+                scoped_method_name(class_prefix, &c.name, &format!("__set_{}", f.name)),
             );
         }
         // Static methods. Registered under their plain method name
@@ -695,7 +707,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 (c.name.clone(), sm.name.clone()),
                 format!(
                     "perry_static_{}__{}__{}",
-                    module_prefix,
+                    class_prefix,
                     sanitize(&c.name),
                     sanitize(&sm.name),
                 ),
