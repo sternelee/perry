@@ -832,8 +832,38 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         })
         .collect();
 
-    // Lower each user function into the module.
+    // Integer specialization: for pure numeric recursive functions (like
+    // fibonacci), emit an i64 variant that uses integer registers and
+    // integer arithmetic. The f64 wrapper calls fptosi → i64_fn → sitofp.
+    let mut i64_specialized: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for f in &hir.functions {
+        if crate::collectors::is_integer_specializable(f) {
+            if let Some(llvm_name) = func_names.get(&f.id) {
+                let i64_name = format!("{}_i64", llvm_name);
+                crate::collectors::emit_i64_function(&mut llmod, f, &i64_name);
+                // Emit the f64 wrapper that calls the i64 version.
+                let params: Vec<(LlvmType, String)> = f
+                    .params.iter().map(|p| (DOUBLE, format!("%arg{}", p.id))).collect();
+                let wrapper = llmod.define_function(llvm_name, DOUBLE, params);
+                let _ = wrapper.create_block("entry");
+                let blk = wrapper.block_mut(0).unwrap();
+                let mut i64_args: Vec<(LlvmType, String)> = Vec::new();
+                for p in &f.params {
+                    let i64_v = blk.fptosi(DOUBLE, &format!("%arg{}", p.id), I64);
+                    i64_args.push((I64, i64_v));
+                }
+                let refs: Vec<(LlvmType, &str)> = i64_args.iter().map(|(t, v)| (*t, v.as_str())).collect();
+                let i64_result = blk.call(I64, &i64_name, &refs);
+                let f64_result = blk.sitofp(I64, &i64_result, DOUBLE);
+                blk.ret(DOUBLE, &f64_result);
+                i64_specialized.insert(f.id);
+            }
+        }
+    }
+
+    // Lower each user function into the module (skip i64-specialized ones).
+    for f in &hir.functions {
+        if i64_specialized.contains(&f.id) { continue; }
         compile_function(&mut llmod, f, &func_names, &mut strings, &class_table, &method_names, &module_globals, &opts.import_function_prefixes, &enum_table, &static_field_globals, &class_ids, &func_signatures, &module_boxed_vars, &closure_rest_params, &cross_module)
             .with_context(|| format!("lowering function '{}'", f.name))?;
     }
