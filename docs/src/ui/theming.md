@@ -105,7 +105,7 @@ const label = Text("Hello");
 applyTextColor(label, resolved.colors.text);
 applyFontSize(label, resolved.fontSize.heading);
 
-const card = VStack([/* ... */]);
+const card = VStack(16, [/* ... */]);
 applyBg(card, resolved.colors.background);
 applyRadius(card, resolved.radius.md);
 applyGradient(card, startColor, endColor, 0); // 0=vertical, 1=horizontal
@@ -146,7 +146,7 @@ if (isMobile) {
 }
 ```
 
-These are constant-folded by Cranelift at compile time — dead branches are eliminated with zero runtime cost.
+These are constant-folded by LLVM at compile time — dead branches are eliminated with zero runtime cost.
 
 ## Next Steps
 

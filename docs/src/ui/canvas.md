@@ -100,8 +100,11 @@ Canvas(400, 300, (ctx) => {
 ```typescript
 import { App, Canvas, VStack } from "perry/ui";
 
-App("Canvas Demo", () =>
-  VStack([
+App({
+  title: "Canvas Demo",
+  width: 400,
+  height: 320,
+  body: VStack(0, [
     Canvas(400, 300, (ctx) => {
       // Background
       ctx.setFillColor("#1A1A2E");
@@ -127,8 +130,8 @@ App("Canvas Demo", () =>
       ctx.arc(90, 130, 40, 0, Math.PI * 2);
       ctx.fill();
     }),
-  ])
-);
+  ]),
+});
 ```
 
 ## Next Steps

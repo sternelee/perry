@@ -297,6 +297,35 @@ pub(crate) fn infer_call_return_type(callee: &ast::Expr, ctx: &LoweringContext) 
                             _ => Type::Any,
                         };
                     }
+                    // `Buffer.from(...)`, `Buffer.alloc(...)`, etc all
+                    // produce a Buffer instance — refining the local type
+                    // lets `buf[i]` use the byte-indexed `Uint8ArrayGet`
+                    // path and `buf.length` use the inline buffer-length
+                    // load instead of falling through to the dynamic
+                    // array path which reads f64 elements as JS values.
+                    if obj_name == "Buffer" {
+                        return match method_name {
+                            "from" | "alloc" | "allocUnsafe" | "concat"
+                                => Type::Named("Uint8Array".to_string()),
+                            "isBuffer" => Type::Boolean,
+                            "byteLength" => Type::Number,
+                            "compare" => Type::Number,
+                            _ => Type::Any,
+                        };
+                    }
+                    // `crypto.randomBytes(n)` → Buffer; `crypto.randomUUID()`
+                    // / `crypto.createHash(...).update(...).digest('hex')`
+                    // → string. The digest chain is detected via the
+                    // codegen-time chain folding instead of here, since
+                    // it requires walking nested calls.
+                    if obj_name == "crypto" {
+                        return match method_name {
+                            "randomBytes" | "scryptSync" | "pbkdf2Sync"
+                                => Type::Named("Uint8Array".to_string()),
+                            "randomUUID" => Type::String,
+                            _ => Type::Any,
+                        };
+                    }
                     // console.log etc → void
                     if obj_name == "console" {
                         return Type::Void;
@@ -523,8 +552,18 @@ pub(crate) fn extract_ts_type_with_ctx(ts_type: &ast::TsType, ctx: Option<&Lower
         // Import type: import("module").Type
         TsImportType(_) => Type::Any,
 
-        // Type operator: keyof T, readonly T, unique symbol
-        TsTypeOperator(_) => Type::Any,
+        // Type operator: keyof T, readonly T, unique symbol.
+        // For `readonly T` we just return the inner type (the readonly
+        // modifier is purely a type-system concept; runtime treatment is
+        // identical to T). keyof and unique symbol stay as Any.
+        TsTypeOperator(op) => {
+            use swc_ecma_ast::TsTypeOperatorOp;
+            match op.op {
+                TsTypeOperatorOp::ReadOnly => extract_ts_type_with_ctx(&op.type_ann, ctx),
+                TsTypeOperatorOp::KeyOf => Type::String,
+                _ => Type::Any,
+            }
+        }
 
         // Type literal: { a: T, b: U }
         TsTypeLit(lit) => {

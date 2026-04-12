@@ -7,6 +7,12 @@ TEST_DIR="$SCRIPT_DIR/test-files"
 OUTPUT_DIR="$SCRIPT_DIR/test-parity/output"
 REPORT_DIR="$SCRIPT_DIR/test-parity/reports"
 
+# LLVM is the only backend post-Phase K hard cutover. The --llvm /
+# --cranelift flags and PERRY_BACKEND env var are kept as no-ops for
+# backward compat with existing scripts.
+BACKEND_FLAG=""
+BACKEND_LABEL="LLVM"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -106,6 +112,15 @@ normalize_output() {
     echo "$decoded" | \
         # Normalize line endings
         tr -d '\r' | \
+        # Strip Node v22+ MODULE_TYPELESS_PACKAGE_JSON warnings (4 lines
+        # printed to stderr when running .ts files without "type":
+        # "module" in package.json — pure environmental noise that
+        # appeared after the Node v25 upgrade and has nothing to do
+        # with Perry's output).
+        sed -E '/^\(node:[0-9]+\) \[MODULE_TYPELESS_PACKAGE_JSON\]/d' | \
+        sed -E '/^Reparsing as ES module because module syntax was detected/d' | \
+        sed -E '/^To eliminate this warning, add "type": "module"/d' | \
+        sed -E '/^\(Use `node --trace-warnings/d' | \
         # Trim trailing whitespace on each line
         sed 's/[[:space:]]*$//' | \
         # Normalize boolean output: true->1, false->0 (whole line only)
@@ -118,7 +133,7 @@ normalize_output() {
 }
 
 echo "========================================"
-echo "   Perry Parity Test Runner"
+echo "   Perry Parity Test Runner ($BACKEND_LABEL)"
 echo "========================================"
 echo ""
 
@@ -137,7 +152,7 @@ fi
 
 echo -e "${GREEN}Compiler and runtime built successfully${NC}"
 echo ""
-echo "Running parity tests..."
+echo "Running parity tests (backend: $BACKEND_LABEL)..."
 echo ""
 
 # JSON report data
@@ -179,7 +194,7 @@ for test_file in "$TEST_DIR"/*.ts; do
     echo "$node_output" > "$node_output_file"
 
     # Compile with Perry
-    compile_output=$(cargo run --quiet -- "$test_file" -o "$perry_binary" 2>&1)
+    compile_output=$(cargo run --quiet -- $BACKEND_FLAG "$test_file" -o "$perry_binary" 2>&1)
     compile_exit=$?
 
     if [[ $compile_exit -ne 0 ]]; then

@@ -15,6 +15,144 @@ use crate::lower_patterns::*;
 use crate::destructuring::*;
 use crate::analysis::*;
 
+/// Detect the computed key `[Symbol.iterator]` in a class method / object
+/// literal. Recognizes the standard `Symbol.iterator` form — doesn't try to
+/// evaluate arbitrary expressions, which is enough for `*[Symbol.iterator]()`
+/// as emitted by SWC for user code.
+pub(crate) fn is_symbol_iterator_key(expr: &ast::Expr) -> bool {
+    if let ast::Expr::Member(member) = expr {
+        if let (ast::Expr::Ident(obj), ast::MemberProp::Ident(prop)) = (member.obj.as_ref(), &member.prop) {
+            return obj.sym.as_ref() == "Symbol" && prop.sym.as_ref() == "iterator";
+        }
+    }
+    false
+}
+
+/// Detect the computed key `[Symbol.<well-known>]` in a class method (static
+/// method, getter, regular method). Returns the short well-known name
+/// ("toPrimitive", "hasInstance", "toStringTag", "iterator", "asyncIterator")
+/// if the expression matches `Symbol.X` for a supported well-known.
+pub(crate) fn symbol_well_known_key(expr: &ast::Expr) -> Option<&'static str> {
+    if let ast::Expr::Member(member) = expr {
+        if let (ast::Expr::Ident(obj), ast::MemberProp::Ident(prop)) = (member.obj.as_ref(), &member.prop) {
+            if obj.sym.as_ref() != "Symbol" {
+                return None;
+            }
+            return match prop.sym.as_ref() {
+                "toPrimitive" => Some("toPrimitive"),
+                "hasInstance" => Some("hasInstance"),
+                "toStringTag" => Some("toStringTag"),
+                "iterator" => Some("iterator"),
+                "asyncIterator" => Some("asyncIterator"),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// Pre-scan a function body to detect references to the `arguments` identifier.
+/// Stops descent at nested function declarations and arrow functions, since
+/// those have their own `arguments` binding (or, for arrows, inherit the
+/// enclosing function's). For our purposes, "uses arguments anywhere in the
+/// direct body or nested arrows" is sufficient — nested regular functions
+/// shadow with their own arguments object.
+pub(crate) fn body_uses_arguments(body: &[ast::Stmt]) -> bool {
+    for stmt in body {
+        if stmt_uses_arguments(stmt) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_uses_arguments(stmt: &ast::Stmt) -> bool {
+    match stmt {
+        ast::Stmt::Block(b) => body_uses_arguments(&b.stmts),
+        ast::Stmt::Expr(e) => expr_uses_arguments(&e.expr),
+        ast::Stmt::Return(r) => r.arg.as_deref().map(expr_uses_arguments).unwrap_or(false),
+        ast::Stmt::If(i) => {
+            expr_uses_arguments(&i.test)
+                || stmt_uses_arguments(&i.cons)
+                || i.alt.as_deref().map(stmt_uses_arguments).unwrap_or(false)
+        }
+        ast::Stmt::While(w) => expr_uses_arguments(&w.test) || stmt_uses_arguments(&w.body),
+        ast::Stmt::DoWhile(w) => expr_uses_arguments(&w.test) || stmt_uses_arguments(&w.body),
+        ast::Stmt::For(f) => {
+            f.test.as_deref().map(expr_uses_arguments).unwrap_or(false)
+                || f.update.as_deref().map(expr_uses_arguments).unwrap_or(false)
+                || stmt_uses_arguments(&f.body)
+        }
+        ast::Stmt::ForIn(f) => expr_uses_arguments(&f.right) || stmt_uses_arguments(&f.body),
+        ast::Stmt::ForOf(f) => expr_uses_arguments(&f.right) || stmt_uses_arguments(&f.body),
+        ast::Stmt::Try(t) => {
+            body_uses_arguments(&t.block.stmts)
+                || t.handler.as_ref().map(|h| body_uses_arguments(&h.body.stmts)).unwrap_or(false)
+                || t.finalizer.as_ref().map(|f| body_uses_arguments(&f.stmts)).unwrap_or(false)
+        }
+        ast::Stmt::Switch(s) => {
+            expr_uses_arguments(&s.discriminant)
+                || s.cases.iter().any(|c| body_uses_arguments(&c.cons))
+        }
+        ast::Stmt::Decl(ast::Decl::Var(v)) => {
+            v.decls.iter().any(|d| d.init.as_deref().map(expr_uses_arguments).unwrap_or(false))
+        }
+        ast::Stmt::Throw(t) => expr_uses_arguments(&t.arg),
+        ast::Stmt::Labeled(l) => stmt_uses_arguments(&l.body),
+        _ => false,
+    }
+}
+
+fn expr_uses_arguments(expr: &ast::Expr) -> bool {
+    match expr {
+        ast::Expr::Ident(i) => i.sym.as_ref() == "arguments",
+        ast::Expr::Call(c) => {
+            let callee_uses = match &c.callee {
+                ast::Callee::Expr(e) => expr_uses_arguments(e),
+                _ => false,
+            };
+            callee_uses || c.args.iter().any(|a| expr_uses_arguments(&a.expr))
+        }
+        ast::Expr::Member(m) => {
+            expr_uses_arguments(&m.obj)
+                || matches!(&m.prop, ast::MemberProp::Computed(c) if expr_uses_arguments(&c.expr))
+        }
+        ast::Expr::Bin(b) => expr_uses_arguments(&b.left) || expr_uses_arguments(&b.right),
+        ast::Expr::Unary(u) => expr_uses_arguments(&u.arg),
+        ast::Expr::Update(u) => expr_uses_arguments(&u.arg),
+        ast::Expr::Cond(c) => {
+            expr_uses_arguments(&c.test)
+                || expr_uses_arguments(&c.cons)
+                || expr_uses_arguments(&c.alt)
+        }
+        ast::Expr::Assign(a) => expr_uses_arguments(&a.right),
+        ast::Expr::Paren(p) => expr_uses_arguments(&p.expr),
+        ast::Expr::TsAs(t) => expr_uses_arguments(&t.expr),
+        ast::Expr::TsNonNull(t) => expr_uses_arguments(&t.expr),
+        ast::Expr::TsTypeAssertion(t) => expr_uses_arguments(&t.expr),
+        ast::Expr::Tpl(t) => t.exprs.iter().any(|e| expr_uses_arguments(e)),
+        ast::Expr::Array(a) => a.elems.iter().any(|el| {
+            el.as_ref().map(|e| expr_uses_arguments(&e.expr)).unwrap_or(false)
+        }),
+        ast::Expr::Object(o) => o.props.iter().any(|p| match p {
+            ast::PropOrSpread::Spread(s) => expr_uses_arguments(&s.expr),
+            ast::PropOrSpread::Prop(p) => {
+                if let ast::Prop::KeyValue(kv) = p.as_ref() {
+                    expr_uses_arguments(&kv.value)
+                } else {
+                    false
+                }
+            }
+        }),
+        ast::Expr::New(n) => {
+            n.args.as_ref().map(|args| args.iter().any(|a| expr_uses_arguments(&a.expr))).unwrap_or(false)
+        }
+        // Don't descend into nested function declarations or arrow function
+        // bodies — those have their own (or shadowed) `arguments` binding.
+        _ => false,
+    }
+}
+
 pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) -> Result<Function> {
     let name = fn_decl.ident.sym.to_string();
     let func_id = ctx.lookup_func(&name).unwrap_or_else(|| ctx.fresh_func());
@@ -29,6 +167,22 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     ctx.enter_type_param_scope(&type_params);
 
     let scope_mark = ctx.enter_scope();
+
+    // Pre-scan body for `arguments` references. If the function references
+    // `arguments`, we synthesize a trailing rest parameter named "arguments"
+    // so callers automatically bundle their args into an array — and
+    // `Expr::Ident("arguments")` resolves to a LocalGet at lowering time.
+    // Skipped if the user already declared a parameter named `arguments` or
+    // already has a rest param (which would conflict with the synthetic one).
+    let user_has_arguments_param = fn_decl.function.params.iter().any(|p| {
+        get_pat_name(&p.pat).ok().as_deref() == Some("arguments")
+    });
+    let user_has_rest = fn_decl.function.params.iter().any(|p| is_rest_param(&p.pat));
+    let needs_arguments_synth = !user_has_arguments_param
+        && !user_has_rest
+        && fn_decl.function.body.as_ref()
+            .map(|b| body_uses_arguments(&b.stmts))
+            .unwrap_or(false);
 
     // Lower parameters with type extraction (using context for type param resolution)
     let mut params = Vec::new();
@@ -55,6 +209,21 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
         if is_destructuring_pattern(inner_pat) {
             destructuring_params.push((param_id, inner_pat.clone()));
         }
+    }
+
+    // If the body references `arguments`, append a synthetic trailing
+    // rest parameter named "arguments". The call site already bundles
+    // trailing args into an array for any rest param, and `Expr::Ident("arguments")`
+    // resolves to a LocalGet of this param.
+    if needs_arguments_synth {
+        let arguments_id = ctx.define_local("arguments".to_string(), Type::Any);
+        params.push(Param {
+            id: arguments_id,
+            name: "arguments".to_string(),
+            ty: Type::Any,
+            default: None,
+            is_rest: true,
+        });
     }
 
     // Register parameters with known native types as native instances
@@ -156,9 +325,15 @@ pub(crate) fn lower_fn_decl(ctx: &mut LoweringContext, fn_decl: &ast::FnDecl) ->
     // Exit type parameter scope
     ctx.exit_type_param_scope();
 
-    // Track generator functions so for-of can use iterator protocol
+    // Track generator functions so for-of can use iterator protocol.
+    // Async generators are tracked separately so for-of paths can wrap
+    // `__iter.next()` in `Expr::Await` (`async function*` returns
+    // `Promise<{value, done}>`).
     if fn_decl.function.is_generator {
         ctx.generator_func_names.insert(name.clone());
+        if fn_decl.function.is_async {
+            ctx.async_generator_func_names.insert(name.clone());
+        }
     }
 
     Ok(Function {
@@ -240,10 +415,18 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                     static_method_names.push(ident.sym.to_string());
                 }
             }
+            ast::ClassMember::PrivateMethod(method) if method.is_static => {
+                // Register as "#name" so WithPrivateStatic.#helper()
+                // call-site lookup via has_static_method() succeeds.
+                static_method_names.push(format!("#{}", method.key.name.to_string()));
+            }
             ast::ClassMember::ClassProp(prop) if prop.is_static => {
                 if let ast::PropName::Ident(ident) = &prop.key {
                     static_field_names.push(ident.sym.to_string());
                 }
+            }
+            ast::ClassMember::PrivateProp(prop) if prop.is_static => {
+                static_field_names.push(format!("#{}", prop.key.name.to_string()));
             }
             _ => {}
         }
@@ -271,10 +454,81 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                 if method.function.body.is_none() {
                     continue;
                 }
-                // Get the property name for getters/setters
+                // Get the property name for getters/setters. Computed
+                // keys are accepted for `[Symbol.iterator]` (registered
+                // under `@@iterator`), and for `[Symbol.hasInstance]` /
+                // `[Symbol.toStringTag]` (lifted to top-level functions
+                // with a `__perry_wk_<hook>_<class>` prefix so the LLVM
+                // backend's `init_static_fields` picks them up and
+                // registers them with the runtime).
                 let prop_name = match &method.key {
                     ast::PropName::Ident(ident) => ident.sym.to_string(),
                     ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+                    ast::PropName::Computed(computed) => {
+                        if is_symbol_iterator_key(&computed.expr) {
+                            "@@iterator".to_string()
+                        } else if let Some(wk) = symbol_well_known_key(&computed.expr) {
+                            // hasInstance (static method): lift the method
+                            // body to a top-level function named
+                            // `__perry_wk_hasinstance_<class>`. Signature:
+                            // `(value: f64) -> f64` — no `this`.
+                            if wk == "hasInstance"
+                                && method.is_static
+                                && matches!(method.kind, ast::MethodKind::Method)
+                            {
+                                let mut func = lower_class_method(ctx, method)?;
+                                func.name = format!("__perry_wk_hasinstance_{}", name);
+                                ctx.pending_functions.push(func);
+                                continue;
+                            }
+                            // toStringTag (instance getter): lift the
+                            // getter body to a top-level function named
+                            // `__perry_wk_tostringtag_<class>`. Signature:
+                            // `(this: f64) -> f64` — getter takes `this`
+                            // as an explicit first parameter and returns
+                            // a string.
+                            if wk == "toStringTag"
+                                && !method.is_static
+                                && matches!(method.kind, ast::MethodKind::Getter)
+                            {
+                                let getter = lower_getter_method(ctx, method)?;
+                                // Inject a `this` parameter at position 0 and rewrite
+                                // any `Expr::This` in the body to `LocalGet(this_id)`.
+                                let this_id = ctx.fresh_local();
+                                let mut new_params = Vec::with_capacity(getter.params.len() + 1);
+                                new_params.push(Param {
+                                    id: this_id,
+                                    name: "this".to_string(),
+                                    ty: Type::Named(name.clone()),
+                                    default: None,
+                                    is_rest: false,
+                                });
+                                new_params.extend(getter.params.into_iter());
+                                let mut body = getter.body;
+                                crate::analysis::replace_this_in_stmts(&mut body, this_id);
+                                let top_fn = Function {
+                                    id: ctx.fresh_func(),
+                                    name: format!("__perry_wk_tostringtag_{}", name),
+                                    type_params: Vec::new(),
+                                    params: new_params,
+                                    return_type: Type::Any,
+                                    body,
+                                    is_async: false,
+                                    is_generator: false,
+                                    is_exported: false,
+                                    captures: Vec::new(),
+                                    decorators: Vec::new(),
+                                };
+                                ctx.pending_functions.push(top_fn);
+                                continue;
+                            }
+                            // Other well-known (toPrimitive, asyncIterator)
+                            // on a class: not yet implemented, skip.
+                            continue;
+                        } else {
+                            continue;
+                        }
+                    }
                     _ => continue,
                 };
 
@@ -290,7 +544,48 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                         setters.push((prop_name, func));
                     }
                     ast::MethodKind::Method => {
-                        let func = lower_class_method(ctx, method)?;
+                        let mut func = lower_class_method(ctx, method)?;
+                        // `*[Symbol.iterator]()` — lift to a top-level
+                        // generator function with `this` as an explicit
+                        // first parameter. The generator transform
+                        // (which only visits `module.functions`) then
+                        // rewrites it to return the `{next, return,
+                        // throw}` closure triple. For-of sites use
+                        // `iterator_func_for_class` to dispatch.
+                        if prop_name == "@@iterator" && func.is_generator && !method.is_static {
+                            let this_id = ctx.fresh_local();
+                            let mut new_params = Vec::with_capacity(func.params.len() + 1);
+                            new_params.push(Param {
+                                id: this_id,
+                                name: "this".to_string(),
+                                ty: Type::Named(name.clone()),
+                                default: None,
+                                is_rest: false,
+                            });
+                            new_params.extend(func.params.drain(..));
+
+                            let mut body = std::mem::take(&mut func.body);
+                            crate::analysis::replace_this_in_stmts(&mut body, this_id);
+
+                            let top_name = format!("__perry_iter_{}", name);
+                            let top_fn_id = ctx.fresh_func();
+                            let top_fn = Function {
+                                id: top_fn_id,
+                                name: top_name,
+                                type_params: Vec::new(),
+                                params: new_params,
+                                return_type: Type::Any,
+                                body,
+                                is_async: false,
+                                is_generator: true,
+                                is_exported: false,
+                                captures: Vec::new(),
+                                decorators: Vec::new(),
+                            };
+                            ctx.pending_functions.push(top_fn);
+                            ctx.iterator_func_for_class.insert(name.clone(), top_fn_id);
+                            continue;
+                        }
                         if method.is_static {
                             static_methods.push(func);
                         } else {
@@ -319,6 +614,65 @@ pub(crate) fn lower_class_decl(ctx: &mut LoweringContext, class_decl: &ast::Clas
                 } else {
                     fields.push(field);
                 }
+            }
+            ast::ClassMember::PrivateMethod(method) => {
+                // Skip TypeScript overload declarations (no body)
+                if method.function.body.is_none() {
+                    continue;
+                }
+                match method.kind {
+                    ast::MethodKind::Method => {
+                        let func = lower_private_method(ctx, method)?;
+                        if method.is_static {
+                            static_methods.push(func);
+                        } else {
+                            methods.push(func);
+                        }
+                    }
+                    ast::MethodKind::Getter => {
+                        // Store under "#name" so PropertyGet on "#name"
+                        // can hit the getter registry (which keys on
+                        // the property name, not `get_#name`).
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_getter(ctx, method)?;
+                        getters.push((prop_name, func));
+                    }
+                    ast::MethodKind::Setter => {
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_setter(ctx, method)?;
+                        setters.push((prop_name, func));
+                    }
+                }
+            }
+            ast::ClassMember::StaticBlock(block) => {
+                // `static { ... }` — lower the body and attach it as
+                // a synthetic static method whose name is
+                // `__perry_static_init_N`. `codegen.rs :: init_static_fields`
+                // later recognizes the prefix and emits a call to each
+                // such method right after static field init, so they
+                // run once at module startup.
+                let scope_mark = ctx.enter_scope();
+                let body = lower_block_stmt(ctx, &block.body)?;
+                ctx.exit_scope(scope_mark);
+
+                let block_idx = static_methods
+                    .iter()
+                    .filter(|m| m.name.starts_with("__perry_static_init_"))
+                    .count();
+                let synthetic_name = format!("__perry_static_init_{}", block_idx);
+                static_methods.push(Function {
+                    id: ctx.fresh_func(),
+                    name: synthetic_name,
+                    type_params: Vec::new(),
+                    params: Vec::new(),
+                    return_type: Type::Void,
+                    body,
+                    is_async: false,
+                    is_generator: false,
+                    is_exported: false,
+                    captures: Vec::new(),
+                    decorators: Vec::new(),
+                });
             }
             _ => {}
         }
@@ -509,10 +863,16 @@ pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class
                     static_method_names.push(ident.sym.to_string());
                 }
             }
+            ast::ClassMember::PrivateMethod(method) if method.is_static => {
+                static_method_names.push(format!("#{}", method.key.name.to_string()));
+            }
             ast::ClassMember::ClassProp(prop) if prop.is_static => {
                 if let ast::PropName::Ident(ident) = &prop.key {
                     static_field_names.push(ident.sym.to_string());
                 }
+            }
+            ast::ClassMember::PrivateProp(prop) if prop.is_static => {
+                static_field_names.push(format!("#{}", prop.key.name.to_string()));
             }
             _ => {}
         }
@@ -581,6 +941,55 @@ pub(crate) fn lower_class_from_ast(ctx: &mut LoweringContext, class: &ast::Class
                 } else {
                     fields.push(field);
                 }
+            }
+            ast::ClassMember::PrivateMethod(method) => {
+                if method.function.body.is_none() {
+                    continue;
+                }
+                match method.kind {
+                    ast::MethodKind::Method => {
+                        let func = lower_private_method(ctx, method)?;
+                        if method.is_static {
+                            static_methods.push(func);
+                        } else {
+                            methods.push(func);
+                        }
+                    }
+                    ast::MethodKind::Getter => {
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_getter(ctx, method)?;
+                        getters.push((prop_name, func));
+                    }
+                    ast::MethodKind::Setter => {
+                        let prop_name = format!("#{}", method.key.name.to_string());
+                        let func = lower_private_setter(ctx, method)?;
+                        setters.push((prop_name, func));
+                    }
+                }
+            }
+            ast::ClassMember::StaticBlock(block) => {
+                let scope_mark = ctx.enter_scope();
+                let body = lower_block_stmt(ctx, &block.body)?;
+                ctx.exit_scope(scope_mark);
+
+                let block_idx = static_methods
+                    .iter()
+                    .filter(|m| m.name.starts_with("__perry_static_init_"))
+                    .count();
+                let synthetic_name = format!("__perry_static_init_{}", block_idx);
+                static_methods.push(Function {
+                    id: ctx.fresh_func(),
+                    name: synthetic_name,
+                    type_params: Vec::new(),
+                    params: Vec::new(),
+                    return_type: Type::Void,
+                    body,
+                    is_async: false,
+                    is_generator: false,
+                    is_exported: false,
+                    captures: Vec::new(),
+                    decorators: Vec::new(),
+                });
             }
             _ => {}
         }
@@ -829,6 +1238,12 @@ pub(crate) fn lower_type_alias_decl(ctx: &mut LoweringContext, alias_decl: &ast:
 pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, ctor: &ast::Constructor) -> Result<Function> {
     let scope_mark = ctx.enter_scope();
 
+    // Track that we're inside a constructor body so `new.target` can resolve
+    // to a placeholder object with `.name = class_name`. Saved/restored in
+    // case constructors are nested via class expressions.
+    let saved_ctor_class = ctx.in_constructor_class.take();
+    ctx.in_constructor_class = Some(class_name.to_string());
+
     // Add 'this' as a special local
     let _this_id = ctx.define_local("this".to_string(), Type::Any);
 
@@ -907,6 +1322,7 @@ pub(crate) fn lower_constructor(ctx: &mut LoweringContext, class_name: &str, cto
     }
 
     ctx.exit_scope(scope_mark);
+    ctx.in_constructor_class = saved_ctor_class;
 
     Ok(Function {
         id: ctx.fresh_func(),
@@ -927,6 +1343,20 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
     let name = match &method.key {
         ast::PropName::Ident(ident) => ident.sym.to_string(),
         ast::PropName::Str(s) => s.value.as_str().unwrap_or("").to_string(),
+        ast::PropName::Computed(computed) if is_symbol_iterator_key(&computed.expr) => {
+            "@@iterator".to_string()
+        }
+        ast::PropName::Computed(computed) => {
+            // Well-known symbols (hasInstance, toStringTag, toPrimitive,
+            // asyncIterator) get a synthetic `@@<short>` name. The caller
+            // is responsible for renaming / lifting the returned Function
+            // as needed — see the well-known handling in lower_class_decl.
+            if let Some(wk) = symbol_well_known_key(&computed.expr) {
+                format!("@@{}", wk)
+            } else {
+                return Err(anyhow!("Unsupported method key"));
+            }
+        }
         _ => return Err(anyhow!("Unsupported method key")),
     };
 
@@ -1004,6 +1434,16 @@ pub(crate) fn lower_getter_method(ctx: &mut LoweringContext, method: &ast::Class
     let name = match &method.key {
         ast::PropName::Ident(ident) => format!("get_{}", ident.sym),
         ast::PropName::Str(s) => format!("get_{}", s.value.as_str().unwrap_or("")),
+        ast::PropName::Computed(computed) => {
+            // Well-known symbol getters (e.g., `get [Symbol.toStringTag]()`)
+            // get a synthetic `get_@@<short>` name. The caller is
+            // responsible for lifting / renaming as needed.
+            if let Some(wk) = symbol_well_known_key(&computed.expr) {
+                format!("get_@@{}", wk)
+            } else {
+                return Err(anyhow!("Unsupported getter key"));
+            }
+        }
         _ => return Err(anyhow!("Unsupported getter key")),
     };
 
@@ -1118,6 +1558,154 @@ pub(crate) fn lower_class_prop(ctx: &mut LoweringContext, prop: &ast::ClassProp)
         init,
         is_private: false, // TODO: check accessibility
         is_readonly: prop.readonly,
+    })
+}
+
+/// Lower a private method (e.g. `#secret(): number { ... }`) — this mirrors
+/// `lower_class_method` but for `ast::PrivateMethod`. The resulting function
+/// is stored with the name prefixed by `#` so method dispatch (which keys on
+/// `(class_name, "#secret")`) can find it.
+pub(crate) fn lower_private_method(ctx: &mut LoweringContext, method: &ast::PrivateMethod) -> Result<Function> {
+    let name = format!("#{}", method.key.name.to_string());
+
+    // Extract method-level type parameters (e.g., #helper<U>(x: U): T)
+    let type_params = method.function.type_params
+        .as_ref()
+        .map(|tp| extract_type_params(tp))
+        .unwrap_or_default();
+
+    ctx.enter_type_param_scope(&type_params);
+
+    let scope_mark = ctx.enter_scope();
+
+    // Add 'this' for instance methods
+    if !method.is_static {
+        ctx.define_local("this".to_string(), Type::Any);
+    }
+
+    // Lower parameters with type extraction
+    let mut params = Vec::new();
+    for param in &method.function.params {
+        let param_name = get_pat_name(&param.pat)?;
+        let param_type = extract_param_type_with_ctx(&param.pat, Some(ctx));
+        let param_default = get_param_default(ctx, &param.pat)?;
+        let is_rest = is_rest_param(&param.pat);
+        let param_id = ctx.define_local(param_name.clone(), param_type.clone());
+        params.push(Param {
+            id: param_id,
+            name: param_name,
+            ty: param_type,
+            default: param_default,
+            is_rest,
+        });
+    }
+
+    // Extract return type
+    let return_type = method.function.return_type.as_ref()
+        .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
+        .unwrap_or(Type::Any);
+
+    // Lower body
+    let body = if let Some(ref block) = method.function.body {
+        lower_block_stmt(ctx, block)?
+    } else {
+        Vec::new()
+    };
+
+    ctx.exit_scope(scope_mark);
+    ctx.exit_type_param_scope();
+
+    Ok(Function {
+        id: ctx.fresh_func(),
+        name,
+        type_params,
+        params,
+        return_type,
+        body,
+        is_async: method.function.is_async,
+        is_generator: method.function.is_generator,
+        is_exported: false,
+        captures: Vec::new(),
+        decorators: Vec::new(),
+    })
+}
+
+/// Lower a private getter method (e.g. `get #value(): number { ... }`).
+/// Returned function has `name` set to `get_#value` so that the codegen's
+/// getter-mangling convention (`__get_<name>`) stays consistent with the
+/// dispatch registry.
+pub(crate) fn lower_private_getter(ctx: &mut LoweringContext, method: &ast::PrivateMethod) -> Result<Function> {
+    let name = format!("get_#{}", method.key.name.to_string());
+    let scope_mark = ctx.enter_scope();
+    ctx.define_local("this".to_string(), Type::Any);
+
+    let return_type = method.function.return_type.as_ref()
+        .map(|rt| extract_ts_type_with_ctx(&rt.type_ann, Some(ctx)))
+        .unwrap_or(Type::Any);
+
+    let body = if let Some(ref block) = method.function.body {
+        lower_block_stmt(ctx, block)?
+    } else {
+        Vec::new()
+    };
+
+    ctx.exit_scope(scope_mark);
+
+    Ok(Function {
+        id: ctx.fresh_func(),
+        name,
+        type_params: Vec::new(),
+        params: Vec::new(),
+        return_type,
+        body,
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        captures: Vec::new(),
+        decorators: Vec::new(),
+    })
+}
+
+/// Lower a private setter method (e.g. `set #value(v: number) { ... }`).
+pub(crate) fn lower_private_setter(ctx: &mut LoweringContext, method: &ast::PrivateMethod) -> Result<Function> {
+    let name = format!("set_#{}", method.key.name.to_string());
+    let scope_mark = ctx.enter_scope();
+    ctx.define_local("this".to_string(), Type::Any);
+
+    let mut params = Vec::new();
+    for param in &method.function.params {
+        let param_name = get_pat_name(&param.pat)?;
+        let param_type = extract_param_type_with_ctx(&param.pat, Some(ctx));
+        let param_id = ctx.define_local(param_name.clone(), param_type.clone());
+        params.push(Param {
+            id: param_id,
+            name: param_name,
+            ty: param_type,
+            default: None,
+            is_rest: false,
+        });
+    }
+
+    let body = if let Some(ref block) = method.function.body {
+        lower_block_stmt(ctx, block)?
+    } else {
+        Vec::new()
+    };
+
+    ctx.exit_scope(scope_mark);
+
+    Ok(Function {
+        id: ctx.fresh_func(),
+        name,
+        type_params: Vec::new(),
+        params,
+        return_type: Type::Void,
+        body,
+        is_async: false,
+        is_generator: false,
+        is_exported: false,
+        captures: Vec::new(),
+        decorators: Vec::new(),
     })
 }
 
@@ -1321,6 +1909,37 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
         }
         ast::Stmt::Decl(ast::Decl::Fn(fn_decl)) => {
             // Inner function declarations are compiled as closures and assigned to local variables.
+            // EXCEPTION: nested **generator** declarations (`function*` /
+            // `async function*`) cannot be lowered as closures because the
+            // generator-state-machine transform in `perry-transform/src/
+            // generator.rs` only operates on top-level `Function`s in
+            // `hir.functions`. Closures with `yield` in their body would
+            // never run through the transform and would silently call the
+            // raw IR (returning 0). Hoist them to top-level via
+            // `lower_fn_decl` + `pending_functions` and register the local
+            // as a FuncRef so the for-of / Array.fromAsync iterator path
+            // detects them via `generator_func_names`.
+            if fn_decl.function.body.is_some() && fn_decl.function.is_generator {
+                let func_name = fn_decl.ident.sym.to_string();
+                let func = lower_fn_decl(ctx, fn_decl)?;
+                let func_id = func.id;
+                ctx.register_func(func_name.clone(), func_id);
+                ctx.pending_functions.push(func);
+                // Also bind the local name so a downstream `LocalGet(name)`
+                // resolves to the FuncRef. We use a Let with `init: Some(FuncRef)`
+                // so existing code that does `let it = gen()` lowers via
+                // the LocalGet path → FuncRef → known generator name.
+                let local_id = ctx.lookup_local(&func_name)
+                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
+                result.push(Stmt::Let {
+                    id: local_id,
+                    name: func_name,
+                    ty: Type::Any,
+                    init: Some(Expr::FuncRef(func_id)),
+                    mutable: false,
+                });
+                return Ok(result);
+            }
             if fn_decl.function.body.is_some() {
                 let func_name = fn_decl.ident.sym.to_string();
                 let func_id = ctx.fresh_func();
@@ -1328,6 +1947,14 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                 // Register the function name temporarily so self-recursive calls
                 // inside the body resolve to FuncRef(func_id).
                 ctx.register_func(func_name.clone(), func_id);
+
+                // Define the local for the function name BEFORE lowering the body,
+                // so self-recursive references inside the body resolve to
+                // LocalGet(local_id) rather than FuncRef(func_id). This ensures
+                // the LLVM backend's boxed-var analysis sees the same LocalId at
+                // both the declaration and self-reference sites.
+                let local_id = ctx.lookup_local(&func_name)
+                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
 
                 let scope_mark = ctx.enter_scope();
 
@@ -1409,11 +2036,6 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                     .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                     .copied()
                     .collect();
-
-                // Define local variable and assign closure via Stmt::Let.
-                // Use existing local if already pre-registered (function hoisting).
-                let local_id = ctx.lookup_local(&func_name)
-                    .unwrap_or_else(|| ctx.define_local(func_name.clone(), Type::Any));
 
                 let closure = Expr::Closure {
                     func_id,
@@ -1587,6 +2209,117 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
             result.push(Stmt::Switch { discriminant, cases });
         }
         ast::Stmt::ForOf(for_of_stmt) => {
+            // --- Iterator-protocol path for generator function calls ---
+            // Detect: `for [await] (const x of genFunc(...))` where genFunc is
+            // function* / async function*. Without this path the for-of falls
+            // through to the array-index desugar which segfaults on a real
+            // iterator object. Mirrors `lower::lower_stmt`'s ForOf branch.
+            let is_generator_call = if let ast::Expr::Call(call) = &*for_of_stmt.right {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = &**callee_expr {
+                        ctx.generator_func_names.contains(ident.sym.as_ref())
+                    } else { false }
+                } else { false }
+            } else { false };
+            let callee_is_async_gen = if let ast::Expr::Call(call) = &*for_of_stmt.right {
+                if let ast::Callee::Expr(callee_expr) = &call.callee {
+                    if let ast::Expr::Ident(ident) = &**callee_expr {
+                        ctx.async_generator_func_names.contains(ident.sym.as_ref())
+                    } else { false }
+                } else { false }
+            } else { false };
+            let needs_await = for_of_stmt.is_await || callee_is_async_gen;
+
+            let iter_from_class: Option<perry_types::FuncId> = if let ast::Expr::New(new_expr) = &*for_of_stmt.right {
+                if let ast::Expr::Ident(ident) = new_expr.callee.as_ref() {
+                    let class_name = ident.sym.to_string();
+                    ctx.iterator_func_for_class.get(&class_name).copied()
+                } else { None }
+            } else { None };
+
+            if is_generator_call || iter_from_class.is_some() {
+                let scope_mark = ctx.push_block_scope();
+                let iter_expr_raw = lower_expr(ctx, &for_of_stmt.right)?;
+                let iter_expr = if let Some(iter_fn_id) = iter_from_class {
+                    Expr::Call {
+                        callee: Box::new(Expr::FuncRef(iter_fn_id)),
+                        args: vec![iter_expr_raw],
+                        type_args: vec![],
+                    }
+                } else { iter_expr_raw };
+                let iter_id = ctx.fresh_local();
+                ctx.locals.push((format!("__iter_{}", iter_id), iter_id, Type::Any));
+                result.push(Stmt::Let {
+                    id: iter_id,
+                    name: format!("__iter_{}", iter_id),
+                    ty: Type::Any,
+                    mutable: false,
+                    init: Some(iter_expr),
+                });
+
+                let result_id = ctx.fresh_local();
+                ctx.locals.push((format!("__result_{}", result_id), result_id, Type::Any));
+                let raw_next_call = Expr::Call {
+                    callee: Box::new(Expr::PropertyGet {
+                        object: Box::new(Expr::LocalGet(iter_id)),
+                        property: "next".to_string(),
+                    }),
+                    args: vec![],
+                    type_args: vec![],
+                };
+                let next_call = if needs_await {
+                    Expr::Await(Box::new(raw_next_call))
+                } else { raw_next_call };
+                result.push(Stmt::Let {
+                    id: result_id,
+                    name: format!("__result_{}", result_id),
+                    ty: Type::Any,
+                    mutable: true,
+                    init: Some(next_call.clone()),
+                });
+
+                let item_name = if let ast::ForHead::VarDecl(var_decl) = &for_of_stmt.left {
+                    if let Some(decl) = var_decl.decls.first() {
+                        if let ast::Pat::Ident(ident) = &decl.name {
+                            ident.id.sym.to_string()
+                        } else { "__gen_item".to_string() }
+                    } else { "__gen_item".to_string() }
+                } else { "__gen_item".to_string() };
+                let item_id = ctx.define_local(item_name.clone(), Type::Any);
+
+                let mut body_stmts: Vec<Stmt> = Vec::new();
+                body_stmts.push(Stmt::Let {
+                    id: item_id,
+                    name: item_name,
+                    ty: Type::Any,
+                    mutable: false,
+                    init: Some(Expr::PropertyGet {
+                        object: Box::new(Expr::LocalGet(result_id)),
+                        property: "value".to_string(),
+                    }),
+                });
+                let user_body = lower_body_stmt(ctx, &for_of_stmt.body)?;
+                body_stmts.extend(user_body);
+                body_stmts.push(Stmt::Expr(Expr::LocalSet(
+                    result_id,
+                    Box::new(next_call),
+                )));
+
+                result.push(Stmt::While {
+                    condition: Expr::Unary {
+                        op: UnaryOp::Not,
+                        operand: Box::new(Expr::PropertyGet {
+                            object: Box::new(Expr::LocalGet(result_id)),
+                            property: "done".to_string(),
+                        }),
+                    },
+                    body: body_stmts,
+                });
+
+                ctx.pop_block_scope(scope_mark);
+                return Ok(result);
+            }
+
             // Desugar for-of to a regular for loop (same as in lower_stmt).
             // Push a block scope so loop variables and internal temporaries don't leak.
             let for_scope_mark = ctx.push_block_scope();
@@ -1614,12 +2347,35 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
 
             // For string iteration the __arr holder is typed as String (so codegen
             // uses string.length + js_string_char_at via the existing str[i] path).
+            // For an identifier iterable like `for (const word of words)` where
+            // `words: string[]`, extract the element type from the local's
+            // declared Array<T> so the loop variable gets the right type.
+            let inferred_elem_type: Option<Type> = if let ast::Expr::Ident(ident) = &*for_of_stmt.right {
+                let name = ident.sym.to_string();
+                match ctx.lookup_local_type(&name) {
+                    Some(Type::Array(elem)) => Some((**elem).clone()),
+                    Some(Type::Generic { base, type_args }) if base == "Array" && type_args.len() == 1 => {
+                        Some(type_args[0].clone())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let holder_type = if is_string_iter {
                 Type::String
+            } else if let Some(ref elem) = inferred_elem_type {
+                Type::Array(Box::new(elem.clone()))
             } else {
                 Type::Array(Box::new(Type::Any))
             };
-            let item_hir_type = if is_string_iter { Type::String } else { Type::Any };
+            let item_hir_type = if is_string_iter {
+                Type::String
+            } else if let Some(elem) = inferred_elem_type {
+                elem
+            } else {
+                Type::Any
+            };
 
             let arr_id = ctx.fresh_local();
             let idx_id = ctx.fresh_local();

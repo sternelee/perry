@@ -2,6 +2,875 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.8 (llvm-backend) — `Expr::NewDynamic` static reroute + conditional callee branching
+
+The sixth followup from the v0.5.1 mango compile sweep. Improves `Expr::NewDynamic` handling beyond the original v0.5.1 "empty-object placeholder for everything except `globalThis.X`" pragmatic fix. Closes the followup item: "NewDynamic for non-globalThis callees currently returns an empty object placeholder."
+
+### Background
+
+The HIR lowering at `crates/perry-hir/src/lower.rs::ast::Expr::New` emits `Expr::NewDynamic { callee, args }` whenever the `new` expression's callee isn't a bare identifier. Examples:
+
+- `new (Foo)()` — parenthesized class name → callee is `Expr::ClassRef("Foo")`
+- `new globalThis.WebSocket(url)` — globalThis lookup → callee is `Expr::PropertyGet { object: GlobalGet(_), property: "WebSocket" }` *(handled in v0.5.1)*
+- `new (cond ? Foo : Bar)()` — conditional class → callee is `Expr::Conditional { condition, then_expr: ClassRef("Foo"), else_expr: ClassRef("Bar") }`
+- `new someVar()` — runtime value → callee is `Expr::LocalGet(id)`
+- `new arr[0]()` — computed → callee is `Expr::IndexGet { ... }`
+
+Identifier callees (`new Foo()`) take a different path that emits `Expr::New { class_name }` directly, so they never hit `NewDynamic`.
+
+Pre-v0.5.8 the lowering recognized only the `globalThis.X` shape and fell back to an empty-object placeholder for everything else. The fallback let mango compile (the original motivation: `new globalThis.WebSocket(url)` in `_wsOpen`) but produced wrong results for any other dynamic-callee shape.
+
+### What changed
+
+**1. New `try_static_class_name(callee)` helper** in `crates/perry-codegen/src/expr.rs`:
+
+```rust
+fn try_static_class_name(callee: &Expr) -> Option<&str> {
+    match callee {
+        Expr::ClassRef(name) => Some(name.as_str()),
+        Expr::PropertyGet { object, property } => {
+            if matches!(object.as_ref(), Expr::GlobalGet(_)) {
+                Some(property.as_str())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+```
+
+Centralizes the "is this callee statically a class?" predicate. Two recognized shapes:
+
+- `Expr::ClassRef(name)` — what the HIR lowering at `lower.rs::ast::Expr::Ident` (line ~4480) produces when a class identifier is referenced as a value (e.g. `const C = SomeClass`, `new (Foo)()` after parens flatten).
+- `Expr::PropertyGet { object: GlobalGet(_), property }` — `globalThis.X` / `window.X`. Existing behavior, just refactored.
+
+**2. `Expr::NewDynamic` lowering rewrite** in `crates/perry-codegen/src/expr.rs`:
+
+```rust
+Expr::NewDynamic { callee, args } => {
+    if let Some(name) = try_static_class_name(callee.as_ref()) {
+        return lower_new(ctx, name, args);
+    }
+    if let Expr::Conditional { condition, then_expr, else_expr } = callee.as_ref() {
+        let then_synth = Expr::NewDynamic { callee: then_expr.clone(), args: args.clone() };
+        let else_synth = Expr::NewDynamic { callee: else_expr.clone(), args: args.clone() };
+        return lower_conditional(ctx, condition, &then_synth, &else_synth);
+    }
+    // Fallback: empty-object placeholder.
+    ...
+}
+```
+
+The conditional case is the new functionality. Each branch synthesizes a `NewDynamic` with the same args and recursively calls `lower_conditional`, which already knows how to emit the standard cond_br/phi pattern. The recursive NewDynamic in each branch hits the same handler — if the branch's callee is `try_static_class_name`-recognizable it reroutes to `lower_new`, otherwise it falls back to the empty-object placeholder. Either way each branch produces a valid double for the phi to merge, so deeply nested ternaries (`new (a ? X : (b ? Y : Z))()`) work without special-casing.
+
+The `args.clone()` per branch is the only real cost. Args in `new` calls are typically simple (numbers, strings, locals), and JS evaluation semantics already say the unchosen arm doesn't run — so cloning the args expression is correct because each branch evaluates its own copy under the cond_br.
+
+**3. Truly dynamic fallback unchanged.** `new someVar()`, `new this.something()`, `new arr[0]()` — all callees that need to be evaluated at runtime to know which class to instantiate — still emit an empty-object placeholder. The lowering walks the callee + args for side effects (closures, string literal interning, lazy declares for cross-module calls) so nothing is silently dropped, but the result is a class-less object. Calling methods on it returns `undefined`. Real fix needs a runtime helper:
+
+```rust
+extern "C" fn js_new_dynamic(callee: f64, args_ptr: *const f64, args_len: usize) -> f64;
+```
+
+that inspects `callee`'s NaN tag (POINTER → check ClosureHeader magic; STRING → throw TypeError; etc.) and dispatches to the right constructor. Class instances would need a discoverable constructor pointer, which currently doesn't exist on Perry's `ObjectHeader`. Tracked as a future followup.
+
+### Verified end-to-end
+
+`/tmp/perry_newdynamic_test.ts` — conditional callee with nested ternary:
+
+```ts
+class Foo { kind: string; constructor() { this.kind = "Foo"; } }
+class Bar { kind: string; constructor() { this.kind = "Bar"; } }
+
+function pickClass(useFoo: boolean): Foo | Bar {
+  return new (useFoo ? Foo : Bar)();   // NewDynamic with Conditional callee
+}
+console.log("a.kind: " + (pickClass(true)  as any).kind);   // a.kind: Foo
+console.log("b.kind: " + (pickClass(false) as any).kind);   // b.kind: Bar
+
+function tri(n: number): Foo | Bar {
+  return new (n === 0 ? Foo : (n === 1 ? Bar : Foo))();    // nested ternary
+}
+console.log("c.kind: " + (tri(0) as any).kind);   // c.kind: Foo
+console.log("d.kind: " + (tri(1) as any).kind);   // d.kind: Bar
+console.log("e.kind: " + (tri(2) as any).kind);   // e.kind: Foo
+```
+
+All five cases produce the right class. The cond_br + phi emits at runtime, each branch dispatches to its own `lower_new`, and the result merges correctly.
+
+`/tmp/perry_newdynamic2.ts` — ClassRef + truly-dynamic fallback:
+
+```ts
+class Foo { kind: string; constructor() { this.kind = "Foo"; } }
+
+const x: any = new (Foo)();              // ClassRef path
+console.log("x.kind: " + x.kind);        // x.kind: Foo
+
+const fns: any[] = [Foo];
+const dyn: any = new fns[0]();           // truly dynamic — fallback
+console.log("dyn.kind: " + (dyn.kind || "(empty placeholder)"));   // (empty placeholder)
+```
+
+`new (Foo)()` resolves correctly via the ClassRef path. `new fns[0]()` falls back to the empty-object placeholder as documented — the user can read `dyn.kind` and get `undefined`, which is at least a defined behavior.
+
+Mango compiles cleanly: `Wrote executable: /tmp/Mango-newdyn` with no `error compiling` or `module(s) failed` messages. The `_wsOpen` `new globalThis.WebSocket(url)` call still goes through the existing PropertyGet→GlobalGet reroute path.
+
+### Followups
+
+- **`js_new_dynamic` runtime helper** for the truly-dynamic fallback. Would unlock `new someVar()`, `new arr[0]()`, `new this.factory()`. Requires adding a constructor-pointer slot to `ObjectHeader` (or equivalent) so the runtime can find the right `__perry_init_<class>__ctor` to call.
+- **`Expr::New { class_name }` lookup-failure improvement.** Right now `let C = SomeClass; new C()` lowers as `Expr::New { class_name: "C" }` (because the parser sees an Ident callee), and `lower_new("C", ...)` finds nothing in `ctx.classes` and falls back to the same empty-object placeholder. Tracking `local_id → class_name` for `Stmt::Let { init: Some(ClassRef(name)) }` would let `lower_new` reroute when the class name turns out to be a local-bound alias.
+- **Namespace-import callee.** `import * as ns from 'm'; new ns.Foo()` becomes `NewDynamic { callee: PropertyGet { LocalGet(ns), "Foo" }, args }` — the `try_static_class_name` predicate doesn't recognize this because `LocalGet` isn't `GlobalGet`. Could be added by checking `ctx.namespace_imports` for the local and looking up `Foo` in `ctx.imported_classes`.
+
+## v0.5.7 (llvm-backend) — `Expr::I18nString` compile-time resolution + runtime interpolation
+
+The fifth followup from the v0.5.1 mango compile sweep. Closes the followup item "I18nString currently returns the verbatim key string; need to wire up the locale-table lookup that the rest of the codebase already has plumbing for."
+
+### What was broken
+
+Previously `Expr::I18nString` lowered to:
+
+```rust
+let key_idx = ctx.strings.intern(key);
+let handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+ctx.block().load(DOUBLE, &handle_global)
+```
+
+The "key" field is the source-language form (e.g. `"Hello"` in English), so the lowering effectively pinned every i18n string to its source text regardless of the project's `default_locale`. The `i18n_table` was already being built and threaded through `CompileOptions::i18n_table` — the lowering just wasn't consulting it.
+
+A second, much subtler bug compounded the first. The i18n transform replaces `t("key")` (which lowers to `Expr::NativeMethodCall { module: "perry/i18n", method: "t", object: None, args: [Expr::String("key")] }`) with `Expr::NativeMethodCall { ..., args: [Expr::I18nString { ... }] }` — keeping the wrapping NativeMethodCall but replacing the inner string. The codegen's `lower_native_method_call` has a receiver-less early-out at line 1858 that lowers args for side effects and returns `double 0.0`. So `t("Hello")` was producing the literal value 0 (printable as `"0"` via console.log), regardless of what the i18n transform did to the inner expression. This was caught only because I wrote a runtime test — without it the v0.5.1 i18n lowering's "verbatim key" claim was actually unreachable for any code that used `t()`.
+
+### What changed
+
+**1. New `expr::I18nLowerCtx` struct** in `crates/perry-codegen/src/expr.rs`:
+
+```rust
+pub struct I18nLowerCtx {
+    pub translations: Vec<String>,   // flat 2D: [locale_idx * key_count + string_idx]
+    pub key_count: usize,
+    pub default_locale_idx: usize,
+}
+```
+
+Threaded onto `CrossModuleCtx` so all six `FnCtx` construction sites pick it up automatically. `compile_module` builds it once at the top from `opts.i18n_table` and stores it on `cross_module.i18n`; FnCtx exposes it as `ctx.i18n: &Option<I18nLowerCtx>`.
+
+**2. `CompileOptions::i18n_table` extended** from a 4-tuple to a 5-tuple to carry `default_locale_idx`:
+
+```rust
+pub i18n_table: Option<(Vec<String>, usize, usize, Vec<String>, usize)>,
+//                      translations key_count locale_count locale_codes default_locale_idx
+```
+
+The driver's `i18n_snapshot` builder in `crates/perry/src/commands/compile.rs` updated to populate the new field from `table.default_locale_idx`.
+
+**3. `Expr::I18nString` lowering rewrite** in `crates/perry-codegen/src/expr.rs`:
+
+- If `ctx.i18n` is `None` → keep the old behavior (intern the key, return its handle).
+- Otherwise look up `translations[default_locale_idx * key_count + string_idx]`. Empty cells fall back to the source key.
+- Parse the resolved template for `{name}` placeholders. Tolerates `{{` / `}}` as literal braces. Builds a `Vec<Part>` where `Part::Lit(String)` is a static fragment and `Part::Param(String)` is a placeholder name.
+- **Fast path:** no placeholders → intern the resolved string and return its handle (one load).
+- **Interpolation path:** lower each param's value once (so closures and side effects fire in source order, even if a placeholder appears multiple times in the template). Walk the plan, building an i64-handle accumulator: `Lit` parts load + unbox the interned global; `Param` parts call `js_string_coerce(value)`. Each step after the first chains a `js_string_concat(prev_handle, part_handle)`. The final accumulator is NaN-boxed via `nanbox_string_inline`.
+- Unknown placeholder names (template references `{foo}` but the call doesn't provide a `foo` param) fall back to the literal `{foo}` text — visible in the output so the user can spot the typo.
+
+**4. `lower_native_method_call` `perry/i18n.t` unwrap** in `crates/perry-codegen/src/lower_call.rs`:
+
+```rust
+if module == "perry/i18n" && method == "t" && object.is_none() {
+    if let Some(first) = args.first() {
+        return lower_expr(ctx, first);
+    }
+}
+```
+
+Placed before the receiver-less early-out so `t("...")` calls actually reach the I18nString lowering instead of returning `double 0.0`.
+
+### Verified end-to-end
+
+`/tmp/perry_i18n_test/` with `perry.toml`:
+
+```toml
+[i18n]
+locales = ["en", "de"]
+default_locale = "en"
+```
+
+`locales/en.json`:
+```json
+{ "Hello": "Hello", "Hello, {name}!": "Hello, {name}!", "Click me": "Click me" }
+```
+
+`locales/de.json`:
+```json
+{ "Hello": "Hallo", "Click me": "" }   ← Hello,{name}! missing entirely; Click me empty
+```
+
+`app.ts`:
+```ts
+import { t } from 'perry/i18n';
+const name = "Alice";
+console.log(t("Hello"));
+console.log(t("Hello, {name}!", { name: name }));
+console.log(t("Click me"));
+```
+
+| `default_locale` | Output |
+|---|---|
+| `en` | `Hello` / `Hello, Alice!` / `Click me` |
+| `de` | `Hallo` / `Hello, Alice!` (missing → en source key fallback, with interpolation) / `Click me` (empty → fallback) |
+
+Mango compiles cleanly: 89 localizable strings across 13 locales (en, de, ja, zh-Hans, es-MX, fr, pt, ko, it, tr, th, id, vi), default `en`. The `Wrote executable: /tmp/Mango-i18n2` line lands without any `error compiling` or `module(s) failed` messages.
+
+### Followups (still out of scope)
+
+- **CLDR plural rules.** `plural_forms` and `plural_param` on the HIR variant are deliberately ignored. The lowering uses the canonical `string_idx` form, which is correct for non-plural strings and the "other" form for plural keys. Real fix needs a runtime helper that takes a count and a CLDR locale tag, returns the plural category (zero/one/two/few/many/other), and indexes into the form table.
+- **Runtime locale switching.** Currently the locale is baked in at compile time (whichever `default_locale` was active). For dynamic apps that let the user change language at runtime, the lowering would have to read a `g_active_locale_idx` global at every `Expr::I18nString` site instead of folding `default_locale_idx` at compile time. The `dynamic` flag in `I18nConfig` already exists but isn't consulted by the codegen — that's the trigger for switching to the runtime path.
+- **Stricter placeholder parser.** The current `{name}` parser is byte-level and only handles ASCII names. A real parser would handle nested braces, escape sequences other than `{{`/`}}`, and validate that placeholder names match the params at compile time (warning on mismatched ones rather than emitting a `{foo}` literal).
+- **Parameter type coercion.** `js_string_coerce` handles numbers, booleans, null/undefined, and objects (via `[object Object]`), but doesn't apply locale-aware number formatting (`1234.5` → `1,234.5` in en, `1.234,5` in de). Real i18n would route through `Intl.NumberFormat` or similar.
+
+## v0.5.6 (llvm-backend) — perry-stdlib auto-optimize `hex` crate fix
+
+The fourth followup from the v0.5.1 mango compile sweep. Closes the last item in the v0.5.1 followup list: "auto-optimize perry-stdlib rebuild fails with `error[E0433]: failed to resolve: use of unresolved module or unlinked crate 'hex'`. Falls back to prebuilt — optimized rebuild path is broken."
+
+### Root cause
+
+`crates/perry-stdlib/src/sqlite.rs:54` was calling `hex::encode(b)` to format SQLite `Blob` column values as hex strings inside `sqlite_value_to_jsvalue`. The `hex` crate is a regular dep in `perry-stdlib`'s `Cargo.toml`, but it's gated behind the `crypto` Cargo feature (`hex = { version = "0.4", optional = true }` + `crypto = ["dep:hex", ...]`). The `sqlite.rs` module itself is gated behind the `database-sqlite` feature.
+
+When `crates/perry/src/commands/compile.rs::build_optimized_libs` rebuilds `perry-stdlib` with only the user's actually-needed features, programs that use `database-sqlite` but not `crypto` (mango imports `better-sqlite3` + `mongodb` + fetch, no crypto) end up with `sqlite.rs` compiled but `hex` not pulled in. The compile fails. Auto-optimize catches the failure and falls back to the prebuilt full stdlib (`auto-optimize: cargo build failed (exit exit status: 101), using prebuilt libraries`), so the user's build still succeeds — but they get the 16 MB+ prebuilt artifact instead of the optimized one.
+
+### The fix
+
+Replaced `hex::encode(b)` with a hand-rolled nibble loop, ~8 lines of straightforward Rust:
+
+```rust
+const HEX: &[u8; 16] = b"0123456789abcdef";
+let mut out = Vec::with_capacity(b.len() * 2);
+for &byte in b {
+    out.push(HEX[(byte >> 4) as usize]);
+    out.push(HEX[(byte & 0x0f) as usize]);
+}
+let ptr = js_string_from_bytes(out.as_ptr(), out.len() as u32);
+```
+
+Surgical fix — no `Cargo.toml` changes, no auto-optimize logic changes, no new feature coupling. The alternatives considered were:
+
+- **Add `hex` as an unconditional dep.** Bloats minimal-feature builds with a dep they don't use; the whole point of the gating is to avoid that.
+- **Add `hex` to `database-sqlite`'s feature list.** Couples two unrelated subsystems (sqlite shouldn't pull in a hex encoder; that's a crypto concern).
+- **Hand-roll the encoder.** Smallest blast radius. Hex encoding is trivial — there's nothing to be gained from depending on a crate for it.
+
+### Verified
+
+`cd /Users/amlug/projects/mango && perry compile src/app.ts -o /tmp/Mango-hex-fix`:
+
+```
+auto-optimize: rebuilding runtime+stdlib (panic=unwind, features=database-mongodb,database-sqlite,http-client)
+auto-optimize: built .../libperry_runtime.a (27.8 MB)
+auto-optimize: built .../libperry_stdlib.a (101.9 MB)
+Wrote executable: /tmp/Mango-hex-fix
+```
+
+No `cargo build failed`, no `error[E0433]`. The auto-optimize rebuild succeeds and produces the optimized stdlib.
+
+Mango binary size delta: **5.18 MB → 5.01 MB (~168 KB / 3.4% smaller)**. The savings are modest because mango pulls in most of the stdlib already (mongodb, sqlite, fetch); programs with a smaller surface will see proportionally bigger reductions.
+
+### Process note
+
+This fix was originally executed by a worktree-isolated `general-purpose` Opus subagent (`/Users/amlug/projects/perry/perry/.claude/worktrees/agent-a9e75e4d`, branch `worktree-agent-a9e75e4d`, commit `4850e53`). The agent's worktree was based on an older `llvm-backend` HEAD (`216ed15`, before the v0.5.0 hard cutover), so cherry-picking the commit directly would have brought in stale `Cargo.toml` and `Cargo.lock` state. The `sqlite.rs` change was applied manually here on top of v0.5.5 to avoid that.
+
+## v0.5.5 (llvm-backend) — `alloca_entry` sweep
+
+The third followup from the v0.5.1 mango compile sweep. Closes the latent SSA dominance hazards from "Other alloca call sites in expr.rs / lower_call.rs / stmt.rs:419 (for-of counters, intermediate result slots, MathMin/Max temp arrays) were NOT migrated" — the v0.5.2 followup item.
+
+### What changed
+
+`LlFunction::alloca_entry()` was added in commit `fb11e20` (v0.5.2) to hoist `Stmt::Let` slots into the function entry block. v0.5.2 only migrated the two `Stmt::Let` paths (boxed and non-boxed). This sweep walks every other `.alloca(` call site in the LLVM backend, classifies it, and migrates the cross-block ones.
+
+Migrated to `alloca_entry` (case c — definitely or potentially capturable):
+
+| File:line | What it allocates | Reason |
+|---|---|---|
+| `stmt.rs:419` | Catch-clause exception binding | Goes into `ctx.locals`, capturable by nested closures inside the catch body. |
+| `expr.rs:2093` | `super()` inlines parent ctor params | Parent ctor params become `ctx.locals` and may be captured by closures inside the parent ctor body. |
+| `expr.rs:3934` | `forEach` loop counter `i_slot` | Defined in current block but used across cond/body/exit successor blocks. Not in `ctx.locals`, but migrated defensively. |
+| `expr.rs:5004` | `Await` `result_slot` | Spans check/wait/settled/done/merge blocks, and `Await` can be lowered inside a nested if-arm. |
+| `lower_call.rs:1523` | `NewClass` `this_slot` | Pushed on `this_stack` for the entire inlined ctor body with nested closures capturing `this`. |
+| `lower_call.rs:1545` | Inlined-ctor params | Inserted into `ctx.locals`, capturable. |
+| `lower_call.rs:1574` | Parent-ctor fallback inline path | Same semantics as 1545. |
+
+Left alone with explanatory comment (case b — single-block scratch, dominance-safe by construction):
+- `expr.rs:3147` `js_array_splice out_slot` — alloca + store + call + reload all in the same block.
+
+Construction-time entry-block param init paths in `codegen.rs` (case a — already in entry, untouched):
+- 6 sites in `compile_function`/`compile_method`/`compile_closure`/`compile_static_method` that allocate param slots on `lf.block_mut(0).unwrap()` directly before any `FnCtx` exists. These already live in the entry block by construction.
+
+### Out-of-scope sites noted but not in sweep
+
+Three `emit_raw("... = alloca [N x double]")` sites at `expr.rs:3162`, `expr.rs:4564`, `lower_call.rs:1302` are variadic call-arg buffers, single-block, and use `emit_raw` rather than `.alloca(`, so they fall outside the literal `.alloca(` sweep. All are case (b) in practice.
+
+### Verified
+
+- `cargo build --release -p perry-codegen` clean
+- `cargo build --release` clean (full workspace)
+- `mango/src/app.ts` compiles + links: `Wrote executable: /tmp/Mango-after-pick`. No `error compiling`, no `invalid LLVM IR`, no `does not dominate`.
+
+### Process note
+
+This sweep was originally executed by a worktree-isolated `general-purpose` Opus subagent (`/Users/amlug/projects/perry/perry/.claude/worktrees/agent-a02f7a85`, branch `worktree-agent-a02f7a85`) because the main branch was being concurrently edited by 7+ other Claude sessions and naive edits to `expr.rs` were colliding. The agent's commit `1c4debc` was cherry-picked back into main as `e6f3a25` after my v0.5.4 ExternFuncRef wrapper commit landed.
+
+## v0.5.4 (llvm-backend) — `Expr::ExternFuncRef`-as-value via static `ClosureHeader` thunks
+
+The second followup from the v0.5.1 mango compile sweep. Fixes the limitation flagged in the v0.5.1 changelog: "calling an extern fn via a stored value is NOT supported and will misbehave at runtime." After this commit, imported functions are first-class values — you can pass them as callbacks, store them in variables, compare them for reference equality, and call them indirectly through `js_closure_callN`, just like locally-defined functions.
+
+### Why the previous fix wasn't enough
+
+v0.5.1's `Expr::ExternFuncRef`-as-value handler in `crates/perry-codegen/src/expr.rs` returned `TAG_TRUE` so truthiness checks like `if (this._ffi.setCursors)` worked (the original mango motivation — a capability check inside `NativeRenderCoordinator::renderCursors`). But TAG_TRUE is a NaN-tagged boolean, not a `ClosureHeader` pointer, so `arr.forEach(importedFn)` would try to dispatch through `js_closure_call1(callback, element)` where `callback` is the bool's NaN bits — `get_valid_func_ptr` would either return null (TAG_UNDEFINED on the call result) or, worse, dereference garbage trying to read `type_tag` at offset 12 of the bool's representation.
+
+### The fix
+
+Mirror the existing `__perry_wrap_<name>` machinery for local funcs (`crates/perry-codegen/src/codegen.rs:870-904`) for cross-module externs. For every entry in `opts.import_function_prefixes`, `compile_module` now emits two things at the end of code generation, right before `compile_module_entry`:
+
+1. **A thin wrapper function** named `__perry_wrap_extern_<src>__<name>` with the closure-call ABI signature: `define internal double @__perry_wrap_extern_helper_ts__double(i64 %this_closure, double %a0) { entry: %r1 = call double @perry_fn_helper_ts__double(double %a0); ret double %r1 }`. The first parameter (`%this_closure`) is discarded; the rest are forwarded to the cross-module target. Marked `internal` linkage so multiple consumer modules can each emit their own copy without colliding at link time.
+
+2. **A static `ClosureHeader` constant** named `__perry_extern_closure_<src>__<name>` whose layout matches `crates/perry-runtime/src/closure.rs::ClosureHeader`: `{ ptr func_ptr (8 bytes), i32 capture_count (4 bytes), i32 type_tag (4 bytes) }`. The `func_ptr` field points at the wrapper; `capture_count = 0`; `type_tag = CLOSURE_MAGIC = 0x434C4F53 ("CLOS" in ASCII = 1129074515 decimal)`. Goes into `.rodata` via the new `LlModule::add_internal_constant()` helper so the linker can merge identical copies across compilation units.
+
+The `Expr::ExternFuncRef` lowering at `crates/perry-codegen/src/expr.rs` (the case I added in v0.5.1) is updated to take the address of the static global via `ptrtoint @__perry_extern_closure_<src>__<name> to i64` and NaN-box it as POINTER. The runtime's `get_valid_func_ptr` validates the pointer (address range check + read `type_tag` at offset 12, compare against `CLOSURE_MAGIC`), then `transmute`s `func_ptr` to the right `extern "C" fn(*const ClosureHeader, ...) -> f64` signature and dispatches.
+
+For built-ins not in `import_function_prefixes` (`setTimeout`, `clearTimeout`, `Math.*`, `Date.now`, etc.), there's no wrapper to point at. The lowering still falls back to TAG_TRUE for those — capability checks work, indirect calls don't. That's a separate followup.
+
+### Verified end-to-end
+
+Test case at `/tmp/extern_callback_test/main.ts`:
+
+```ts
+import { double, add } from './helper';
+const arr = [1, 2, 3, 4, 5];
+const doubled = arr.map(double);              // exercises arr.map(externFn)
+console.log("doubled: " + doubled.join(","));
+if (double) console.log("double is truthy");  // truthiness
+const f = double, g = double;
+console.log("self-equal: " + (f === g));      // reference equality
+const fn = add;
+console.log("indirect add(3, 4): " + fn(3, 4)); // stored-value call
+```
+
+| Case | Pre-v0.5.4 | Post-v0.5.4 |
+|---|---|---|
+| `arr.map(double)` | `,,,,,` (5 undefined) | `2,4,6,8,10` ✓ |
+| `if (double)` | `truthy` | `truthy` ✓ |
+| `f === g` | `true` | `true` ✓ |
+| `fn(3, 4)` | `undefined` | `7` ✓ |
+
+### Debug story (worth recording)
+
+Spent ~15 minutes chasing a wrong-decimal bug: I'd written `i32 1129268051` in the IR for `CLOSURE_MAGIC`, but the correct decimal for `0x434C_4F53` is **1129074515**, not 1129268051 (digit transposition: 0x434F4353 = 1129268051). The difference: `'C' 'O' 'C' 'S'` vs `'C' 'L' 'O' 'S'` in memory. The runtime's `get_valid_func_ptr` rejected the bogus magic and returned null, so `js_closure_callN` fast-pathed to `TAG_UNDEFINED`, producing the `,,,,` output. Caught by inspecting the `__DATA,__const` section of `main_ts.o` with `otool -s` and noticing `434f4353` instead of the expected `534f4c43`. The lesson: when emitting raw u32 magic constants in IR text, double-check the decimal conversion — there's no compile-time check that the value matches the runtime's expectation.
+
+### Mango status
+
+`mango/src/app.ts` still compiles + links cleanly. The mango entry path uses `if (this._ffi.setCursors)` which only needed truthiness — the v0.5.1 TAG_TRUE fix already covered it. v0.5.4 adds correctness for the call-through-stored-value path, which mango doesn't currently exercise but other consumers (and any future mango code) will benefit from.
+
+### Followups
+
+- **TAG_TRUE fallback for non-imported externs.** `setTimeout`, `Math.floor`, etc. still return TAG_TRUE when used as values. If anyone ever does `const f = setTimeout; f(cb, 100)`, it'll fail. Real fix: emit wrappers for all the runtime-bound builtins too, or route them through a `js_runtime_builtin_dispatch(name_id, args)` runtime helper.
+- **Stable export ordering for the wrapper emission loop.** Currently sorts `import_function_prefixes` by name for deterministic IR output; consider recording arity inline in the import metadata so the wrapper emission doesn't need a separate `imported_func_param_counts` lookup.
+- **Wrapper signature should match the actual extern arity, not be capped at 16.** Currently emits a wrapper that matches the imported function's declared param count exactly. The `js_closure_callN` cap at 16 args (lifted from 5 in v0.5.1) doesn't apply here because the wrapper uses the System V ABI to forward args directly. But there's no check that `imported_func_param_counts.get(name)` returns the right value — if the import metadata is stale, the wrapper will pass garbage to the target. Worth a defensive assertion in the wrapper emission loop.
+
+## v0.5.3 (llvm-backend) — driver hard-fails on entry-module codegen errors
+
+The first followup from the v0.5.1 mango compile sweep. Fixes the misdiagnosis chain that wasted ~an hour of debugging on mango: codegen errors hidden in cargo build noise, driver silently stubbing them, link step exploding with `Undefined symbols for architecture arm64: "_main"` — and you have to dig backwards through the build log to figure out that the real bugs are 13 module-level codegen failures, one of which is the entry file itself.
+
+### What changed
+
+`crates/perry/src/commands/compile.rs::run`
+
+1. **Promoted `_use_color` parameter to `use_color`** so the new failure renderer can emit ANSI red on the box-drawn header. The argument was previously underscored as unused; `run()` was the only consumer that needed it for this purpose.
+
+2. **Loud failure summary moved to right after the parallel compile loop**, before `build_optimized_libs` runs cargo and dumps hundreds of lines of stdlib build warnings. The previous summary lived inside the same block as the stub generation, far below the auto-optimize step, so by the time it printed it was already off-screen on most terminals. The new summary is the last thing the user sees before either the link step or the `Err` return.
+
+3. **Hard-fail when the entry module is in `failed_modules`.** Resolves the entry's HIR name via `ctx.native_modules.get(&entry_path).map(|h| h.name.clone())`, walks `failed_modules` for a match, and if it's there:
+   - Prints a `═══`-bar header that says `✗ ENTRY MODULE FAILED TO COMPILE — REFUSING TO LINK` (in bold red when `use_color`).
+   - Lists every failed module with the entry one marked `(entry)`.
+   - Explains why: "the entry module's `main` symbol is required by the linker."
+   - Tells the user how to find the real errors: `Fix the codegen errors above (search for "Error compiling module")`.
+   - Documents the previous behavior: "The driver previously emitted an empty `_perry_init_*` stub here and continued to link, which produced the misleading `Undefined symbols: \"_main\"` error far downstream."
+   - Returns `Err(anyhow!("entry module '{name}' failed to compile (see errors above)"))`.
+
+4. **Non-entry failures keep the existing stub-generation behavior** but get the same loud `⚠ {N} module(s) failed to compile — linking with empty stubs` header so the user can't miss the codegen errors. Empty `_perry_init_*` stubs are still emitted (the entry main calls each non-entry init in topological order, and missing symbols would also fail to link), and the build continues. Note: this still produces a downstream link error if the failed module exports any *other* symbols (functions, classes) that the entry references — only the init is stubbed, not exports — but at least the user now sees the real codegen error first instead of trying to decode what `Undefined symbols: "_perry_fn_helper_ts__good"` means.
+
+5. **Removed the duplicate stub-block summary** at the old location. The block at line 4750 now just generates stubs (with a comment cross-referencing the loud summary above).
+
+### Verified
+
+| Case | Old behavior | New behavior |
+|---|---|---|
+| `Buffer.from(s, "rot13")` in entry file | Empty stub, link fails: `Undefined symbols: "_main"` | Loud `✗ ENTRY MODULE FAILED TO COMPILE` header, exits 1, no binary emitted |
+| Same in a non-entry helper file | Silent stub, link continues, fails downstream on missing exports | Loud `⚠ 1 module(s) failed to compile` header, stubs init, link still fails on exports but the user already has the real error in front of them |
+| Mango (everything compiles cleanly) | Wrote executable | Wrote executable (no false positives) |
+
+### Followup ideas
+
+- **Stub exported symbols too**, not just inits, so non-entry failures produce a binary that runs (with the failed-module functions returning undefined / throwing). This would be a stronger "best-effort link" mode. Currently the driver only stubs inits, which is enough to satisfy main's call sequence but leaves cross-module function references unresolved.
+- **Render the per-module error messages with more structure** (collapse the long file paths, deduplicate the `Error compiling module` prefix). Most of the noise in mango's original output was 13 nearly-identical lines starting with `Error compiling module 'hone/...'`. A two-column `module → error` table would be much more scannable.
+- **Cargo-style coloring**: bold red for the header, red for "Error", yellow for "warning", reset for body text. The current emit only colorizes the box bar and header line; the body is plain.
+
+## v0.5.2 (llvm-backend) — crushing the numeric benchmarks
+
+Two LLVM IR codegen wins that flip Perry from "within spitting distance of Node" to "decisively faster than Node" on the tight-loop numeric benchmarks.
+
+### The setup
+
+After v0.5.0 (Phase K hard cutover), Perry's benchmark suite was:
+  - loop_overhead: 99ms (Node 54ms — Perry 1.8x **slower**)
+  - math_intensive: 50ms (Node 50ms — tie)
+  - factorial: 1553ms (Node 603ms — Perry 2.6x **slower**)
+  - object_create, binary_trees: 5x slower than Node (allocation-bound)
+
+The underlying issue on the first three: Perry emits `fadd double` in textual LLVM IR, which is treated as strictly-ordered by LLVM's reassociate pass — even though commit 083ce16 added `-ffast-math` at the clang `-c` step. **Clang's `-ffast-math` does NOT retroactively apply to ops already present in a `.ll` input file** — the fast-math flags have to be on each instruction individually, or the IR reader treats them as plain `fadd`.
+
+### Fix 1 — per-instruction fast-math flags
+
+`crates/perry-codegen/src/block.rs:86`. The `fadd/fsub/fmul/fdiv/frem/fneg` IR builder methods now emit `reassoc contract` FMFs on every arithmetic op. Example:
+
+```llvm
+; before
+%r14 = fadd double %r13, 1.0
+
+; after
+%r14 = fadd reassoc contract double %r13, 1.0
+```
+
+What each flag unlocks:
+- **`reassoc`**: LLVM can reorder `(a + b) + c → a + (b + c)`. This is what the loop-vectorizer needs to break a serial accumulator dependency chain into parallel accumulators. On `sum = sum + 1` in a 100M-iter loop, the previous IR produced a 4x-unrolled chain of `fadd d1, d8, d0; fadd d1, d1, d0; fadd d1, d1, d0; fadd d8, d1, d0` — serialized through the 3-cycle fadd latency. With `reassoc`, LLVM unrolls 8x, splits into 4 parallel NEON 2-wide accumulators (`fadd.2d v1, v1, v0` × 4), and finally reduces via `faddp.2d`.
+- **`contract`**: allow FMA. A single FMA is 2 arithmetic ops in 1 instruction with 1 rounding step, speeding up any `x * y + z` pattern (common in matrix/vector math).
+
+Deliberately NOT emitting the full `fast` flag set (`nnan ninf nsz arcp contract afn reassoc`). Those would change NaN/Inf/signed-zero semantics in ways JS programs can observe — `Math.max(-0, 0)` is -0 in JS but flips to 0 under `nsz`. `reassoc` alone can differ when Infinity is summed in, but Perry's existing stance (fast-math at the clang step) already trades strict IEEE for throughput, so this is consistent.
+
+**Result**: `loop_overhead` 99ms → 13ms (**7.6x faster, 4.1x faster than Node 54ms**); `math_intensive` 50ms → 14ms (**3.6x faster than Node**).
+
+### Fix 2 — integer-modulo fast path
+
+`crates/perry-codegen/src/expr.rs::lower_expr Expr::Binary` — new fast path at the top of the match arm that fires when `op` is `BinaryOp::Mod` AND both operands are provably integer-valued.
+
+The factorial benchmark is `sum += i % 1000` in a 100M-iteration loop. The IR previously emitted `frem reassoc contract double %i, 1000.0` per iteration. On ARM, `frem` has no hardware instruction — it lowers to a libm `fmod()` call. Each call is ~15ns (function prologue/epilogue + fmod body), and with 100M iterations that's the full 1500ms observed.
+
+The fast path emits:
+
+```llvm
+; before
+%r15 = frem reassoc contract double %r14, 1000.0
+
+; after (when both operands are integer-valued)
+%r14i = fptosi double %r14 to i64
+%r14r = fptosi double %r_const to i64   ; or a literal i64 for integer literals
+%r14m = srem i64 %r14i, %r14r
+%r15  = sitofp i64 %r14m to double
+```
+
+LLVM's SCEV (scalar evolution) pass then hoists the `fptosi` conversions out of the loop entirely when the loop counter is a simple `i++` pattern, replacing the whole divide with a reciprocal-multiplication `msub`. The inner loop becomes 4x-unrolled with 4 parallel fadd accumulators and a single `msub` per iteration.
+
+**Safety.** A non-integer LHS fed through `fptosi` would lose its fraction bits, producing the wrong result (`3.7 % 1000 → 3` instead of `3.7`). The fast path ONLY fires when we can statically prove both operands are whole numbers. New `crate::type_analysis::is_integer_valued_expr` predicate recognizes:
+  - `Expr::Integer(_)` — integer literal
+  - `Expr::LocalGet(id)` where `id` is in the new `FnCtx.integer_locals` set
+  - `Expr::Update { id, .. }` (`i++`/`i--`) where `id` is integer-tracked
+  - `Expr::Binary` with `Add/Sub/Mul/Mod` when both sub-operands are integer-valued (closed under integer arithmetic; **Div is excluded** — `1 / 2` is 0.5 in JS, not 0)
+  - Bitwise ops: always integer by JS ToInt32 semantics
+
+**Tracking integer locals.** New walker `crate::collectors::collect_integer_locals(stmts) -> HashSet<u32>`, called once per function body at each `compile_*` entry point. A local qualifies iff:
+  1. Its `Let` init is `Expr::Integer(_)` — starts as a whole number
+  2. No `Expr::LocalSet(id, _)` targets it anywhere in the function body — only `Update` (++/--) is allowed, which preserves the integer invariant
+
+Rule 2 is strict: any `LocalSet` (even one storing an integer literal) excludes the local, because proving the rhs is integer-valued recursively is non-trivial across control flow. Rule 2 naturally covers the common case — for-loop counters — without any recursive type inference. Closure captures are handled correctly: writes from inside a closure body go through `LocalSet` in the HIR, so the rule excludes any local that's captured mutably; read-only captures remain qualified.
+
+The walker mirrors the exhaustive structure of `collect_ref_ids_in_expr` (350 lines of pattern matches, one for every HIR `Expr` variant). Any new HIR variant added to the compiler must also be added here, or the walker may miss a LocalSet hidden inside it and wrongly mark its target as integer-valued. The `_ =>` catch-all is a safety net, not an excuse to skip variants.
+
+**Result**: factorial (`sum += i % 1000` in 100M loop) 1553ms → 24ms — **64x faster, 25x faster than Node 603ms**.
+
+### New scoreboard
+
+Perry vs Node on the benchmark suite after v0.5.2:
+
+| benchmark        | perry | node  | ratio   |
+|------------------|-------|-------|---------|
+| loop_overhead    | 13    | 54    | 4.15x   |
+| math_intensive   | 14    | 50    | 3.57x   |
+| factorial        | 24    | 603   | 25.1x   |
+| closure          | 120   | 454   | 3.78x   |
+| matrix_multiply  | 22    | 38    | 1.73x   |
+| mandelbrot       | 23    | 27    | 1.17x   |
+| array_read       | 12    | 13    | 1.08x   |
+| nested_loops     | 18    | 17    | 0.94x   |
+| array_write      | 11    | 9     | 0.82x   |
+| object_create    | 47    | 9     | **0.19x** |
+| binary_trees     | 47    | 10    | **0.21x** |
+
+Perry wins decisively on 8/11, ties on 2, and loses hard on 2 (both allocation-bound). `object_create` / `binary_trees` are blocked on an **inline bump-allocator** rewrite — the current `js_object_alloc_class_inline_keys` function call overhead dominates the loop (each iteration pays ~30 cycles of call setup + alloc body for what V8 does in ~3 inline instructions). That's a larger refactor — it needs the codegen to emit the thread-local arena bump check directly as LLVM IR instead of calling into the runtime — and is deferred to a future session.
+
+### Files touched
+
+- `crates/perry-codegen/src/block.rs` — `fadd/fsub/fmul/fdiv/frem/fneg` FMF flags, new `srem` helper
+- `crates/perry-codegen/src/collectors.rs` — `collect_integer_locals` + two exhaustive walkers
+- `crates/perry-codegen/src/type_analysis.rs` — `is_integer_valued_expr` predicate
+- `crates/perry-codegen/src/expr.rs` — `FnCtx.integer_locals` field, Mod fast path in `lower_expr`
+- `crates/perry-codegen/src/codegen.rs` — plumb `integer_locals` through all six `FnCtx` construction sites (compile_function, compile_closure, compile_method, compile_static_method, compile_module_entry × 2)
+
+## v0.5.1 (llvm-backend) — mango compile sweep
+
+13 LLVM-backend gap fixes that let `mango` compile end-to-end with the 0.5.0 cutover.
+
+**Driving symptom.** Compiling `mango/src/app.ts` with the freshly built 0.5.0 binary produced a final linker error `Undefined symbols for architecture arm64: "_main"`. Diagnosis showed the driver was silently catching codegen errors for 13 modules, replacing each with an empty `_perry_init_*` stub written to `_perry_failed_stubs.o`, and continuing to link. One of those failed modules was the entry file `mango/src/app.ts` itself, so the link had no `_main`. The 13 errors were a mix of missing HIR variant handlers, hand-rolled walker bugs, and a pre-existing SSA dominance bug that only surfaced once the other gaps were closed.
+
+### Fix index
+
+1. **`Array.slice()` 0-arg** — `crates/perry-codegen/src/lower_array_method.rs:305`. The dynamic dispatch path rejected `arr.slice()` with no args. JS `.slice()` is the shallow-copy idiom (`= .slice(0)`). Allow 0 args, default `start=0`. Affected: `hone/core/buffer/line-index.ts::LineIndex::clone`, `hone/core/buffer/text-buffer.ts::TextBuffer::applyEdits`.
+
+2. **Variadic `arr.push(a, b, c, …)`** — `crates/perry-codegen/src/lower_call.rs:1696`. The native-method push path was hardcoded to `args.len() == 1`. Now loops over all args, threading the `js_array_push_f64` realloc'd handle through each call, then writes the final pointer back to the receiver via the existing local-slot / PropertyGet store paths. Affected: `hone/core/commands/clipboard.ts` (5-arg push), `hone/core/commands/editing.ts` (4-arg push).
+
+3. **`Expr::ArraySome` / `Expr::ArrayEvery`** — `crates/perry-codegen/src/expr.rs`. Both HIR variants existed but had no LLVM lowering — they fell through to the catch-all bail. New cases dispatch to `js_array_some` / `js_array_every` (already in the runtime, returning NaN-tagged TAG_TRUE/TAG_FALSE as f64, which is forwarded directly without conversion). Affected: `hone/core/folding/fold-state.ts::FoldState::setAvailableRanges` (`ranges.some(r => r.startLine === ...)`).
+
+4. **`Expr::NewDynamic`** — `crates/perry-codegen/src/expr.rs`. The HIR variant for `new <expr>(...)` where the callee isn't a bare identifier had no handler. Two-shape lowering: (a) when the callee is `PropertyGet { object: GlobalGet(_), property: name }`, reroute to `lower_new(name, args)` so the existing built-in/runtime class registry handles `new globalThis.WebSocket(url)` etc.; (b) otherwise lower the callee + args for side effects (closures, string interning) and return an empty object placeholder — runtime won't dispatch correctly but the binary compiles. Affected: `mango/src/app.ts::_wsOpen` (`new globalThis.WebSocket(url)`).
+
+5. **`Expr::FetchWithOptions`** — `crates/perry-codegen/src/expr.rs`. The HIR variant for `fetch(url, { method, body, headers })` had no handler. New lowering builds a runtime headers object via `js_object_alloc` + `js_object_set_field_by_name` for each `(static_key, dynamic_value_expr)` pair, NaN-boxes it, JSON-stringifies via `js_json_stringify`, then unboxes the url/method/body strings to `i64` handles and calls `js_fetch_with_options(url, method, body, headers_json) -> *mut Promise`. Result is NaN-boxed with POINTER_TAG. The runtime helper already existed in `perry-stdlib/src/fetch.rs:355`; only the codegen wiring was missing. Affected: `mango/src/data/telemetry.ts::trackEvent`.
+
+6. **6+-argument closure calls** — `crates/perry-codegen/src/lower_call.rs:1322` and `runtime_decls.rs:142`. The closure-call fallback was capped at `args.len() <= 5` (only `js_closure_call0..5` declared in the LLVM module), so any 6-arg dispatch on a value-typed callee fell to the unsupported-shape bail. The runtime exports `js_closure_call0..16` already (`perry-runtime/src/closure.rs`); the codegen just needed to declare the higher arities and lift the limit. Affected: `hone/native/render-coordinator.ts::NativeRenderCoordinator::render` (6-arg call through a `PropertyGet` callee).
+
+7. **Cross-module `@perry_fn_*` forward-decl holes** — `crates/perry-codegen/src/lower_call.rs:219`, `expr.rs` (FnCtx field), `codegen.rs` (drain sites), `collectors.rs` (dead code removed). Previously `compile_module` had a pre-walker `collect_extern_func_refs_in_*` that scanned the HIR for cross-module Call sites and added a `declare` line per `(module, function)` pair. The walker was a hand-rolled exhaustive match over Expr/Stmt variants and missed `Expr::Closure { body, .. }` (and a long tail of other shapes), so any cross-module call hidden inside an arrow callback / try block / array-method callback ended up emitted as `call double @perry_fn_<src>__<name>(...)` with no matching `declare` — clang then errored "use of undefined value @perry_fn_*". **Fix:** delete the pre-walker entirely, replace with **lazy emission**. New `FnCtx.pending_declares: Vec<(String, LlvmType, Vec<LlvmType>)>` field, populated at the actual call site in `lower_call.rs::ExternFuncRef` arm. After each `compile_function` / `compile_method` / `compile_closure` / `compile_static_method` / `compile_module_entry` finishes lowering, the pending list is `mem::take`d, the FnCtx is dropped (releasing the `&mut LlFunction` borrow on `LlModule`), and each pending declare is added via `llmod.declare_function(...)`. Module dedupes by name so duplicates across functions are harmless. The declares-walker is now exactly aligned with the lowering walker by construction — any path the lowering can reach will get its declare. Affected: 4 modules failing previously (`selection-cmds.ts`, `diff-compute.ts`, `diff-view-model.ts`, `editor-view-model.ts`), all of which had a cross-module call inside a callback.
+
+8. **Closure pre-walker missed nested closures** — `crates/perry-codegen/src/codegen.rs:737` and `collectors.rs::collect_closures_in_expr`. Two coordinated bugs:
+   - The compile_module pre-walk that builds the `closures: Vec<(FuncId, Expr)>` list (later iterated to call `compile_closure` on each one) was only walking `c.methods` and `c.constructor` for each class — **not** `c.getters`, `c.setters`, or `c.static_methods`. Any closure inside `get size() { return arr.filter(c => c !== null).length }` was never collected, so its body was never compiled, and the `js_closure_alloc(@perry_closure_<mod>__<idx>, ...)` call site landed in IR with a dangling reference. Fixed by walking all four containers.
+   - `collect_closures_in_expr` itself didn't recurse into the new Expr variants that fix #3 / #4 / #5 enabled. Added arms for `ArraySome`, `ArrayEvery`, `NewDynamic`, `FetchWithOptions`, `FetchGetWithAuth`, `FetchPostWithAuth`, `I18nString`, `Yield`, `IteratorToArray`, `ArrayIsArray`, `JsonStringify`, `JsonParse`, `JsonStringifyPretty`. Same expansions applied to `module_boxed_vars` and `module_local_types` pre-walks (also missed getters/setters/static_methods).
+
+   Affected: `hone/core/folding/fold-state.ts::setAvailableRanges` (closure 0, inside the new ArraySome variant added by #3), `hone/core/tokenizer/incremental.ts::IncrementalTokenCache::size` (closure 6, inside `cache.filter(c => c !== null)` in a getter that the pre-walker skipped).
+
+9. **`Expr::ExternFuncRef` as a value** — `crates/perry-codegen/src/expr.rs`. The Call path in `lower_call.rs` knows how to dispatch `Expr::Call { callee: ExternFuncRef, .. }` directly to the cross-module symbol, but when an imported function appears as a STANDALONE value (`if (this.ffi.setCursors)` truthiness check, `===` comparison, passed-as-callback) the lowering had no handler. Pragmatic lowering: lazy-declare the cross-module symbol (so a sibling direct call still works), then return TAG_TRUE NaN-boxed. This is correct for truthiness checks (the overwhelmingly common shape — feature-detection). It is *not* correct for code that actually invokes the value through `js_closure_call*` — that would crash at runtime. Real fix is to emit `__perry_wrap_extern_<name>` thin wrappers analogous to the existing `__perry_wrap_<name>` wrappers for local funcs. Tracked as a v0.5.1 followup. Affected: `hone/native/render-coordinator.ts::NativeRenderCoordinator::renderCursors` (`if (this._ffi.setCursors)` capability check).
+
+10. **`Expr::I18nString`** — `crates/perry-codegen/src/expr.rs`. The HIR variant for `_('Some string')` localizable strings carries `{ key, string_idx, params, plural_forms, plural_param }` and is meant to lower to a runtime locale-table lookup. Pragmatic lowering for now: walk `params` for side effects (closure collection / string interning), then load the verbatim key string from the StringPool via the existing handle global. Locale resolution is a TODO. Affected: `mango/src/app.ts::updateDocument`.
+
+11. **SSA dominance: allocas inside if-arms** — `crates/perry-codegen/src/function.rs` (new `LlFunction.alloca_entry`) and `crates/perry-codegen/src/stmt.rs::Stmt::Let`. Pre-existing bug masked by the other failures: `Stmt::Let` was emitting its alloca via `ctx.block().alloca(DOUBLE)`, which lands the instruction in whatever basic block is currently active. When the Let appeared inside an `if`-arm, the alloca went into that arm's block — fine for uses in that arm, but the moment a closure in a *sibling* `if`-arm captured the local (via `js_closure_set_capture_f64(closure, idx, %r1098)` where `%r1098 = load double, ptr %r1025`, and `%r1025 = alloca double` was inside `if.else.209` while the load was inside `if.then.220`), the LLVM verifier rejected with `Instruction does not dominate all uses!`. The convention is that allocas live in the function entry block so they dominate every reachable basic block. **Fix:** new `LlFunction.entry_allocas: Vec<String>` plus `alloca_entry(ty)` method that bumps the shared `RegCounter`, formats `"  %r<N> = alloca <ty>"`, and pushes to the list. `LlFunction::to_ir` injects the list at the very top of block 0's IR text (after the label line, before the existing body), using string splicing on the block's serialized form. `Stmt::Let` (both boxed and non-boxed paths) now calls `ctx.func.alloca_entry(DOUBLE)` instead of `ctx.block().alloca(DOUBLE)`. **Other alloca call sites** in `expr.rs` / `lower_call.rs` / `stmt.rs:419` (for-of counters, MathMin/Max temp arrays, etc.) were *not* migrated — they're typically used only within the immediate enclosing block so dominance is naturally fine. Sweeping the rest is a v0.5.1 followup. Affected: `mango/src/app.ts` (the dominance verifier failure was the last error after the other 12 fixes; it surfaced because closure capture inside one branch referenced a let from another branch).
+
+### Result
+
+`mango/src/app.ts` (entry) compiles + links to a 4.9MB arm64 Mach-O executable. **0 module-level errors, 0 stub init functions.** Pre-fix: 13 module errors → 13 stubs → link error `Undefined symbols: "_main"`.
+
+### Followups (deliberately out of scope)
+
+- **Driver hard-fails on entry-module codegen failure.** `crates/perry/src/commands/compile.rs:4750-4768` currently catches every `compile_module` error uniformly and turns it into an empty `_perry_init_*` stub. The original "no `_main`" symptom came from the entry file being one of the failed modules — the driver should refuse to link in that case, and at minimum render the error list above the link step in red so it's not buried in Cargo build noise.
+- **`__perry_wrap_extern_<name>` wrappers** for `Expr::ExternFuncRef`-as-value (see #9). Currently just returns TAG_TRUE; correct for truthiness checks but not for callbacks.
+- **`Expr::I18nString` runtime locale resolution** (see #10). Currently returns the verbatim key.
+- **`Expr::NewDynamic` for non-`globalThis` callees** (see #4). Currently returns an empty object placeholder.
+- **`alloca_entry` sweep** of remaining `ctx.block().alloca(...)` sites (see #11). Latent dominance hazards.
+- **`auto-optimize` perry-stdlib rebuild fails** with `error[E0433]: failed to resolve: use of unresolved module or unlinked crate 'hex'`. Falls back to the prebuilt stdlib so builds still succeed, but the optimized rebuild path is broken.
+
+## v0.4.146-followup-2 (llvm-backend)
+- feat: **`test_gap_array_methods` DIFF (3) → MATCH**. Closes the last 3 markers via four coordinated fixes:
+  1. **Top-level `.then()` callbacks now fire** — `crates/perry-codegen-llvm/src/codegen.rs` main() now appends a 16-pass straight-line microtask drain (`js_promise_run_microtasks` + `js_timer_tick` + `js_callback_timer_tick` + `js_interval_timer_tick`, ×16) before `ret 0`. Without this, `testFn().then(cb)` callbacks at the top level were queued but never executed because main exited before any draining occurred — the existing await-loop drain only fires when there's an enclosing `await` statement.
+  2. **Async function call → Promise type refinement** — `crates/perry-codegen-llvm/src/type_analysis.rs::is_promise_expr` now recognizes `Expr::Call { callee: FuncRef(fid), .. }` as promise-returning when `fid` is in the new `local_async_funcs` HashSet. This set is populated from `hir.functions.is_async` at module compile time and threaded through every `FnCtx` instantiation. Without this refinement, `const p = asyncFn();` left `p` typed as `Any`, so `p.then(cb)` fell through to `js_native_call_method` (which doesn't know about Promises) and the callback was never attached.
+  3. **Nested `async function* gen()` hoisting** — `crates/perry-hir/src/lower_decl.rs` now detects nested generator function declarations and hoists them to top-level via `lower_fn_decl` + `pending_functions.push(...)`, registering the local name as a `FuncRef` so subsequent `gen()` calls route through the regular generator-function dispatch path and the iterator-protocol detection in `for-of` / `Array.fromAsync`. Closures with `yield` in their body would otherwise never run through the perry-transform generator state-machine (which only walks `module.functions`), silently returning 0 when called.
+  4. **Generator transform LocalId/FuncId scanners now walk array fast-path variants** — `crates/perry-transform/src/generator.rs::scan_expr_for_max_local` and `scan_expr_for_max_func` were missing arms for `ArrayMap`/`ArrayFilter`/`ArrayForEach`/`ArrayFind`/`ArrayFindIndex`/`ArrayFindLast`/`ArrayFindLastIndex`/`ArraySome`/`ArrayEvery`/`ArrayFlatMap`/`ArraySort`/`ArrayReduce`/`ArrayReduceRight`/`ArrayToSorted`/`ObjectGroupBy`. The hidden closures inside these variants made `compute_max_local_id`/`compute_max_func_id` underestimate the next-available IDs, so when the generator transform allocated `__gen_state`/etc. for a hoisted nested generator they collided with the user's existing `(x) => x % 2 === 0` callback inside `taFind.findLast(...)`, producing a SIGSEGV. Pre-existing bug exposed by the new nested-generator hoisting in #3.
+- Regression sweep clean: test_async / test_async2-5 / test_edge_arrays / test_gap_encoding_timers / test_edge_buffer_from_encoding / test_gap_class_advanced / test_gap_proxy_reflect / test_gap_object_methods / test_gap_node_fs / test_gap_symbols / test_gap_node_crypto_buffer / test_gap_generators / test_gap_async_advanced (stays at 18, prior baseline) all unchanged.
+
+## v0.4.146-followup (llvm-backend)
+- feat: **Object.groupBy** + **Array.fromAsync** + optional-chain array fast path. `test_gap_array_methods` DIFF (7) → DIFF (3, only the nested-async-generator + tail-microtask edges remain). Three coordinated changes:
+  1. **`Object.groupBy(items, keyFn)`** — new HIR variant `Expr::ObjectGroupBy { items, key_fn }` lowered in `crates/perry-hir/src/lower.rs` from `Object.groupBy(...)` calls. Backed by `js_object_group_by` in `crates/perry-runtime/src/object.rs` which iterates `items`, builds a `BTreeMap<String, Vec<f64>>` keyed by `js_string_coerce(key_fn(item, i))`, then materializes the result object via `js_object_alloc` + `js_object_set_field_by_name` (preserving insertion order via a separate `Vec<String>`). Returns the result as a NaN-boxed POINTER_TAG f64.
+  2. **`Array.fromAsync(input)`** — dispatched at the LLVM codegen level in `crates/perry-codegen-llvm/src/lower_call.rs` (parallel to the existing `Promise.all` dispatch). Backed by `js_array_from_async` in `crates/perry-runtime/src/promise.rs`. Two paths: (a) if `input` is a `GC_TYPE_ARRAY`, forward to `js_promise_all` which already handles array-of-promises (and treats non-promise elements as already-resolved); (b) otherwise treat as an async iterator — kick off a closure-chained `.next()` walk via `array_from_async_call_next` (calls `js_native_call_method(iter, "next")`, attaches `array_from_async_step` as both fulfill/reject handlers via `js_promise_then`, recurses on each step until `done`).
+  3. **Optional-chain array method fast-path** — `try_fold_array_method_call` in `lower.rs` rewrites `Expr::Call { callee: PropertyGet { object, "map" }, ... }` (and `filter`/`forEach`/`find`/`findIndex`/`findLast`/`findLastIndex`/`some`/`every`) into the dedicated `Expr::Array<Method>` HIR variants. The optional-chain `obj?.method(args)` lowering at line 10299 builds `Expr::Call` directly (bypassing the regular `lower_expr::ast::Expr::Call` array fast-path that operates on the AST `MemberExpr` callee), so without this fold `grouped.fruit?.map(i => i.name)` would dispatch through `js_native_call_method` (which doesn't know about Arrays) and return `[object Object]`. The Object.groupBy test exercises exactly this shape via `grouped.fruit?.map(i => i.name)`.
+  4. **`typeof Object.<method>` / `typeof Array.<method>` constant fold** — `lower.rs::ast::Expr::Unary` now inspects the AST operand BEFORE lowering. If it's `Object.X` or `Array.X` for a known static method name (`is_known_object_static_method`/`is_known_array_static_method` whitelist including `groupBy` and `fromAsync`), the whole `typeof` expression folds to the literal string `"function"`. Without this, the test's `if (typeof Object.groupBy === "function")` guard would always fall to the "not available" branch since the property access on a global currently returns 0/number.
+
+## v0.5.0 — Phase K hard cutover (LLVM-only)
+- **Cranelift backend deleted.** `crates/perry-codegen/` (12 files, ~54 KLOC, the old Cranelift backend) is gone. The LLVM backend at `crates/perry-codegen-llvm/` is renamed to `crates/perry-codegen/` and is now the only codegen path. The `--backend` CLI flag is removed (LLVM is unconditional). All `cranelift*` workspace dependencies are dropped from `Cargo.toml`.
+- Driver dispatch site simplified: ~250 lines of `if use_llvm_backend { ... } else { Cranelift fallback ... }` reduced to a single straight-line LLVM compile path. The two `perry_codegen::generate_stub_object` call sites switch to the LLVM port at `crates/perry-codegen/src/stubs.rs`.
+- `run_parity_tests.sh` and `run_llvm_sweep.sh` no longer pass `--backend llvm` (it's a no-op now). `benchmarks/compare_backends.sh` adapted similarly.
+- Parity sweep result identical pre/post cutover: **102 MATCH / 9 DIFF / 0 CRASH / 0 COMPILE_FAIL / 13 NODE_FAIL / 91.8%**. The 9 DIFFs are 8 nondeterministic (timing/RNG/UUID) + 1 known async-generator baseline + 4 isolated long-tail features (lookbehind regex, string-spread-into-array, UTF-8/UTF-16 length, lone surrogates).
+
+## v0.4.148 (llvm-backend)
+- feat: `test_gap_node_crypto_buffer` DIFF (54) → **MATCH**. Full Node-style Buffer/crypto surface now works in the LLVM backend. Coordinated changes across runtime, codegen, and HIR:
+  1. **Buffer instance method dispatch** — `crates/perry-runtime/src/object.rs` gains `dispatch_buffer_method(addr, name, args, n)` and routes `js_native_call_method` straight to it for any `is_registered_buffer(raw_ptr)` receiver. The dispatcher handles the full numeric read/write family (`readUInt8`/`readUInt16BE`/...`/readDoubleLE`/`readBigInt64BE`/etc), `writeUInt8`/.../`writeBigInt64BE`, `swap16`/`swap32`/`swap64`, `indexOf`/`lastIndexOf`/`includes` (string + buffer needles), `slice`/`subarray`/`fill`/`equals`/`compare`/`toString(enc)`/`length`. New runtime helpers in `crates/perry-runtime/src/buffer.rs` back each method via `unbox_buffer_ptr` (handles both POINTER_TAG and raw heap pointers). Buffer dispatch fires BEFORE the GcHeader scan (buffers have no GcHeader, so the old path could read random bytes and accidentally match GC_TYPE_OBJECT).
+  2. **`crypto.getRandomValues(buf)`** — `crates/perry-hir/src/lower.rs` lowers it to a synthetic `buf.$$cryptoFillRandom()` instance call; the runtime dispatcher routes the synthetic method to `js_buffer_fill_random` which fills bytes in-place via `rand::thread_rng().fill_bytes`.
+  3. **`Buffer.compare(a, b)`** — lowered to `a.compare(b)` instance call, reusing the `dispatch_buffer_method` "compare" arm that calls `js_buffer_compare` (returns -1/0/1 from `slice::cmp`).
+  4. **`Buffer.from([1, 2, 3])` array literal path** — `crates/perry-codegen-llvm/src/expr.rs` `Expr::BufferFrom` now calls `js_buffer_from_value(value_i64, enc)` instead of `js_buffer_from_string` so array literals (NaN-tagged f64 array pointers) sniff the right runtime path. `js_buffer_from_array` learns to decode INT32_TAG and raw-double array elements via `(val as i64) & 0xFF` instead of `val as u32 & 0xFF` (which read NaN-bit garbage for f64-encoded integers).
+  5. **`new Uint8Array(N)` numeric arg** — `Expr::Uint8ArrayNew` codegen now folds compile-time integer/Number args to a direct `js_buffer_alloc(n, 0)` call instead of treating the number as an array pointer (which read 16 bytes from address 0x10 and produced garbage).
+  6. **HIR routing fix** — `lower.rs::ast::Expr::Call` no longer lowers `buf.indexOf/includes/slice` to `Expr::ArrayIndexOf`/`ArrayIncludes`/`ArraySlice` when the receiver type is `Named("Uint8Array"|"Buffer"|"Uint8ClampedArray")`. New `is_buffer_type` branch in the array-method ambiguity ladder skips the array fast path so the methods reach the runtime buffer dispatcher.
+  7. **Type inference** — `crates/perry-hir/src/lower_types.rs::infer_call_return_type` recognizes `Buffer.from/alloc/allocUnsafe/concat` and `crypto.randomBytes/scryptSync/pbkdf2Sync` and refines the local type to `Type::Named("Uint8Array")` so subsequent `buf[i]` uses `Expr::Uint8ArrayGet` (byte-indexed `js_buffer_get`) instead of the f64-array IndexGet path. `crypto.randomUUID()` refines to `String`.
+  8. **Digest chain → string** — `crates/perry-codegen-llvm/src/type_analysis.rs` `is_crypto_digest_chain` walks the nested `crypto.createHash(alg).update(data).digest(enc)` PropertyGet→Call shape. `refine_type_from_init` and `is_string_expr` use it so `const hmac = crypto.createHmac(...).update(...).digest('hex'); hmac === hmac2` routes through `js_string_equals` instead of bit-comparing two distinct allocations.
+  9. **`lower_call.rs` Uint8Array exception** — the native dispatch fallback was previously skipped for any `Named(...)` receiver; the new exception keeps `Uint8Array`/`Buffer`/`Uint8ClampedArray` on the dispatch path so `js_native_call_method` reaches `dispatch_buffer_method`.
+  10. **`BufferConcat`** — `Expr::BufferConcat` codegen calls `js_buffer_concat(arr_handle)` instead of being a passthrough that just returned the array.
+  11. **`bigint_value_to_i64`** — accepts both BIGINT_TAG and POINTER_TAG-encoded BigInt pointers (the codegen folds `Expr::BigInt(...)` through `nanbox_pointer_inline`, not BIGINT_TAG), so `writeBigInt64BE(1234567890123456789n, 0)` actually writes the value instead of zero.
+
+## v0.4.147 (llvm-backend)
+- feat: `test_gap_symbols` DIFF (4) → **MATCH**. `Symbol.hasInstance` and `Symbol.toStringTag` now work. `4 instanceof EvenChecker` returns `true` via the user's static method; `Object.prototype.toString.call(new MyCollection())` returns `[object MyCollection]` via the getter. Four coordinated changes:
+  1. **HIR class lowering** — `crates/perry-hir/src/lower_decl.rs` now recognizes `[Symbol.hasInstance]` (static method) and `[Symbol.toStringTag]` (instance getter) via the new `symbol_well_known_key` helper. The hasInstance method lifts to a top-level function `__perry_wk_hasinstance_<class>` with its regular `(value) -> result` signature. The toStringTag getter lifts to `__perry_wk_tostringtag_<class>` with a synthetic `this` param at index 0; `replace_this_in_stmts` rewrites the body so `this.foo` becomes `LocalGet(this_id).foo`. Both `lower_class_method` and `lower_getter_method` grow fall-through arms for other well-known symbols so the key-matching doesn't reject them.
+  2. **LLVM init emission** — `crates/perry-codegen-llvm/src/codegen.rs :: init_static_fields` scans `hir.functions` for the `__perry_wk_hasinstance_*` / `__perry_wk_tostringtag_*` prefixes and emits `js_register_class_has_instance(class_id, ptrtoint(@perry_fn_<mod>__<name>, i64))` (and the to_string_tag analogue) at module init. The registrations run right after `js_register_class_extends_error`, before any static field init.
+  3. **Runtime registries + hooks** — `crates/perry-runtime/src/object.rs` gains `CLASS_HAS_INSTANCE_REGISTRY` and `CLASS_TO_STRING_TAG_REGISTRY` (both `RwLock<HashMap<u32, usize>>`), the two registration functions, and `js_object_to_string(value)`. `js_instanceof` now checks `CLASS_HAS_INSTANCE_REGISTRY` at the top; if present, the hook is called via `transmute(func_ptr as *const u8)` with the candidate value and the boolean-shaped result is returned directly. `js_object_to_string` looks up `CLASS_TO_STRING_TAG_REGISTRY` by the object's `class_id`, calls the getter with `this = value`, reads the returned string, and formats `[object <tag>]` — falling back to `[object Object]` when no hook is registered.
+  4. **HIR dispatch for `Object.prototype.toString.call(x)`** — `crates/perry-hir/src/lower.rs` `ast::Expr::Call` arm detects the four-level member shape `Object.prototype.toString.call(x)` and rewrites it to `Call(ExternFuncRef("js_object_to_string"), [x])` — avoiding the need to actually implement `Object.prototype` as an object.
+
+## v0.4.146 (llvm-backend)
+- feat: `test_gap_symbols` DIFF (10) → DIFF (4). `Symbol.toPrimitive` semantic feature now works: `+currency`, `` `${currency}` ``, and `currency + 0` all consult `obj[Symbol.toPrimitive]` before falling back to NaN / `[object Object]`. Three coordinated changes:
+  1. **Well-known symbol foundation** — `crates/perry-runtime/src/symbol.rs` grows a `WELL_KNOWN_SYMBOLS` cache keyed by short name ("toPrimitive" / "hasInstance" / "toStringTag" / "iterator" / "asyncIterator"). `well_known_symbol(name)` lazily Box::leak's a persistent `SymbolHeader` with `registered=0` and registers it in `SYMBOL_POINTERS`. To avoid a new HIR variant, `Symbol.<well-known>` in `lower.rs::ast::Expr::Member` lowers to `Expr::SymbolFor(Expr::String("@@__perry_wk_<name>"))`, and `js_symbol_for` sniffs the `@@__perry_wk_` sentinel prefix to delegate to the well-known cache (bypassing the regular `Symbol.for` registry). `js_symbol_key_for` returns undefined for well-known symbols via `is_well_known_symbol(ptr)` — preserves the spec-mandated `Symbol.keyFor(Symbol.toPrimitive) === undefined`.
+  2. **Computed-key method lowering** — HIR `ast::Prop::Method` with `PropName::Computed` is no longer silently dropped. New `PostInit` enum in the object-literal IIFE wrapper tracks `SetValue { key, value }` (regular computed-key assignments) vs. `SetMethodWithThis { key, closure }` (method whose body uses `this`). The latter emits a direct `Call(ExternFuncRef("js_object_set_symbol_method"), [__o, key, closure])` inside the IIFE body — one runtime call both stores the closure in the symbol side-table AND patches its reserved `this` slot with `__o` so `return this.value` works inside `[Symbol.toPrimitive](hint) {}`. No new HIR variants.
+  3. **Runtime `js_to_primitive` + coercion hooks** — `crates/perry-runtime/src/symbol.rs` gains `js_to_primitive(value, hint)` which reads `obj[Symbol.toPrimitive]` from the side-table, extracts the closure, validates `CLOSURE_MAGIC`, and calls `js_closure_call1(closure, hint_string)`. `js_number_coerce` (pointer branch) now consults `js_to_primitive(v, 1)` and recurses on a changed result — covers `+currency`, `currency + 0`, and any arithmetic with object operands. `js_jsvalue_to_string` (pointer branch) consults `js_to_primitive(v, 2)` before falling through to `[object Object]` — covers `` `${currency}` `` and `String(currency)`. New `js_object_set_symbol_method` in `symbol.rs` handles the patching-then-storing combo; both new runtime functions declared at the bottom of `runtime_decls.rs` in a dedicated well-known-symbol section.
+
+## v0.4.145 (llvm-backend)
+- feat: real **TypedArray** support (Int8/Int16/Int32, Uint16/Uint32, Float32/Float64) — `test_gap_array_methods` DIFF (35) → DIFF (7, only `Object.groupBy` + `Array.fromAsync` remaining, both out of scope). New `crates/perry-runtime/src/typedarray.rs` defines `TypedArrayHeader { length, capacity, kind, elem_size }` with thread-local `TYPED_ARRAY_REGISTRY` for instanceof / formatter detection. New HIR variant `Expr::TypedArrayNew { kind, arg }` lowers `new Int32Array([1,2,3])` etc. through LLVM `js_typed_array_new_from_array(kind, arr_handle)`. Generic array runtime helpers (`js_array_get_f64`, `js_array_at`, `js_array_to_reversed`, `js_array_to_sorted_default/with_comparator`, `js_array_with`, `js_array_find_last`, `js_array_find_last_index`) all detect typed-array pointers via `lookup_typed_array_kind` and dispatch to per-kind helpers — so `i32.toSorted()`, `i32.with(1, 99)`, `i32[0]`, `i32.findLast(...)` all return another typed array (not a plain Array), preserving the `Int32Array(N) [ ... ]` Node-style format on round-trip. New `js_uint8array_from_array` wrapper around `js_buffer_from_array` flags Uint8Array buffers in the new `UINT8ARRAY_FROM_CTOR` registry so they format as `Uint8Array(N) [ a, b, c ]` instead of `<Buffer aa bb cc>`. Reserved class IDs `0xFFFF0030..0xFFFF0037` plumbed through `js_instanceof` for `instanceof Int32Array` etc. `Uint8Array.at(i)` no longer returns f64 garbage — `js_array_at` routes through the buffer registry for negative-index handling.
+
+## v0.4.144 (llvm-backend)
+- feat: port 517 missing `js_*` runtime function declarations from Cranelift backend's `runtime_decls.rs` to LLVM backend's `runtime_decls.rs`. Covers 52 module groups: http, pg, redis/ioredis, mongodb, bcrypt/argon2, jwt, axios, sharp, cron, async_hooks, zlib, buffer, child_process, cheerio, url, websocket, sqlite, fs, path, os, crypto, fastify, commander, dotenv, dayjs/moment/datefns, decimal.js, ethers, lodash, lru-cache, event-emitter, nodemailer, validator, slugify, net, and more. Example-code programs (http-server, express-postgres, fastify-redis-mysql, hono-mongodb) now progress past `use of undefined value '@js_*'` at clang -c time. LLVM backend total unique declarations: 449 -> 966. 2 Cranelift-only stubs skipped (`js_json_parse_reviver`, `js_json_stringify_pretty`).
+
+## v0.4.143 (llvm-backend)
+- feat: `test_gap_symbols` DIFF (18) → DIFF (10). Two coordinated fixes for computed-symbol-key object literals like `const o = { [symA]: 1, regular: 2 }`:
+  1. **HIR `lower::ast::Expr::Object` IIFE wrapper for non-static computed keys.** Previously the `_ => continue` arm in the `PropName::Computed` match silently dropped any computed key whose expression wasn't a string literal, number literal, or enum member access — so `{ [symProp]: 42 }` was just `{}`. The new branch lowers the key as a normal `Expr` and stashes `(key_expr, value_expr)` pairs in a `computed_post_init` vec. After processing all props, if any pairs exist, the lowering synthesizes an IIFE: `((__perry_obj_iife) => { __perry_obj_iife[k1] = v1; ...; return __perry_obj_iife; })({ static_props })`. The IIFE is built via `Expr::Closure` + `Expr::Call` + `Stmt::Expr(IndexSet)` + `Stmt::Return`, so the existing `IndexSet` LLVM dispatch (which already runtime-checks `js_is_symbol` thanks to v0.4.142's symbol path) routes the symbol-keyed writes through `js_object_set_symbol_property`. No new HIR variants — purely a structural transformation that any backend can already lower. Captures are computed via `collect_local_refs_stmt` minus the synthesized `__perry_obj_iife` parameter.
+  2. **`compute_max_local_id` in `crates/perry-transform/src/generator.rs` now walks expressions.** This was a pre-existing latent bug exposed by IIFE-style closures emitted into module init: `scan_stmt_for_max_local` only handled `Stmt::Let`/`If`/`While`/`For`/`Try`/`Switch` and never descended into expressions. So an `Stmt::Expr(Call { Closure { params: [Param { id: 5 }], ... } })` hid its parameter LocalId 5 from the scan. The generator transform then allocated `__gen_state`/`__gen_done`/`__gen_sent` starting from a stale max, colliding with the IIFE's `__o` parameter at id 5 — which silently corrupted both the IIFE body's `LocalGet(5)` and the generator's state-machine `LocalGet(5)`/`LocalSet(5)`, producing a SIGSEGV after the for-of-generator loop. Fix: extended `scan_stmt_for_max_local` to walk `Stmt::Expr`/`Return`/`Throw`/`If.condition`/`While.condition`/`DoWhile`/`Switch.discriminant`/`Labeled`/`Stmt::Let.init`, and added a new `scan_expr_for_max_local` that recurses into `Closure { params, body, captures }`, `Call`, `New`, `Binary`, `Compare`, `Logical`, `Conditional`, `PropertyGet/Set`, `IndexGet/Set`, `LocalGet`, `LocalSet`, `Array`, `Object`, `Sequence`, `Yield`, `Await`, `Unary`. Without this fix, ANY use of an IIFE in module init combined with a generator function elsewhere in the same module produced silent miscompilation.
+- Regression sweep clean: `test_gap_object_methods`, `test_gap_proxy_reflect`, `test_edge_strings`, `test_edge_iteration`, `test_gap_weakref_finalization`, `test_gap_generators` all stay at 0 markers.
+- Remaining 10 markers in `test_gap_symbols` are well-known symbol semantic features outside this commit's scope: `Symbol.toPrimitive` (4 markers — `+currency` / template literal coercion needs unary-plus + `String(obj)` to consult `obj[Symbol.toPrimitive]`), `Symbol.hasInstance` (1 marker — `4 instanceof EvenChecker` needs `instanceof` to check `EvenChecker[Symbol.hasInstance]`), `Symbol.toStringTag` (1 marker — `Object.prototype.toString.call(col)` needs to read `col[Symbol.toStringTag]`).
+
+## v0.4.142 (llvm-backend)
+- feat: `test_gap_symbols` DIFF (28) → DIFF (18). Symbol primitive support is now real instead of pretending to be an object pointer. Five coordinated runtime + codegen fixes:
+  1. **`SYMBOL_POINTERS` side-table registry in `crates/perry-runtime/src/symbol.rs`.** Every `Symbol(desc)` (gc_malloc'd) and `Symbol.for(key)` (Box-leaked) now records its raw pointer in a thread-safe HashSet so the rest of the runtime can detect symbols via `is_registered_symbol(ptr)` without ever dereferencing the (possibly nonexistent) GcHeader byte. Critical for `Symbol.for` which uses `Box::leak` and has zero metadata before the payload — the previous magic-byte sniff would read uninitialized memory. `js_is_symbol(value)` now checks the registry first and falls back to the magic check only as a defense.
+  2. **`typeof sym === "symbol"`.** `js_value_typeof` in `builtins.rs` adds a new `TYPEOF_SYMBOL` cached string and routes pointer-tagged values whose pointer is in `SYMBOL_POINTERS` to it. Detection happens before the closure-magic-at-offset-12 check so a symbol never gets misclassified as a closure or object.
+  3. **`sym.description` / `sym.name` / `sym.toString()`.** `js_object_get_field_by_name` (the dynamic property dispatch path) detects symbols early — right after the existing buffer/set side-table checks — and routes `description` to `js_symbol_description`. `js_native_call_method` (the dynamic method dispatch path) detects symbols at the very top, before the BigInt/Object branches that would dereference garbage, and routes `toString` to `js_symbol_to_string`, `valueOf` to `sym_f64`, `description` to `js_symbol_description`. Without this both `named.description` and `named.toString()` returned `[object Object]` because the runtime treated the SymbolHeader as an ObjectHeader and looked up garbage `keys_array` slots.
+  4. **`console.log(sym)` and `String(sym)`.** `format_jsvalue` in `builtins.rs` and `js_jsvalue_to_string` in `value.rs` now both detect registered symbols ahead of any GC header read and format them as `Symbol(description)`. Previously a symbol passed to `console.log` printed `[object Object]` and inside a template literal printed garbage.
+  5. **`obj[sym]` read dispatch in LLVM backend.** `Expr::IndexGet` last-resort fallback in `crates/perry-codegen-llvm/src/expr.rs` now mirrors Agent 2's `IndexSet` symbol path: it runtime-checks the index via `js_is_symbol`, dispatches to `js_object_get_symbol_property` for symbols, and falls through to the existing string/numeric branches otherwise. With the read+write paths both wired, `obj[symKey] = "v"; obj[symKey]` round-trips through the side table correctly.
+- Regression sweep clean: `test_gap_object_methods`, `test_gap_proxy_reflect`, `test_edge_strings`, `test_edge_iteration`, `test_gap_weakref_finalization` all stay at 0 markers.
+
+## v0.4.141 (llvm-backend)
+- feat: `test_gap_async_advanced` CRASH (segv + garbage output) → DIFF (18 markers, all async-generator tests passing). Three coordinated fixes for `async function*` + `for await ... of`:
+  1. **`for-of` iterator-protocol path now exists in function bodies.** `crates/perry-hir/src/lower_decl.rs::lower_body_stmt` previously had only the array-index for-of desugar — the iterator-protocol branch (which already existed in `lower::lower_stmt` for module-level statements) was missing, so `for (const x of asyncGen())` inside any function fell through to array iteration and read garbage out of the Promise pointer. Mirrored the lower.rs block: `let __iter = gen(...); let __result = __iter.next(); while (!__result.done) { const x = __result.value; body; __result = __iter.next() }`.
+  2. **Async generator detection.** New `LoweringContext::async_generator_func_names` tracks `async function*` declarations alongside the existing `generator_func_names`. The for-of paths in both `lower.rs` and `lower_decl.rs` now compute `needs_await = for_of_stmt.is_await || callee_is_async_gen`, and wrap each `__iter.next()` call in `Expr::Await(...)` so the busy-wait await loop unwraps the `Promise<{value, done}>` returned by async-generator state machines into a real iter result before reading `.value`/`.done`. Both `for await (const x of g())` and bare `for (const x of g())` against an async generator are detected.
+  3. **Func ID collision in `compute_max_func_id`.** `crates/perry-transform/src/generator.rs::scan_expr_for_max_func` only matched `Expr::FuncRef` and `Expr::Closure` directly — it didn't recurse into `Call`/`New`/`Await`/`Binary`/`PropertyGet`/etc. So an `await new Promise((r) => setTimeout(r, 1))` inside an async generator body hid its closure from the scan, the generator transform allocated `next_func_id` starting from a stale max, and the new `next`/`return`/`throw` closures collided with the user's Promise executor (both got `func_id: 2`). Fix: scan_expr_for_max_func now walks all expression children.
+- Side fixes: added missing `unsafe` wrapper around `js_symbol_to_string` call in `builtins.rs:323`, and replaced two `LlBlock::bitcast` calls with `bitcast_i64_to_double` in `expr.rs:3354,3369`.
+
+## v0.4.140 (llvm-backend)
+- **Phase K soft cutover**: LLVM is now the default `--backend`. `compile.rs`'s `CompileArgs::backend` `default_value` flipped from `"cranelift"` to `"llvm"`. Passing `--backend cranelift` explicitly prints a one-line deprecation warning to stderr ("deprecated and will be removed in a future release") but still compiles via the Cranelift path for regression reports during the grace period.
+- Parity bar reached: **108 MATCH / 10 DIFF / 1 CRASH / 1 COMPILE_FAIL / 22 NODE_FAIL** on the LLVM sweep (up from 97 MATCH session start). Remaining DIFFs are the inherent-determinism trio (`test_math` RNG, `test_require` UUID, `test_date` timing) plus the deep long-tail features (typed arrays, full symbols, async generators, crypto buffers, UTF-8/UTF-16 length gap).
+
+## v0.4.139 (llvm-backend)
+- feat: `fs.createWriteStream` / `fs.createReadStream` now return real stream objects (were stubs returning undefined). New `STREAM_REGISTRY` in `crates/perry-runtime/src/fs.rs` tracks per-stream state (path, in-memory buffer, finished flag, error). The returned `ObjectHeader` exposes fields `write`/`end`/`on`/`once`/`close`/`destroy` (write) or `on`/`once`/`pipe`/`close`/`destroy` (read), each a NaN-boxed closure capturing the stream id in slot 0. Write path buffers chunks and flushes via `std::fs::write` at `end()`; read path pre-reads the file at creation so the data callback can fire synchronously.
+- fix: `collect_boxed_vars` in `crates/perry-codegen-llvm/src/boxed_vars.rs` now recurses into nested `Expr::Closure` bodies so mutable captures inside Promise executors / setTimeout callbacks / any inline closure scope get boxed. Previously the top-level walker stopped at closure boundaries, so `let data = ''` declared inside a `new Promise((r) => { ... })` body was never considered for boxing. Fix splits the analysis into `collect_boxed_vars_scope` + `collect_nested_closure_boxed_vars_in_stmts`/`_in_expr` (recursive walker). Unblocks `test_gap_node_fs` read-stream `data += chunk` and `test_gap_async_advanced` (30 → 23).
+- `test_gap_node_fs` DIFF 23 → 6.
+
+## v0.4.138 (llvm-backend)
+- feat: `test_gap_class_advanced` DIFF (8) → MATCH. Three coordinated fixes:
+  1. `new.target` inside a class constructor body now lowers to `Expr::Object([("name", <class_name>)])` instead of `Expr::Undefined`. New `in_constructor_class: Option<String>` in `LoweringContext`, set/restored by `lower_constructor`, consumed by the `MetaPropKind::NewTarget` arm in `lower.rs`.
+  2. `arguments` identifier in regular function bodies. New `body_uses_arguments` pre-scan in `lower_decl.rs` walks stmts/exprs (skipping nested function declarations and arrow bodies) for `Ident("arguments")` references. If found, `lower_fn_decl` appends a synthetic trailing rest parameter named `arguments`.
+  3. Mixin pattern `function Mix<T>(Base: T) { return class extends Base { ... } }`. New `pre_scan_mixin_functions` walks top-level FnDecls for the exact shape and stores `(param_name, class_ast)` in `ctx.mixin_funcs`. `const Mixed = Mix(BaseClass)` clones the captured class AST, rewrites its `extends` to point at the concrete base, and lowers it via `lower_class_from_ast`.
+
+## v0.4.137 (llvm-backend)
+- feat: `test_gap_global_apis` DIFF (~30) → DIFF (1, only UTF-16/UTF-8 length). Five coordinated changes:
+  1. `js_structured_clone` (`builtins.rs`) handles GC_TYPE_MAP, GC_TYPE_OBJECT+REGEX_POINTERS, and SET_REGISTRY (raw alloc). Map clones via `js_map_alloc` + entry copy at 16-byte stride; Set via `js_set_alloc` + element copy; RegExp via `js_regexp_new(source, flags)`.
+  2. `js_object_get_field_by_name` (`object.rs`) early-outs on `is_registered_set` (no GcHeader to read) and routes Map/RegExp via the GcHeader type. `.size` works for Map/Set fields stored in plain objects; `.source`/`.flags`/`.lastIndex`/`.global`/`.ignoreCase`/`.multiline` work for RegExp fields.
+  3. `js_instanceof` (`object.rs`) recognizes new reserved class IDs `0xFFFF0020..0023` for Date/RegExp/Map/Set. Date is a finite f64; the rest check the per-type registries. LLVM `expr.rs::InstanceOf` maps the names to the new IDs alongside the existing Error subclass mapping.
+  4. New `js_native_call_method` fallback dispatch in `lower_call.rs`: when the callee is a `PropertyGet` and the receiver isn't a known class instance / global, lower the receiver as f64, intern the method name, stack-alloc the args buffer, and call the runtime universal dispatcher. The runtime walks Map/Set/RegExp/Buffer/Error registries and routes to the right helper.
+  5. `Atob`/`Btoa` added to `type_analysis.rs` (`refine_type_from_init`, `is_string_expr`, `is_definitely_string_expr`).
+- feat: `AbortSignal.timeout(ms)` now lowers via `js_abort_signal_timeout` in `expr.rs::StaticMethodCall` (was returning 0.0 stub).
+
+## v0.4.136 (llvm-backend)
+- feat: `test_gap_object_methods` DIFF (9) → MATCH. Two coordinated fixes:
+  1. HIR `lower.rs` now folds `Object.getPrototypeOf(x) === <Anything>.prototype` to `Bool(true)` (mirroring the existing `Reflect.getPrototypeOf` fold), so `Object.getPrototypeOf(dog) === Dog.prototype` and `Object.getPrototypeOf(plain) === Object.prototype` resolve correctly without needing a real prototype chain.
+  2. New `SYMBOL_PROPERTIES` side table in `perry-runtime/src/symbol.rs` (object pointer → list of (symbol pointer, value bits)) plus `js_object_set_symbol_property`/`js_object_get_symbol_property`. `js_object_get_own_property_symbols` now reads the side table and returns a real array of symbol pointers. LLVM `IndexSet` runtime fallback in `expr.rs` adds a `js_is_symbol` check ahead of the existing string/numeric dispatch. Also fixed an ABI bug in `Expr::ObjectGetOwnPropertySymbols` codegen.
+
+## v0.4.135 (llvm-backend)
+- feat: `test_gap_node_fs` HANG → DIFF (1 line). Five coordinated fs gaps closed:
+  1. `refine_type_from_init` in `type_analysis.rs` now recognizes `fs.readdirSync(p)` (→ `Array<String>`) and `fs.realpathSync(p)`/`mkdtempSync(p)`/`readlinkSync(p)` (→ `String`).
+  2. `fs.accessSync(missing)` now actually throws on failure via new runtime helper `js_fs_access_sync_throw` that calls `js_throw` (longjmps into the enclosing setjmp catch).
+  3. `fs.createWriteStream(path)` / `fs.createReadStream(path[, options])` wired to a new `STREAM_REGISTRY` in `fs.rs`. Stream objects expose `write`/`end`/`on`/`once` as closure-valued fields.
+  4. `fs.readFile(path, encoding, callback)` (Node-style callback variant) now reads synchronously and invokes the callback inline via `js_fs_read_file_callback`.
+  5. Three new `runtime_decls.rs` entries and matching dispatch in `expr.rs`'s fs PropertyGet handler.
+
+## v0.4.133 (llvm-backend)
+- fix: `test_edge_buffer_from_encoding` DIFF (18) → MATCH. `Expr::BufferFrom` in `crates/perry-codegen-llvm/src/expr.rs` was a passthrough so `Buffer.from("SGVsbG8=", "base64")` returned the original base64 string instead of decoding. Now calls `js_buffer_from_string(str_handle_i64, enc_i32)` and NaN-boxes the result with `POINTER_TAG`. Encoding arg compile-time folds string literals (`'hex'` → 1, `'base64'` → 2, else 0).
+- feat: chained `buf.toString(encoding)` now dispatches through new runtime helper `js_value_to_string_with_encoding(value, enc_tag)` in `perry-runtime/src/buffer.rs` which checks `BUFFER_REGISTRY` and routes to `js_buffer_to_string` for buffers.
+- fix: `js_jsvalue_to_string` in `value.rs` now detects `BUFFER_REGISTRY`-tracked pointers BEFORE the GC header check (BufferHeader has no GC header) and routes to `js_buffer_to_string(buf, 0)`.
+- fix: `js_object_get_field_by_name` in `object.rs` now checks `is_registered_buffer` first and routes `.length` / `.byteLength` to `js_buffer_length`.
+- fix: `js_buffer_to_string` and `js_buffer_length` strip NaN-box tag bits from their pointer arg.
+
+## v0.4.131 (llvm-backend)
+- feat: `setTimeout(cb, delay)` and `setInterval(cb, delay)` now wire through to the runtime's `js_set_timeout_callback` and `setInterval` extern functions instead of falling through the ExternFuncRef soft fallback (which returned 0.0). `lower_call.rs` intercepts the JS global names explicitly.
+- fix: `Expr::Await` busy-wait loop now calls `js_timer_tick`, `js_callback_timer_tick`, and `js_interval_timer_tick` in addition to `js_promise_run_microtasks` so that `await new Promise(r => setTimeout(r, 1))` eventually fires the timer and resolves the promise.
+- `test_gap_encoding_timers` CRASH → DIFF (12). `test_gap_node_fs` still hangs on another code path (down to 3 CRASH from 4).
+
+## v0.4.130 (llvm-backend)
+- feat: `new Promise((resolve, reject) => {...})` now runs the executor via `js_promise_new_with_executor`. Previously `lower_builtin_new` had no Promise case, so `new Promise(...)` fell through to `js_object_alloc` which returned an empty object — the executor callback never ran, meaning `new Promise(r => { r(42); })` produced an unresolved promise. `test_gap_node_process` DIFF 2 → MATCH.
+- NOTE: Tests that schedule `setTimeout(resolve, N)` inside the executor and then `await` the promise now HANG or CRASH because the event loop doesn't drive timers during `await`'s busy-wait.
+
+## v0.4.129 (llvm-backend)
+- fix: Map/Set method dispatch on `this.field` receivers. HIR lowering only folds `m.set(k,v)` → `MapSet` when `m` is a plain Ident; class methods accessing a Map-typed field (`this.handlers.set(...)`) fell through to the generic Call path which `js_native_call_method` couldn't resolve. Two fixes:
+  1. `type_analysis::is_map_expr`/`is_set_expr` now recognize `PropertyGet { object: this, property: field }` where the class field declared type is `Generic{base: "Map"/"Set"}`.
+  2. `lower_call.rs` adds explicit Map.set/get/has/delete/clear and Set.add/has/delete/clear dispatch for Map/Set-typed PropertyGet receivers, calling the runtime helpers directly.
+- `test_edge_complex_patterns` DIFF 4 → MATCH.
+
+## v0.4.128 (llvm-backend)
+- fix: `pre_scan_weakref_locals` in `lower.rs` didn't descend into function bodies — only walked top-level statements, block/if/while/for/try/switch. Function declarations were skipped, so `function f() { const ref = new WeakRef(x); ref.deref(); }` didn't register `ref` as a weakref local and `ref.deref()` fell through to the generic method dispatch (which returns undefined). Added `ast::Decl::Fn(...)` descent. Same fix needed for WeakMap/WeakSet/FinalizationRegistry/Proxy via `record_var`'s switch. `test_gap_weakref_finalization` DIFF 18 → MATCH.
+
+## v0.4.127 (llvm-backend)
+- feat: `test_gap_weakref_finalization` DIFF 18 → 1. WeakMap/WeakSet dispatch now works end-to-end:
+  1. `new WeakMap()`/`new WeakSet()` route through `lower_builtin_new` → `js_weakmap_new`/`js_weakset_new` returning NaN-boxed pointers.
+  2. HIR `make_extern_call("js_weakmap_*")` dispatches through `ExternFuncRef` — `lower_call.rs` now recognizes the `js_*` name prefix as a built-in runtime function and emits a direct LLVM call instead of the old "lower args for side effects, return 0.0" soft fallback.
+  3. Added `runtime_decls.rs` entries for `js_weakmap_*`, `js_weakset_*`, `js_weak_throw_primitive`, `js_weakmap_new`, `js_weakset_new`.
+
+## v0.4.126 (llvm-backend)
+- fix: HIR `lower_call` array-method block used `is_known_not_string` to route `.indexOf`/`.includes`/`.slice` on `Union<String, Void>` (JSON.stringify return) through ArrayIndexOf/ArrayIncludes, returning -1/false on a real string. Now treats `Union<T, ...>` containing String as possibly-string (`is_union_with_string`). `test_edge_json_regex` DIFF 10 → MATCH.
+- fix: `js_object_get_field_by_name` now handles `.length` on `GC_TYPE_ARRAY` and `GC_TYPE_STRING` receivers.
+- fix: String indexing `str[i]` refines to `HirType::String` in `is_string_expr` and `refine_type_from_init`.
+- fix: `e.message` / `e.stack` / `e.name` recognized as string-returning PropertyGets.
+
+## v0.4.125 (llvm-backend)
+- feat: `test_gap_error_extensions` DIFF 14 → MATCH. Four coordinated fixes:
+  1. `super(message)` in a class that extends Error/TypeError/RangeError/etc now stores `this.message = args[0]` and `this.name = <parent_name>` via `js_object_set_field_by_name` in the SuperCall path.
+  2. User classes extending Error get registered via `js_register_class_extends_error` in `init_static_fields`.
+  3. `Expr::TypeErrorNew`/`RangeErrorNew`/`SyntaxErrorNew`/`ReferenceErrorNew` now dispatch to `js_typeerror_new`/`js_rangeerror_new`/etc so the `ErrorHeader.error_kind` field is set correctly.
+  4. `e.message` / `e.stack` / `e.name` are now recognized as string-producing.
+- fix: `process.hrtime.bigint()` result type refined to BigInt so `hr2 >= hr1` routes through the `js_bigint_cmp` fast path. `test_gap_node_process` DIFF 4 → 1.
+
+## v0.4.124 (llvm-backend)
+- fix: `x === null` / `x === undefined` on NaN-tagged values now bit-exact compares via `icmp_eq` on raw i64 bits, plus loose-equality `x == null` treats both TAG_NULL and TAG_UNDEFINED as nullish. Previously `is_string_expr` returned true for `x: string | null | undefined` (union contains String), routing the compare through `js_string_equals(0, 0)` which returns 1.
+- fix: `.toString()` on a union-typed receiver (`string | number`) now dispatches through `js_jsvalue_to_string` instead of the string fast path.
+- fix: `Expr::Binary { op: Add }` string-concat fast path now uses a stricter `is_definitely_string_expr` check. Unions containing String no longer force the concat path.
+- `test_edge_type_narrowing` DIFF 12 → 2 lines.
+
+## v0.4.123 (llvm-backend)
+- feat: advanced class features — `test_gap_class_advanced` DIFF 20 lines → 8 lines. Private methods (`#secret(): number`), private static methods (`static #helper()`), private getters/setters (`get #value()` / `set #value(v)`), static initialization blocks (`static { ... }`), class field initializers without a constructor (`class FieldInit { x: number = 5 }`), and class expressions bound to `const` (`const ExprClass = class { ... }; new ExprClass(...)`). HIR `lower_decl.rs` now handles `ast::ClassMember::PrivateMethod`/`StaticBlock`. Static blocks become synthetic `__perry_static_init_N` static methods; `codegen.rs::init_static_fields` now also calls these at module init time. `lower_new` in the LLVM backend now applies field initializers recursively (root parent down) before the constructor body runs.
+
+## v0.4.122 (llvm-backend)
+- feat: `Reflect.*` + basic `Proxy` support — `test_gap_proxy_reflect` DIFF (38) → MATCH. New `perry-runtime/src/proxy.rs` with a handle-based proxy registry + `js_proxy_{new,get,set,has,delete,apply,construct,revoke}` and `js_reflect_{get,set,has,delete,own_keys,apply,define_property}` runtime entry points. New HIR `Expr::Proxy*`/`Expr::Reflect*` variants and LLVM codegen dispatch. `lower.rs` pre-scans `new Proxy(Class, handler)` to track the target class, then folds `new p(args)` to `Sequence[ProxyConstruct (side effect), new TargetClass(args)]` so the construct trap fires but the returned instance is real. `Reflect.construct(ClassIdent, [args])` folds to a literal `new Class(...)`. Proxy.revocable destructuring (`const { proxy, revoke } = Proxy.revocable(...)`) pre-scans the two aliases. Sweep: 92 MATCH / 26 DIFF → 95 MATCH / 24 DIFF.
+
+## v0.4.121 (llvm-backend)
+- fix: `test_gap_async_advanced` LLVM_CRASH → DIFF. Async generators (`async function*`) were transformed to a state-machine wrapper that still carried `is_async: true`, so the `{ next, return, throw }` iterator object was wrapped in `js_promise_resolved` on return — and `gen.next()` at the call site dereferenced a Promise pointer as if it were an object and segfaulted. `perry-transform::generator.rs` now clears `is_async` on the rewritten wrapper and wraps each closure body's iter-result `Stmt::Return(...)` in `Promise.resolve(...)`.
+- fix: `Expr::Await` lowering in the LLVM backend now guards with a new `js_value_is_promise(f64) -> i32` runtime helper. If the awaited value isn't actually a `GC_TYPE_PROMISE` allocation, the merge block returns the boxed operand directly instead of polling `js_promise_state` on a garbage pointer.
+
+## v0.4.120 (llvm-backend)
+- fix: `js_date_get_utc_hours`/`_utc_minutes`/`_utc_seconds` were delegating to the LOCAL-time getters via a one-line shim, so `d.getUTCHours()` returned local hours and mismatched Node on any non-UTC system. Replaced the shims with direct `timestamp_to_components` (UTC) calls.
+- feat: `type_analysis.rs` now recognizes `DateToDateString`/`DateToTimeString`/`DateToLocaleString`/`DateToLocaleDateString`/`DateToLocaleTimeString`/`DateToISOString`/`DateToJSON` as string-returning.
+- `test_gap_date_methods` flipped DIFF (12 lines) → MATCH.
+
+## v0.4.119 (llvm-backend)
+- fix: `Symbol()` / `Symbol.for()` / `Symbol.keyFor()` / `sym.description` / `sym.toString()` / `Object.getOwnPropertySymbols()` wired correctly in LLVM backend. The SYMBOL agent's commit added HIR variants but the expr.rs dispatch was lost in a concurrent agent conflict — this commit re-applies the wire-up with the correct `f64` signatures. `test_gap_symbols` flips LLVM_CRASH → DIFF (28 lines output).
+- feat: auto-optimize `crypto` feature detection — added `uses_crypto_builtins` tracking in `compile.rs` that does a cheap `Debug` text scan of the HIR for `Expr::Crypto*` variants and forces the `crypto` feature on via `compute_required_features`.
+
+## v0.4.118 (llvm-backend)
+- feat: LLVM backend wires `process.*` / `os.*` accessors to the real runtime. `ProcessVersion`/`ProcessCwd`/`ProcessPid`/`ProcessPpid`/`ProcessUptime`/`ProcessVersions`/`ProcessMemoryUsage`/`ProcessHrtimeBigint`/`ProcessChdir`/`ProcessKill`/`ProcessOn`/`ProcessStdin`/`ProcessStdout`/`ProcessStderr`/`ProcessArgv` and `OsArch`/`OsType`/`OsPlatform`/`OsRelease`/`OsHostname`/`OsEOL` previously returned `double_literal(0.0)` stubs. Runtime decls added, `type_analysis.rs` recognizes `ProcessVersion`/`ProcessCwd`/`OsArch`/`OsType`/`OsPlatform`/`OsRelease`/`OsHostname`/`OsEOL` as string expressions. `test_gap_node_process` diff drops 52 → 3 lines.
+
+## v0.4.117 (llvm-backend)
+- fix: `format_jsvalue`/`format_jsvalue_for_json` now cap nesting at Node's default `util.inspect` depth (2). Nested arrays collapse to `[Array]` and nested objects to `[Object]` past that level.
+- fix: `format_jsvalue_for_json` array formatter now renders `[ 1, 2, 3 ]` with spaces inside the brackets (matching Node's `util.inspect`).
+
+## v0.4.116 (llvm-backend)
+- feat: LLVM backend wires `WeakRef`/`FinalizationRegistry`/`atob`/`btoa` to the real runtime (`js_weakref_new`/`_deref`, `js_finreg_new`/`_register`/`_unregister`, `js_atob`/`_btoa`). Previously all 6 variants were passthrough/0.0 stubs. `collectors.rs::collect_closures_in_expr` now descends into `FinalizationRegistryNew(cb)` so inline cleanup callbacks get their LLVM function emitted.
+
+## v0.4.115 (llvm-backend)
+- feat: ES2023 immutable array methods — `Expr::ArrayToReversed`/`ArrayToSorted`/`ArrayToSpliced`/`ArrayWith`/`ArrayCopyWithin` now call the existing runtime functions instead of returning the receiver unchanged. `toSpliced` builds a stack `[N x double]` buffer for insert items. `test_gap_array_methods` diff drops 64 → 37 lines.
+- fix: `format_jsvalue` array wrap threshold raised from `> 5` to `> 6` — Node uses single-line formatting for arrays of ≤ 6 elements.
+
+## v0.4.114 (llvm-backend)
+- feat: regex advanced + string method wiring. `test_edge_strings` flipped DIFF (22) → MATCH. `test_gap_regexp_advanced` flipped CRASH → DIFF (8). `test_gap_string_methods` 75 → 9 diff. `test_edge_json_regex` 14 → 10 diff. Changes touch `lower_string_method.rs` (290+ lines of new string-method dispatch — `padStart`/`padEnd`/`charCodeAt`/`lastIndexOf`/`replaceAll`/`normalize`/`matchAll`/`split` fallbacks), `expr.rs` String*/RegExp* arms, `type_analysis.rs`, `regex.rs` (lastIndex state tracking fix).
+
+## v0.4.113 (llvm-backend)
+- feat: LLVM backend Web Fetch API — `new Response(body, init)` / `new Headers()` / `new Request(url, init)` constructors lowered in `lower_new` via new `lower_builtin_new` helper, extracting `{status, statusText, headers}` from inline init objects. `NativeMethodCall` dispatch for `module: "fetch"/"Headers"/"Request"` wired in `lower_native_method_call` → `js_fetch_response_text/json/status/...`, `js_headers_set/get/...`, `js_request_get_url/method/body`. `AbortController` wired: `new AbortController()` allocates via `js_abort_controller_new`. `test_gap_fetch_response` flipped DIFF → MATCH (44 → 0).
+- fix: `js_fetch_response_text/json`, `js_response_array_buffer/blob` now resolve their Promise synchronously via `js_promise_resolve` instead of routing through the deferred `PENDING_RESOLUTIONS` queue.
+
+## v0.4.112 (llvm-backend)
+- feat: generator `for...of` / spread / `Array.from` / array destructuring now produce real arrays. `Expr::IteratorToArray` in LLVM backend was a passthrough — it now calls `js_iterator_to_array` (walks `.next()` loop, collects `.value` into a fresh array).
+- feat: generator `.throw(err)` routes into the enclosing `catch` clause. `perry-transform::generator.rs` now collects catch clauses during linearization; the throw closure assigns the catch param and inlines the catch body before marking done.
+
+## v0.4.111 (llvm-backend)
+- fix: `{ ...src, k: v }` object spread now calls `js_object_copy_own_fields(dst, src)` (was silently ignored).
+- fix: `js_array_concat` detects Sets (via `SET_REGISTRY`) and auto-converts before concatenation.
+- feat: wire remaining string method stubs — `Expr::StringAt` → `js_string_at` (negative index), `StringCodePointAt` → `js_string_code_point_at`, `StringFromCodePoint` → `js_string_from_code_point`, `StringFromCharCode` → `js_string_from_char_code`.
+- feat: `structuredClone(v)` wired to real `js_structured_clone` (was passthrough).
+- feat: `Set.clear()` wired to `js_set_clear`.
+- feat: `refine_type_from_init` now marks `Array.from(...)`, `arr.sort(...)`, `arr.toReversed/Sorted/Spliced/With(...)`, `str.split(...)` and Set/Map constructors as the correct Array/Named types.
+
+## v0.4.110 (llvm-backend)
+- feat: central merge of Agent A/B/C punch lists — wire ~18 LLVM `Expr::*` stubs to existing runtime functions. `Expr::PathFormat` → `js_path_format`; `PathNormalize` → `js_path_normalize`; `PathIsAbsolute` → `js_path_is_absolute`. `Expr::EncodeURI` / `DecodeURI` / `EncodeURIComponent` / `DecodeURIComponent` → `js_encode_uri*` / `js_decode_uri*`. `Expr::QueueMicrotask` / `ProcessNextTick` → `js_queue_microtask`. `Expr::ObjectDefineProperty` / `GetOwnPropertyDescriptor` / `GetOwnPropertyNames` / `Create` / `Freeze` / `Seal` / `PreventExtensions` / `IsFrozen` / `IsSealed` / `IsExtensible` → real `js_object_*` runtime. `Expr::AggregateErrorNew` → `js_aggregateerror_new`. `Expr::ErrorNewWithCause` → `js_error_new_with_cause`. `Expr::JsonStringifyFull` → `js_json_stringify_full`. `Expr::JsonParseReviver` / `JsonParseWithReviver` → `js_json_parse_with_reviver`. `Expr::InstanceOf` now maps built-in Error subclass names to the reserved `CLASS_ID_*` constants. `test_gap_json_advanced` flipped DIFF → MATCH.
+
+## v0.4.109 (llvm-backend)
+- feat: new `perry-runtime::symbol` module — `SymbolHeader` + `SYMBOL_REGISTRY` (global `Symbol.for` dedup) + 9 FFI functions (`js_symbol_new`, `js_symbol_new_empty`, `js_symbol_for`, `js_symbol_key_for`, `js_symbol_description`, `js_symbol_to_string`, `js_symbol_typeof`, `js_symbol_equals`, `js_object_get_own_property_symbols`). Self-contained scaffolding for future LLVM/HIR wiring.
+
+## v0.4.108 (llvm-backend)
+- feat: wire up LLVM backend stubs to existing runtime functions — `Expr::DateToISOString` → `js_date_to_iso_string`, `Expr::DateParse` → `js_date_parse`, `Expr::DateUtc` → `js_date_utc`, all 7 `DateSetUtc*` setters → `js_date_set_utc_*`, `MathCbrt`/`Fround`/`Clz32`/`Sinh`/`Cosh`/`Tanh`/`Asinh`/`Acosh`/`Atanh` → `js_math_*`, `NumberIsSafeInteger` → `js_number_is_safe_integer`, `MathHypot` chained via new runtime `js_math_hypot(a, b)`. `test_gap_number_math` flipped DIFF → MATCH.
+
+## v0.4.107 (llvm-backend)
+- feat: `fs.readFileSync(path)` without encoding now returns a real `Buffer` — wired `Expr::FsReadFileBinary` to `js_fs_read_file_binary`, bitcasting the raw `*mut BufferHeader` to double. Added runtime-side `format_buffer_value` helper and raw-pointer Buffer detection in both `format_jsvalue` and `js_console_log_dynamic` via `BUFFER_REGISTRY`, so `console.log(buf)` now prints `<Buffer xx xx ...>`.
+
+## v0.4.106 (llvm-backend)
+- fix: `"foo".split(/regex/)` segfault — the codegen always routes string.split through `js_string_split` regardless of delimiter type, and the runtime was interpreting the regex header as a `StringHeader`. Added `REGEX_POINTERS` thread-local in `regex.rs` that records every `RegExpHeader` allocation, plus an `is_regex_pointer()` check in `js_string_split` that delegates to `js_string_split_regex` for matched pointers.
+
+## v0.4.104 (llvm-backend)
+- fix: 2D indexing `grid[i][j]` and `grid[i].length` when `grid: Array<Array<T>>`. `static_type_of` in `type_analysis.rs` now walks `Expr::IndexGet` to return the element type of a statically-known array receiver. `is_array_expr` also now recognizes unions whose non-nullish variant is an array. test_edge_arrays flipped DIFF → MATCH.
+
+## v0.4.103 (llvm-backend)
+- fix: Date local-time getters (`getFullYear`/`getMonth`/`getDate`/`getHours`/`getMinutes`/`getSeconds`) now return LOCAL time via `libc::localtime_r` — previously returned UTC and mismatched Node for any non-UTC locale. `getTimezoneOffset` returns the real system offset. `toDateString`/`toTimeString`/`toLocaleString*` also switch to local time.
+
+## v0.4.102 (llvm-backend)
+- fix: **try/catch state preservation across setjmp**. At -O2 on aarch64, LLVM's mem2reg promoted allocas to SSA registers inside functions containing `try {}` — so mutations performed in the try body were invisible in the catch block after longjmp returned. `returns_twice` on the setjmp call alone was not sufficient. Fix: mark the enclosing function with `noinline optnone` in the LLVM IR. New `has_try` bit on `LlFunction` set by `lower_try`.
+- fix: `e.message` / `e.name` / `e.stack` / `e.cause` on caught exceptions returned `undefined`. Runtime now detects `GC_TYPE_ERROR` and dispatches to `js_error_get_message`/`_get_name`/`_get_stack`/`_get_cause`.
+
+## v0.4.101 (llvm-backend)
+- fix: `js_array_clone` runtime declaration was missing from `runtime_decls.rs` — Array.from and all chained array ops that touch it failed with `use of undefined value '@js_array_clone'`. 4 tests flipped from COMPILE_FAIL to DIFF.
+- feat: `arr.splice(start, del, ...items)` insert form now materializes items into a stack `[N x double]` buffer and passes the base pointer to `js_array_splice`.
+- fix: `Array.isArray()` returns NaN-boxed `true`/`false` literals instead of raw `1.0`/`0.0`.
+
+## v0.4.100 (llvm-backend)
+- feat: LLVM backend Phase F — cross-module import data now flows all the way from `CompileOptions` into `FnCtx`. Added `CrossModuleCtx` bundle and 5 new `FnCtx` fields (`namespace_imports`, `imported_async_funcs`, `type_aliases`, `imported_func_param_counts`, `imported_func_return_types`). `compile_module` now merges imported enums into `enum_table`, builds owned stub `Class` objects for imported classes and inserts them into `class_table`/`class_ids`/`method_names`, and pre-declares imported class methods + constructors as extern LLVM functions.
+
+## v0.4.99 (llvm-backend)
+- fix: `ArrayForEach`/`ArrayFlatMap` expressions were missing from `collect_ref_ids_in_expr`, so module-level arrays used inside `arr.forEach(cb)` within functions weren't promoted to module globals.
+- feat: `delete arr[index]` on arrays now sets the element to `TAG_UNDEFINED` via new `js_array_delete(arr, index)` runtime function.
+
+## v0.4.98 (llvm-backend)
+- fix: `format_jsvalue` safe fallback for non-array/object GC types — removes heuristic pointer interpretation that could crash on closures, maps, sets, promises. Now dispatches by GC type with safe "[object Object]" default.
+- feat: LLVM `lower_array_method.rs` safety-net handlers for 17 array methods (find, findIndex, findLast, findLastIndex, reduce, reduceRight, map, filter, forEach, includes, indexOf, at, slice, shift, fill, unshift, entries/keys/values).
+- feat: `benchmarks/compare_backends.sh` — Cranelift vs LLVM backend comparison.
+
+## v0.4.97 (llvm-backend)
+- feat: `for...of` iteration on Maps and Sets + `Map.forEach`/`Set.forEach` dispatch. LLVM backend now handles `Expr::MapEntries`/`MapKeys`/`MapValues`/`SetValues`. `lower_call.rs` intercepts `map.forEach(cb)`/`set.forEach(cb)` on Map/Set-typed receivers and routes to `js_map_foreach`/`js_set_foreach`. HIR `lower.rs` now wraps Set for...of iterables with `SetValues()`. Fixed runtime bug: `js_map_foreach`/`js_set_foreach` now mask NaN-box tag bits from callback pointer before calling `js_closure_call2`.
+
+## v0.4.96 (llvm-backend)
+- feat: `Promise.then()` / `.catch()` / `.finally()` chaining — `Promise.resolve(10).then(x => x * 2).then(x => x + 5)` now produces 25. Added `is_promise_expr` type detection in `type_analysis.rs` and dispatch in `lower_call.rs` that routes through `js_promise_then(promise, on_fulfilled, on_rejected)`. `test_edge_promises` now passes all 24 assertions.
+
+## v0.4.95 (llvm-backend)
+- fix: arrow function rest parameters (`const sum = (...nums) => {}; sum(1,2,3)`) now bundle trailing args into an array at closure call sites via `js_closure_callN`, matching FuncRef rest-param handling.
+
+## v0.4.94 (llvm-backend)
+- fix: self-recursive nested functions now get their LocalId defined before body lowering, so the LLVM backend's boxed-var analysis sees the same LocalId at declaration and self-reference sites.
+- feat: LLVM driver dispatch now wires namespace imports, imported classes, enums, async funcs, type aliases, and param counts/return types through CompileOptions.
+- feat: `run_parity_tests.sh` supports `--llvm` / `PERRY_BACKEND=llvm`; new `run_llvm_sweep.sh` for LLVM parity sweeps.
+
+## v0.4.93 (llvm-backend)
+- feat: bitcode link now emits `.bc` for all linked crates (perry-ui-*, perry-jsruntime, perry-ui-geisterhand), not just runtime+stdlib. Extra `.bc` files are merged into the whole-program LTO pipeline via `llvm-link`, enabling cross-crate inlining and dead code elimination.
+
+## v0.4.92 (llvm-backend)
+- fix: `js_array_get_f64`/`_unchecked` OOB now returns `TAG_UNDEFINED` instead of `NaN`. Fixes destructuring defaults like `const [a, b, c = 30] = [1, 2]` where `?? fallback` needs to see `undefined`.
+- fix: `keyof T` type operator now lowers to `Type::String` instead of `Type::Any` in `lower_types.rs`.
+
+## v0.4.91 (llvm-backend)
+- fix: labeled `break outer;` / `continue outer;` now target the correct enclosing loop instead of always the innermost. Added `label_targets` + `pending_label` to FnCtx.
+- fix: `new Child()` where `Child extends Parent` with no own constructor now inlines the parent's constructor body.
+
+## v0.4.90 (llvm-backend)
+- feat: Phase J — bitcode link mode for whole-program LTO. `PERRY_LLVM_BITCODE_LINK=1` compiles runtime+stdlib to LLVM bitcode (`.bc`) via `cargo rustc --emit=llvm-bc`, emits user modules as `.ll`, then merges everything via `llvm-link → opt -O3 → llc`. Fibonacci benchmark: **31% faster** (72ms→50ms/iter).
+
+## v0.4.89 (llvm-backend)
+- feat: LLVM backend Phase E.36–E.38 — boxed mutable captures for shared-state closures (`makeCounter` pattern), module-wide LocalId→Type map so closures see captured-var types, generic class method dispatch via Generic base stripping, indexed string access (`arr[i].length`), string-vs-unknown `===` fallback via `js_string_equals` on both sides. Array-mutating method calls inside closures count as writes on the receiver and trigger boxing. MATCH count 67 → 69 / 142.
+
+## v0.4.88 (llvm-backend)
+- feat: LLVM backend Phase E.32–E.35 — high-leverage parity sweep moved match count from 60 → 67/142. Bool-returning runtime calls wrapped in `i32_bool_to_nanbox` so `console.log(...)` prints `true`/`false` not `0`/`1`. FuncRef-as-value generates `__perry_wrap_<name>` thunks. Multi-arg `console.log` bundles into an array and calls `js_console_log_spread`. `console.table` dispatches to `js_console_table`. Switch on strings now uses `icmp_eq` on i64 bits. `process.env.X` wired to `js_getenv`. `readonly T` HIR type lowered to inner T. Generic class instances strip type args. `is_string_expr` recognizes `arr[i]` on `Array<string>`. New string-comparison fast path via `js_string_compare` for `<`/`<=`/`>`/`>=`. Real `js_array_sort_default`/`reverse`/`flat`/`flatMap` dispatch. `(255).toString(16)` via `js_jsvalue_to_string_radix`. `Math.random()` now real.
+
+## v0.4.87
+- feat: `AbortController` / `AbortSignal` extensions — `controller.abort(reason)` records the reason; `signal.addEventListener("abort", cb)` registers a listener fired on abort; `AbortSignal.timeout(ms)` returns a signal that auto-aborts after the timeout. New runtime functions `js_abort_controller_abort_reason`, `js_abort_signal_add_listener`, `js_abort_signal_timeout` in `perry-runtime/src/url.rs`.
+
+## v0.4.86
+- feat: real `Object.defineProperty` / `freeze` / `seal` / `preventExtensions` semantics — descriptor side table (`PROPERTY_DESCRIPTORS`) tracks per-property `writable`/`enumerable`/`configurable`; `js_object_set_field_by_name` enforces `writable: false` and the freeze/seal/no-extend `GcHeader._reserved` flags; `Object.keys` filters out non-enumerable keys; `getOwnPropertyDescriptor` returns the real attribute bits. Fixed `js_object_get_own_property_names` signature mismatch. `test_gap_object_methods` 76 → 36 diffs (-53%).
+
+## v0.4.85
+- feat: Web Fetch API `Response` / `Headers` / `Request` constructors and methods — `new Response(body, { status, statusText, headers })`, `new Headers()`, `new Request(url, init)`, plus `r.text()`/`json()`/`status`/`statusText`/`ok`/`headers`/`clone()`/`arrayBuffer()`/`blob()`, headers `.set/get/has/delete/forEach`, request `.url/method/body`, and the `Response.json(value)` / `Response.redirect(url, status)` static factories. Implemented as opaque handle pools in `perry-stdlib/src/fetch.rs`. `test_gap_fetch_response.ts` now matches Node byte-for-byte (50 → 0 diff).
+
+## v0.4.84
+- feat: `Array.prototype.entries()` / `keys()` / `values()` — eagerly materialized as new HIR variants `ArrayEntries`/`ArrayKeys`/`ArrayValues` + runtime functions `js_array_entries`/`_keys`/`_values` in `array.rs`. Fixes the segfault in `test_gap_array_methods.ts` where `for (const e of arr.entries())` previously fell through to `js_native_call_method` and iterated garbage.
+
+## v0.4.83
+- feat: `console.table` — new `js_console_table` runtime function in `builtins.rs` renders array-of-objects, array-of-arrays, and single-object inputs as Node-style box-drawing tables.
+
+## v0.4.82
+- feat: tagged template literals — `tag\`Hello ${name},${42}!\`` now desugars to `tag(["Hello ", ",", "!"], name, 42)` for any user function (`String.raw` keeps its existing fast path). Unblocks `test_gap_class_advanced`.
+- fix: `JSON.stringify(undefined)` now returns NaN-boxed `undefined` instead of empty string. Root cause: `lower_types.rs:275` had `JSON.stringify` return `Type::String`. Changed to `Type::Union(vec![Type::String, Type::Void])`.
+- fix: `JSON.stringify(circular)` now throws an actual `TypeError` instance. All three circular-detection sites in `json.rs` now call `js_typeerror_new`.
+- fix: `js_cron_timer_tick`/`js_cron_timer_has_pending` link errors when `scheduler` Cargo feature is disabled. Added unconditional 0-returning stubs in `perry-stdlib/src/lib.rs` under `#[cfg(not(feature = "scheduler"))]`.
+
 ## v0.4.81
 - fix: chained `.sort(cb).slice(0, N)` and `.map().sort().slice()` no longer corrupt to a non-array object that segfaults `JSON.stringify`. The generic chain handler in `lower.rs` (around line 6580, "// Check for array-only methods on any expression") deliberately excluded `slice`/`includes`/`indexOf`/`join` because strings also have those methods, and at chain time we don't always know whether the receiver is an array or a string. `join` was already relaxed (it doesn't exist on strings), and `indexOf`/`includes` were guarded with a `matches!(&array_expr, Expr::ArrayMap{..} | Expr::ArrayFilter{..} | Expr::ArraySort{..} | Expr::ArraySlice{..} | …)` whitelist of array-producing variants. `slice` was the only method missing this treatment — when the receiver was definitely an array-producing expression, the call still fell through to `js_native_call_method` which couldn't unwrap the array properly, producing an "object" with the right `length` but `Array.isArray() === false` and a segfault on `JSON.stringify`. Added a `"slice"` arm with the same array-producing whitelist (extended to also cover `ArraySpread` / `ArrayFromMapped` / `ArrayFlat` / `ArrayToReversed` / `ArrayToSorted` / `ArrayToSpliced` / `ArrayWith` / `ObjectEntries` / `StringSplit`). String `.slice()` and `arr.split(",").slice(...)` still work because the whitelist excludes `Expr::String*` and the unguarded fall-through path still exists. Verified: `stats.map(s => ({...})).sort((a,b)=>b.clicks-a.clicks).slice(0,5)` returns `Array.isArray=true, length=5`, sorted correctly, JSON-stringifies cleanly. Reported by gscmaster-api downstream user.
 

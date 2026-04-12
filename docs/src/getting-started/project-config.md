@@ -45,7 +45,7 @@ List npm packages to compile natively instead of routing through the JavaScript 
 When a package is listed here, Perry:
 1. Resolves the package in `node_modules/`
 2. Prefers TypeScript source (`src/index.ts`) over compiled JavaScript (`lib/index.js`)
-3. Compiles all functions natively through Cranelift
+3. Compiles all functions natively through LLVM
 4. Deduplicates across nested `node_modules/` to prevent duplicate linker symbols
 
 This is useful for pure TypeScript/JavaScript packages that don't rely on Node.js APIs. Packages that use native bindings, `eval()`, or dynamic `require()` won't work.

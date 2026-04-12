@@ -17,7 +17,7 @@ pub mod window;
 pub mod screenshot;
 
 // =============================================================================
-// FFI exports — these are the functions called from Cranelift-generated code
+// FFI exports — these are the functions called from codegen-generated code
 // =============================================================================
 
 /// Create an app. title_ptr=raw string, width/height as f64.
@@ -214,6 +214,24 @@ pub extern "C" fn perry_ui_divider_create() -> i64 {
 #[no_mangle]
 pub extern "C" fn perry_ui_textfield_create(placeholder_ptr: i64, on_change: f64) -> i64 {
     widgets::textfield::create(placeholder_ptr as *const u8, on_change)
+}
+
+/// Create a TextArea (multi-line text input).
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    widgets::textarea::create(placeholder_ptr as *const u8, on_change)
+}
+
+/// Set the text content of a TextArea.
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_set_string(handle: i64, text_ptr: i64) {
+    widgets::textarea::set_string(handle, text_ptr as *const u8);
+}
+
+/// Get the text content of a TextArea as a StringHeader pointer.
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_get_string(handle: i64) -> i64 {
+    widgets::textarea::get_string(handle) as i64
 }
 
 /// Create a SecureField (password entry).

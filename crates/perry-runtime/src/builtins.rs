@@ -48,48 +48,61 @@ pub extern "C" fn js_console_log(value: JSValue) {
 #[no_mangle]
 pub extern "C" fn js_console_log_dynamic(value: f64) {
     let jsval = JSValue::from_bits(value.to_bits());
+    let p = console_group_prefix();
 
     if jsval.is_undefined() {
-        println!("undefined");
+        println!("{}undefined", p);
     } else if jsval.is_null() {
-        println!("null");
+        println!("{}null", p);
     } else if jsval.is_bool() {
-        println!("{}", jsval.as_bool());
+        println!("{}{}", p, jsval.as_bool());
     } else if jsval.is_string() {
         // String pointer (uses STRING_TAG 0x7FFF)
         let ptr = jsval.as_string_ptr();
         if ptr.is_null() {
-            println!("null");
+            println!("{}null", p);
         } else {
             unsafe {
                 let len = (*ptr).length as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
-                    println!("{}", s);
+                    println!("{}{}", p, s);
                 } else {
-                    println!("[invalid utf8]");
+                    println!("{}[invalid utf8]", p);
                 }
             }
         }
     } else if jsval.is_pointer() {
         // Object/array pointer - format as JSON
-        println!("{}", format_jsvalue(value, 0));
+        println!("{}{}", p, format_jsvalue(value, 0));
     } else if jsval.is_int32() {
-        println!("{}", jsval.as_int32());
+        println!("{}{}", p, jsval.as_int32());
     } else {
-        // Must be a regular number
+        // Must be a regular number — but first check for a raw (non-NaN-boxed)
+        // heap pointer. The codegen returns Buffer pointers as
+        // raw `i64` bitcast to `f64` (no POINTER_TAG), so `is_pointer()` is
+        // false yet the bit pattern is a valid buffer address. Detect by
+        // looking up the raw bits in the thread-local BUFFER_REGISTRY.
+        let raw_bits = value.to_bits();
+        if raw_bits > 0x1000 && (raw_bits >> 48) == 0
+            && (crate::typedarray::lookup_typed_array_kind(raw_bits as usize).is_some()
+                || crate::buffer::is_registered_buffer(raw_bits as usize))
+        {
+            println!("{}{}", p, format_jsvalue(value, 0));
+            return;
+        }
         let n = value;
         if n.is_nan() {
-            println!("NaN");
+            println!("{}NaN", p);
         } else if n.is_infinite() {
-            if n > 0.0 { println!("Infinity"); } else { println!("-Infinity"); }
+            if n > 0.0 { println!("{}Infinity", p); } else { println!("{}-Infinity", p); }
         } else if is_negative_zero(n) {
-            println!("-0");
+            println!("{}-0", p);
         } else if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
-            println!("{}", n as i64);
+            println!("{}{}", p, n as i64);
         } else {
-            println!("{}", n);
+            println!("{}{}", p, n);
         }
     }
 }
@@ -99,6 +112,10 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
 pub extern "C" fn js_console_log_number(value: f64) {
     if is_negative_zero(value) {
         println!("-0");
+    } else if value.is_nan() {
+        println!("NaN");
+    } else if value.is_infinite() {
+        if value > 0.0 { println!("Infinity"); } else { println!("-Infinity"); }
     } else if value.fract() == 0.0 && value.abs() < (i64::MAX as f64) {
         println!("{}", value as i64);
     } else {
@@ -299,6 +316,30 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             let ptr: *const crate::array::ArrayHeader = jsval.as_pointer();
             if ptr.is_null() {
                 "null".to_string()
+            } else if crate::symbol::is_registered_symbol(ptr as usize) {
+                // Symbols print as "Symbol(description)" inside util.inspect.
+                let s = crate::symbol::js_symbol_to_string(value);
+                let s_ptr = s as *const StringHeader;
+                if s_ptr.is_null() {
+                    "Symbol()".to_string()
+                } else {
+                    let len = (*s_ptr).length as usize;
+                    let data = (s_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                    let bytes = std::slice::from_raw_parts(data, len);
+                    std::str::from_utf8(bytes).unwrap_or("Symbol()").to_string()
+                }
+            } else if crate::typedarray::lookup_typed_array_kind(ptr as usize).is_some() {
+                // Typed array — Int32Array(N) [ a, b, c ] etc.
+                let ta = ptr as *const crate::typedarray::TypedArrayHeader;
+                crate::typedarray::format_typed_array(ta)
+            } else if crate::buffer::is_registered_buffer(ptr as usize) {
+                // Buffer/Uint8Array — Node prints as `<Buffer xx xx xx ...>`
+                // (lowercase hex bytes separated by single spaces). Buffer
+                // headers don't carry a GC header, so this check must happen
+                // BEFORE the GC_HEADER_SIZE pointer arithmetic below (which
+                // would read garbage one word before the BufferHeader).
+                let buf_ptr = ptr as *const crate::buffer::BufferHeader;
+                format_buffer_value(buf_ptr)
             } else {
                 // Use GC header to determine the actual type of the object.
                 // The GC header is located GC_HEADER_SIZE bytes before the user pointer.
@@ -335,7 +376,12 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         format!("{}: {}", name_str, message_str)
                     }
                 } else if gc_type == crate::gc::GC_TYPE_ARRAY {
-                    // Array — format as [ elem1, elem2, ... ] matching Node.js util.inspect
+                    // Array — format as [ elem1, elem2, ... ] matching Node.js util.inspect.
+                    // Node's default depth cap is 2: anything more than 2
+                    // levels of nesting collapses to `[Array]`.
+                    if depth > 2 {
+                        return "[Array]".to_string();
+                    }
                     let maybe_arr = ptr;
                     let length = (*maybe_arr).length as usize;
                     let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
@@ -352,8 +398,8 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         }
                     }
                     let inner = parts.join(", ");
-                    // Node uses multi-line for arrays with >5 elements or >72 chars
-                    if length > 5 || inner.len() > 72 {
+                    // Node uses multi-line for arrays with >6 elements or >72 chars
+                    if length > 6 || inner.len() > 72 {
                         let indent = "  ";
                         let lines: Vec<String> = parts.chunks(4).map(|chunk| {
                             format!("{}{}", indent, chunk.join(", "))
@@ -365,7 +411,11 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                         format!("[ {} ]", inner)
                     }
                 } else if gc_type == crate::gc::GC_TYPE_OBJECT {
-                    // Object — check for keys_array
+                    // Object — check for keys_array. Node's default depth
+                    // cap is 2: anything past that collapses to `[Object]`.
+                    if depth > 2 {
+                        return "[Object]".to_string();
+                    }
                     let obj_ptr = ptr as *const crate::object::ObjectHeader;
                     let keys_array = (*obj_ptr).keys_array;
 
@@ -374,59 +424,39 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     } else {
                         "[object Object]".to_string()
                     }
+                } else if gc_type == crate::gc::GC_TYPE_MAP {
+                    "Map {}".to_string()
+                } else if gc_type == crate::gc::GC_TYPE_CLOSURE {
+                    "[Function (anonymous)]".to_string()
+                } else if gc_type == crate::gc::GC_TYPE_PROMISE {
+                    "Promise { <pending> }".to_string()
                 } else {
-                    // Fallback: use heuristics for non-GC-tracked pointers (e.g., static objects)
-                    let object_type = *(ptr as *const u32);
-                    if object_type == crate::error::OBJECT_TYPE_ERROR {
-                        let error_ptr = ptr as *const crate::error::ErrorHeader;
-                        let name_ptr = (*error_ptr).name;
-                        let message_ptr = (*error_ptr).message;
-                        let name_str = if name_ptr.is_null() {
-                            "Error".to_string()
-                        } else {
-                            let len = (*name_ptr).length as usize;
-                            let data = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                            let bytes = std::slice::from_raw_parts(data, len);
-                            std::str::from_utf8(bytes).unwrap_or("Error").to_string()
-                        };
-                        let message_str = if message_ptr.is_null() {
-                            "".to_string()
-                        } else {
-                            let len = (*message_ptr).length as usize;
-                            let data = (message_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                            let bytes = std::slice::from_raw_parts(data, len);
-                            std::str::from_utf8(bytes).unwrap_or("").to_string()
-                        };
-                        if message_str.is_empty() { name_str } else { format!("{}: {}", name_str, message_str) }
-                    } else {
-                        // Heuristic array check for non-GC pointers
-                        let maybe_arr = ptr;
-                        let length = (*maybe_arr).length as usize;
-                        let capacity = (*maybe_arr).capacity as usize;
-                        if capacity >= length && length < 1_000_000 && capacity < 10_000_000 && capacity > 0 {
-                            let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
-                            let mut parts: Vec<String> = Vec::with_capacity(length);
-                            for i in 0..length {
-                                let elem_value = *data_ptr.add(i);
-                                parts.push(format_jsvalue(elem_value, depth + 1));
-                            }
-                            format!("[{}]", parts.join(", "))
-                        } else {
-                            let obj_ptr = ptr as *const crate::object::ObjectHeader;
-                            let keys_array = (*obj_ptr).keys_array;
-                            if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
-                                format_object_as_json(obj_ptr, depth)
-                            } else {
-                                "[object Object]".to_string()
-                            }
-                        }
-                    }
+                    // Safe fallback for unknown GC types — avoid heuristic
+                    // pointer interpretation which can crash on closures,
+                    // sets, maps, etc.
+                    "[object Object]".to_string()
                 }
             }
         } else if jsval.is_int32() {
             jsval.as_int32().to_string()
         } else {
-            // Regular number
+            // Regular number — but first check for raw (non-NaN-boxed) heap
+            // pointers. The codegen sometimes returns a raw
+            // i64 buffer pointer bitcast directly to f64 (no POINTER_TAG), so
+            // `jsval.is_pointer()` is false yet the bit pattern is a valid
+            // buffer address. Detect this case by looking up the raw bits
+            // in the thread-local BUFFER_REGISTRY.
+            let raw_bits = value.to_bits();
+            if raw_bits > 0x1000 && (raw_bits >> 48) == 0 {
+                if crate::typedarray::lookup_typed_array_kind(raw_bits as usize).is_some() {
+                    let ta = raw_bits as *const crate::typedarray::TypedArrayHeader;
+                    return crate::typedarray::format_typed_array(ta);
+                }
+                if crate::buffer::is_registered_buffer(raw_bits as usize) {
+                    let buf_ptr = raw_bits as *const crate::buffer::BufferHeader;
+                    return format_buffer_value(buf_ptr);
+                }
+            }
             let n = value;
             if n.is_nan() {
                 "NaN".to_string()
@@ -443,8 +473,56 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
     }
 }
 
+/// Format a Node.js Buffer as `<Buffer xx yy zz ...>` (lowercase hex bytes
+/// separated by single spaces). Mirrors Node's `util.inspect` output for
+/// Buffer / Uint8Array. Node truncates after 50 bytes with `... N more bytes`
+/// but we emit the whole buffer for now (tests use small buffers).
+unsafe fn format_buffer_value(buf_ptr: *const crate::buffer::BufferHeader) -> String {
+    if buf_ptr.is_null() {
+        return "<Buffer >".to_string();
+    }
+    let len = (*buf_ptr).length as usize;
+    let data = (buf_ptr as *const u8).add(std::mem::size_of::<crate::buffer::BufferHeader>());
+    let bytes = std::slice::from_raw_parts(data, len);
+
+    // If this buffer was created via `new Uint8Array(...)`, format it Node-style
+    // as `Uint8Array(N) [ a, b, c ]` rather than `<Buffer aa bb cc>`.
+    if crate::buffer::is_uint8array_buffer(buf_ptr as usize) {
+        if len == 0 {
+            return "Uint8Array(0) []".to_string();
+        }
+        let mut out = format!("Uint8Array({}) [", len);
+        for (i, b) in bytes.iter().enumerate() {
+            if i == 0 { out.push(' '); } else { out.push_str(", "); }
+            out.push_str(&format!("{}", *b));
+        }
+        out.push_str(" ]");
+        return out;
+    }
+
+    // Node caps at 50 bytes then shows "... N more bytes"
+    let display_len = len.min(50);
+    let mut out = String::with_capacity(9 + display_len * 3);
+    out.push_str("<Buffer");
+    for b in &bytes[..display_len] {
+        out.push(' ');
+        out.push_str(&format!("{:02x}", b));
+    }
+    if len > display_len {
+        out.push_str(&format!(" ... {} more bytes", len - display_len));
+    }
+    out.push('>');
+    out
+}
+
 /// Format an object as JSON-like string
-/// Reads keys from the keys_array and values from the fields
+/// Reads keys from the keys_array and values from the fields.
+///
+/// `depth` is the current nesting level: `format_jsvalue`/`format_jsvalue_for_json`
+/// invoke this with `depth = 0` for the outermost object, and each nested
+/// object recurses with `depth + 1`. The hard cap at depth > 10 remains as a
+/// crash safety net for cyclic structures; the Node-style `[Object]` truncation
+/// at depth > 2 is enforced by `format_jsvalue_for_json` on the way in.
 unsafe fn format_object_as_json(obj_ptr: *const crate::object::ObjectHeader, depth: usize) -> String {
     if depth > 10 {
         return "{...}".to_string();
@@ -489,6 +567,12 @@ unsafe fn format_object_as_json(obj_ptr: *const crate::object::ObjectHeader, dep
 }
 
 /// Format a JSValue for JSON output (strings get quotes)
+///
+/// Node's `util.inspect` default options truncate nested objects at depth 2 —
+/// anything past that prints as `[Object]` / `[Array]`. We mirror that so
+/// `console.log({ a: { b: { c: { d: 1 } } } })` matches Node byte-for-byte.
+/// The hard guard at depth > 10 remains as a crash safety net for pathological
+/// cyclic structures.
 fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
     if depth > 10 {
         return "\"...\"".to_string();
@@ -568,29 +652,52 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                         format!("{}: {}", name_str, message_str)
                     }
                 } else {
-                    // Check if it's an object with keys
-                    let obj_ptr = ptr as *const crate::object::ObjectHeader;
-                    let keys_array = (*obj_ptr).keys_array;
+                    // Use GC type header to determine the actual type
+                    // instead of heuristic pointer checks which can
+                    // misinterpret arrays as objects or vice versa.
+                    let gc_header = (ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+                    let gc_type = (*gc_header).obj_type;
 
-                    if !keys_array.is_null() {
-                        format_object_as_json(obj_ptr, depth)
-                    } else {
-                        // Check if array
+                    if gc_type == crate::gc::GC_TYPE_ARRAY {
+                        // Node's default depth cap: beyond 2 levels of
+                        // nesting, arrays collapse to `[Array]`.
+                        if depth > 2 {
+                            return "[Array]".to_string();
+                        }
                         let maybe_arr = ptr;
                         let length = (*maybe_arr).length as usize;
-                        let capacity = (*maybe_arr).capacity as usize;
-
-                        if capacity >= length && length < 1_000_000 && capacity < 10_000_000 {
-                            let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
-                            let mut parts: Vec<String> = Vec::with_capacity(length);
-                            for i in 0..length {
-                                let elem_value = *data_ptr.add(i);
-                                parts.push(format_jsvalue_for_json(elem_value, depth + 1));
-                            }
-                            format!("[{}]", parts.join(", "))
+                        if length > 1_000_000 {
+                            return "[Array]".to_string();
+                        }
+                        let data_ptr = (maybe_arr as *const u8).add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+                        let mut parts: Vec<String> = Vec::with_capacity(length);
+                        for i in 0..length {
+                            let elem_value = *data_ptr.add(i);
+                            parts.push(format_jsvalue_for_json(elem_value, depth + 1));
+                        }
+                        // Node formats empty arrays as `[]` and non-empty
+                        // arrays with a space inside the brackets:
+                        // `[ 1, 2, 3 ]`. Match byte-for-byte.
+                        if length == 0 {
+                            "[]".to_string()
+                        } else {
+                            format!("[ {} ]", parts.join(", "))
+                        }
+                    } else if gc_type == crate::gc::GC_TYPE_OBJECT {
+                        // Past Node's default depth cap, nested objects
+                        // collapse to the literal token `[Object]`.
+                        if depth > 2 {
+                            return "[Object]".to_string();
+                        }
+                        let obj_ptr = ptr as *const crate::object::ObjectHeader;
+                        let keys_array = (*obj_ptr).keys_array;
+                        if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
+                            format_object_as_json(obj_ptr, depth)
                         } else {
                             "[object Object]".to_string()
                         }
+                    } else {
+                        "[object Object]".to_string()
                     }
                 }
             }
@@ -740,6 +847,60 @@ pub extern "C" fn js_eq(a: JSValue, b: JSValue) -> JSValue {
     }
 }
 
+/// JS abstract equality (==). Implements the coercion rules:
+/// - Same type: use strict equality
+/// - null == undefined: true
+/// - number == string: coerce string to number
+/// - boolean == anything: coerce boolean to number, recurse
+/// - string == number: coerce string to number
+#[no_mangle]
+pub extern "C" fn js_loose_eq(a: JSValue, b: JSValue) -> JSValue {
+    // Same bits → always equal (handles null==null, undefined==undefined, etc.)
+    if a.bits() == b.bits() {
+        return JSValue::bool(true);
+    }
+    // null == undefined (and vice versa)
+    if (a.is_null() && b.is_undefined()) || (a.is_undefined() && b.is_null()) {
+        return JSValue::bool(true);
+    }
+    // null/undefined != anything else
+    if a.is_null() || a.is_undefined() || b.is_null() || b.is_undefined() {
+        return JSValue::bool(false);
+    }
+    // Both numbers
+    if a.is_number() && b.is_number() {
+        return JSValue::bool(a.as_number() == b.as_number());
+    }
+    // Both strings: content compare
+    if a.is_string() && b.is_string() {
+        let result = crate::string::js_string_equals(
+            a.as_string_ptr(),
+            b.as_string_ptr(),
+        );
+        return JSValue::bool(result != 0);
+    }
+    // Boolean on either side: coerce to number and recurse
+    if a.is_bool() {
+        let a_num = if a.as_bool() { 1.0 } else { 0.0 };
+        return js_loose_eq(JSValue::number(a_num), b);
+    }
+    if b.is_bool() {
+        let b_num = if b.as_bool() { 1.0 } else { 0.0 };
+        return js_loose_eq(a, JSValue::number(b_num));
+    }
+    // String vs number: coerce string to number
+    if a.is_number() && b.is_string() {
+        let b_num = js_number_coerce(f64::from_bits(b.bits()));
+        return JSValue::bool(a.as_number() == b_num);
+    }
+    if a.is_string() && b.is_number() {
+        let a_num = js_number_coerce(f64::from_bits(a.bits()));
+        return JSValue::bool(a_num == b.as_number());
+    }
+    // Fallback: not equal
+    JSValue::bool(false)
+}
+
 #[no_mangle]
 pub extern "C" fn js_lt(a: JSValue, b: JSValue) -> JSValue {
     JSValue::bool(a.to_number() < b.to_number())
@@ -778,6 +939,7 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         static TYPEOF_STRING:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
         static TYPEOF_FUNCTION:  Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
         static TYPEOF_BIGINT:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
+        static TYPEOF_SYMBOL:    Cell<*mut StringHeader> = const { Cell::new(std::ptr::null_mut()) };
     }
 
     /// Get or initialize a cached typeof string.
@@ -812,15 +974,21 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         // JS handle from V8 runtime - always an object
         get_cached(&TYPEOF_OBJECT, "object")
     } else if jsval.is_pointer() {
-        // Object/array/closure pointer - check if it's a closure
+        // Object/array/closure/symbol pointer - check via the side-table first.
         let ptr = jsval.as_pointer::<u8>();
         if !ptr.is_null() && (ptr as usize) > 0x10000 {
-            // ClosureHeader has type_tag at offset 12 (after func_ptr:8 + capture_count:4)
-            let type_tag = unsafe { *(ptr.add(12) as *const u32) };
-            if type_tag == crate::closure::CLOSURE_MAGIC {
-                get_cached(&TYPEOF_FUNCTION, "function")
+            // Symbols: registered in SYMBOL_POINTERS (handles both gc_malloc'd
+            // and Box-leaked symbols, which have no GcHeader).
+            if crate::symbol::is_registered_symbol(ptr as usize) {
+                get_cached(&TYPEOF_SYMBOL, "symbol")
             } else {
-                get_cached(&TYPEOF_OBJECT, "object")
+                // ClosureHeader has type_tag at offset 12 (after func_ptr:8 + capture_count:4)
+                let type_tag = unsafe { *(ptr.add(12) as *const u32) };
+                if type_tag == crate::closure::CLOSURE_MAGIC {
+                    get_cached(&TYPEOF_FUNCTION, "function")
+                } else {
+                    get_cached(&TYPEOF_OBJECT, "object")
+                }
             }
         } else {
             get_cached(&TYPEOF_OBJECT, "object")
@@ -951,7 +1119,11 @@ pub extern "C" fn js_parse_float(str_ptr: *const StringHeader) -> f64 {
 
 /// Number(value) -> number
 /// Converts a value to a number.
+///
+/// Marked `#[inline]` so the bitcode-link path can inline + DCE the
+/// branches when the input type is statically known.
 #[no_mangle]
+#[inline]
 pub extern "C" fn js_number_coerce(value: f64) -> f64 {
     let jsval = JSValue::from_bits(value.to_bits());
 
@@ -1006,7 +1178,14 @@ pub extern "C" fn js_number_coerce(value: f64) -> f64 {
         let ptr = jsval.as_bigint_ptr();
         crate::bigint::js_bigint_to_f64(ptr)
     } else if jsval.is_pointer() {
-        // Object → NaN (can't convert object to number directly)
+        // Object → consult [Symbol.toPrimitive]("number") first; if the
+        // object has a custom toPrimitive method, recurse with the result.
+        // Otherwise returns NaN.
+        let primitive = unsafe { crate::symbol::js_to_primitive(value, 1) };
+        if primitive.to_bits() != value.to_bits() {
+            // toPrimitive returned something different — re-coerce.
+            return js_number_coerce(primitive);
+        }
         f64::NAN
     } else {
         // Already a number
@@ -1345,20 +1524,46 @@ pub extern "C" fn js_console_count_reset(label_ptr: *const StringHeader) {
 //
 // Just print the label like console.log; we don't track indent yet.
 
+// Thread-local indent level for console.group. Each call to
+// console.group() increments, each groupEnd() decrements. The
+// common console.log path prefixes output with `"  ".repeat(level)`
+// when level > 0 to match Node's visual indentation.
+thread_local! {
+    pub(crate) static CONSOLE_GROUP_INDENT: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
+/// Return the current indent prefix (two spaces per level).
+pub(crate) fn console_group_prefix() -> String {
+    CONSOLE_GROUP_INDENT.with(|l| "  ".repeat(l.get()))
+}
+
 #[no_mangle]
 pub extern "C" fn js_console_group(label_ptr: *const StringHeader) {
     let label = unsafe { label_from_str_ptr(label_ptr) };
-    println!("{}", label);
+    println!("{}{}", console_group_prefix(), label);
+    CONSOLE_GROUP_INDENT.with(|l| l.set(l.get() + 1));
+}
+
+/// Called after the label is printed via the common console.log
+/// path; just bumps the indent level.
+#[no_mangle]
+pub extern "C" fn js_console_group_begin() {
+    CONSOLE_GROUP_INDENT.with(|l| l.set(l.get() + 1));
 }
 
 #[no_mangle]
 pub extern "C" fn js_console_group_end() {
-    // No-op until we add indent tracking.
+    CONSOLE_GROUP_INDENT.with(|l| {
+        let cur = l.get();
+        if cur > 0 {
+            l.set(cur - 1);
+        }
+    });
 }
 
 // === console.assert ===
 //
-// Prints "Assertion failed" + the message string when the condition is false.
+// Prints "Assertion failed" + the message args when the condition is false.
 
 #[no_mangle]
 pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
@@ -1381,13 +1586,53 @@ pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
     }
 }
 
+/// `console.assert(cond, ...messages)` — multi-arg form. The codegen
+/// bundles all the message args (everything after the cond) into a
+/// heap array and passes the raw array pointer here. We format the
+/// messages by calling `format_jsvalue` on each element and joining
+/// with spaces, mirroring Node's `util.format` behavior for simple
+/// inputs (numbers, strings, objects).
+#[no_mangle]
+pub extern "C" fn js_console_assert_spread(cond: f64, args_arr_handle: i64) {
+    use crate::value::js_is_truthy;
+    if js_is_truthy(cond) != 0 { return; }
+
+    let arr_ptr = (args_arr_handle & 0x0000_FFFF_FFFF_FFFF) as *const crate::array::ArrayHeader;
+    if arr_ptr.is_null() {
+        eprintln!("Assertion failed");
+        return;
+    }
+    unsafe {
+        let len = (*arr_ptr).length as usize;
+        if len == 0 {
+            eprintln!("Assertion failed");
+            return;
+        }
+        let elements = (arr_ptr as *const u8)
+            .add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+        let mut parts: Vec<String> = Vec::with_capacity(len);
+        for i in 0..len {
+            let v = *elements.add(i);
+            parts.push(crate::builtins::format_jsvalue(v, 0));
+        }
+        eprintln!("Assertion failed: {}", parts.join(" "));
+    }
+}
+
 // === console.clear ===
 //
-// Best-effort: emit ANSI clear sequence on stdout.
+// Best-effort: emit ANSI clear sequence on stdout — but ONLY when stdout
+// is an actual TTY. When stdout is piped or redirected to a file, Node
+// makes `console.clear()` a no-op (no escape sequence written), so emitting
+// it unconditionally would diff against Node by injecting `\x1b[2J\x1b[H`
+// into captured output.
 
 #[no_mangle]
 pub extern "C" fn js_console_clear() {
-    print!("\x1b[2J\x1b[H");
+    use std::io::IsTerminal as _;
+    if std::io::stdout().is_terminal() {
+        print!("\x1b[2J\x1b[H");
+    }
 }
 
 // === console.table ===
@@ -1922,9 +2167,31 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
             value
         }
         0x7FFD => {
-            // POINTER_TAG — could be array or object. Deep clone recursively.
+            // POINTER_TAG — could be array/object/Map/Set/RegExp. Deep clone recursively.
             let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const u8;
             if (ptr as usize) < 0x10000 { return value; }
+            // Set is tracked in SET_REGISTRY (not GC_TYPE_SET since it has
+            // no GC header). Check the registry BEFORE touching the GC
+            // header bytes — they'd be garbage for raw-allocated sets.
+            if crate::set::is_registered_set(ptr as usize) {
+                unsafe {
+                    let src = ptr as *const crate::set::SetHeader;
+                    let size = crate::set::js_set_size(src);
+                    let new_set = crate::set::js_set_alloc(size.max(8));
+                    let arr = crate::set::js_set_to_array(src);
+                    let len = (*arr).length as usize;
+                    let data = (arr as *const u8)
+                        .add(std::mem::size_of::<crate::array::ArrayHeader>())
+                        as *const f64;
+                    for i in 0..len {
+                        let v = js_structured_clone(*data.add(i));
+                        crate::set::js_set_add(new_set, v);
+                    }
+                    let new_bits = 0x7FFD_0000_0000_0000u64
+                        | (new_set as u64 & 0x0000_FFFF_FFFF_FFFF);
+                    return f64::from_bits(new_bits);
+                }
+            }
             unsafe {
                 // GcHeader is stored BEFORE the user pointer (at ptr - GC_HEADER_SIZE)
                 let gc_header_ptr = (ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE);
@@ -1942,6 +2209,19 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
                     let new_bits = 0x7FFD_0000_0000_0000u64 | (new_arr as u64 & 0x0000_FFFF_FFFF_FFFF);
                     f64::from_bits(new_bits)
                 } else if gc_type == crate::gc::GC_TYPE_OBJECT {
+                    // Check if this is a RegExp (the RegExpHeader lives in an
+                    // arena slot with GC_TYPE_OBJECT but tracked in
+                    // REGEX_POINTERS). Clone by reading source/flags and
+                    // building a fresh one via js_regexp_new.
+                    if crate::regex::is_regex_pointer(ptr as *const u8) {
+                        let re_ptr = ptr as *const crate::regex::RegExpHeader;
+                        let src = crate::regex::js_regexp_get_source(re_ptr);
+                        let flg = crate::regex::js_regexp_get_flags(re_ptr);
+                        let new_re = crate::regex::js_regexp_new(src, flg);
+                        let new_bits = 0x7FFD_0000_0000_0000u64
+                            | (new_re as u64 & 0x0000_FFFF_FFFF_FFFF);
+                        return f64::from_bits(new_bits);
+                    }
                     // Clone object using clone_with_extra (0 extra fields, no static keys)
                     let cloned_obj = crate::object::js_object_clone_with_extra(value, 0, std::ptr::null(), 0);
                     if !cloned_obj.is_null() && (cloned_obj as usize) > 0x10000 {
@@ -1954,6 +2234,38 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
                     }
                     // NaN-box with POINTER_TAG
                     let new_bits = 0x7FFD_0000_0000_0000u64 | (cloned_obj as u64 & 0x0000_FFFF_FFFF_FFFF);
+                    f64::from_bits(new_bits)
+                } else if gc_type == crate::gc::GC_TYPE_MAP {
+                    // Deep-clone a Map by building a fresh one and copying
+                    // entries through js_map_set (which handles the hash
+                    // bucket + entries array layout).
+                    let map = ptr as *const crate::map::MapHeader;
+                    let size = crate::map::js_map_size(map);
+                    let new_map = crate::map::js_map_alloc(size.max(8));
+                    // Walk entries via js_map_entries which returns an
+                    // Array<[key, value]> pair array.
+                    let entries_arr = crate::map::js_map_entries(map);
+                    let entries_len = (*entries_arr).length as usize;
+                    let entries_data = (entries_arr as *const u8)
+                        .add(std::mem::size_of::<crate::array::ArrayHeader>())
+                        as *const f64;
+                    for i in 0..entries_len {
+                        let pair_box = *entries_data.add(i);
+                        let pair_bits = pair_box.to_bits();
+                        let pair_ptr = (pair_bits & 0x0000_FFFF_FFFF_FFFF)
+                            as *const crate::array::ArrayHeader;
+                        if pair_ptr.is_null() {
+                            continue;
+                        }
+                        let pair_data = (pair_ptr as *const u8)
+                            .add(std::mem::size_of::<crate::array::ArrayHeader>())
+                            as *const f64;
+                        let k = js_structured_clone(*pair_data);
+                        let v = js_structured_clone(*pair_data.add(1));
+                        crate::map::js_map_set(new_map, k, v);
+                    }
+                    let new_bits = 0x7FFD_0000_0000_0000u64
+                        | (new_map as u64 & 0x0000_FFFF_FFFF_FFFF);
                     f64::from_bits(new_bits)
                 } else {
                     // Unknown pointer type — pass through

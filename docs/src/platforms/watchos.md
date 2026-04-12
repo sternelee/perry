@@ -84,18 +84,17 @@ watchOS apps use SwiftUI's `@main App` pattern. Perry's PerryWatchApp.swift runt
 ```typescript
 import { App, Text, VStack, Button } from "perry/ui";
 
-const app = App.create("My Watch App", 200, 200);
-
-const stack = VStack.create();
-const greeting = Text.create("Hello, Apple Watch!");
-const button = Button.create("Tap me", () => {
-  console.log("Button tapped!");
+App({
+  title: "My Watch App",
+  width: 200,
+  height: 200,
+  body: VStack(8, [
+    Text("Hello, Apple Watch!"),
+    Button("Tap me", () => {
+      console.log("Button tapped!");
+    }),
+  ]),
 });
-
-stack.addChild(greeting);
-stack.addChild(button);
-app.setBody(stack);
-app.run();
 ```
 
 Under the hood:
@@ -110,12 +109,18 @@ Reactive state works the same as other platforms:
 ```typescript
 import { App, Text, VStack, Button, State } from "perry/ui";
 
-const count = State.create(0);
-const label = Text.create("Count: 0");
-count.bindText(label, "Count: ", "");
+const count = State(0);
 
-const button = Button.create("+1", () => {
-  count.set(count.get() + 1);
+App({
+  title: "Counter",
+  width: 200,
+  height: 200,
+  body: VStack(8, [
+    Text(`Count: ${count.value}`),
+    Button("+1", () => {
+      count.set(count.value + 1);
+    }),
+  ]),
 });
 ```
 

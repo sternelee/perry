@@ -293,7 +293,7 @@ node --experimental-strip-types test-files/test_edge_closures.ts
 
 ### 5. `Math.round(0.5)` returned 0
 
-**Root cause:** Cranelift's `nearest` instruction uses IEEE 754 round-half-to-even (banker's rounding). `0.5` rounds to `0` because `0` is even. JS uses round-half-away-from-zero for positives (`0.5` → `1`).
+**Root cause:** The `nearest` (roundeven) instruction uses IEEE 754 round-half-to-even (banker's rounding). `0.5` rounds to `0` because `0` is even. JS uses round-half-away-from-zero for positives (`0.5` → `1`).
 
 **Fix:** `MathRound` now emits `floor(x + 0.5)` in `expr.rs`.
 
@@ -327,7 +327,7 @@ node --experimental-strip-types test-files/test_edge_closures.ts
 
 ### 10. Class named `EventEmitter` collided with Perry's native EventEmitter
 
-**Root cause:** When user code declares `class EventEmitter { ... }` with its own `on`/`emit` methods, Perry's HIR lowering confuses calls to those methods with Perry's built-in EventEmitter (from the `events` module), which has a different signature. The result is a Cranelift verifier error: `mismatched argument count: got 1, expected 3`.
+**Root cause:** When user code declares `class EventEmitter { ... }` with its own `on`/`emit` methods, Perry's HIR lowering confuses calls to those methods with Perry's built-in EventEmitter (from the `events` module), which has a different signature. The result is a codegen error: `mismatched argument count: got 1, expected 3`.
 
 **Workaround:** The test file renames the class to `MyEmitter`.
 

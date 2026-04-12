@@ -35,7 +35,7 @@ pub fn catch_callback_panic<F: FnOnce() + std::panic::UnwindSafe>(label: &str, f
 }
 
 // =============================================================================
-// FFI exports — these are the functions called from Cranelift-generated code
+// FFI exports — these are the functions called from codegen-generated code
 // =============================================================================
 
 /// Create an app. title_ptr=raw string, width/height as f64.

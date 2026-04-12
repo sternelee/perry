@@ -71,7 +71,7 @@ pub fn inline_functions(module: &mut Module) {
     // Only method calls are inlined here (not standalone functions), because method
     // bodies access `this.field` via pointer indirection and never reference module-level
     // variables. Standalone function inlining is still unsafe in init context because
-    // module-level variables are cached in Cranelift locals during compile_init — an
+    // module-level variables are cached in locals during compile_init — an
     // inlined function that reads a module variable modified by a prior call would see
     // the stale cached value instead of the updated global slot.
     {
@@ -610,8 +610,8 @@ fn inline_calls_in_stmts(
                 if let Some((mut inlined_stmts, _result_expr)) = try_inline_call(expr, func_candidates, method_candidates, local_types, next_local_id) {
                     // When inlining into Stmt::Expr context (result discarded),
                     // convert Stmt::Return(Some(expr)) to Stmt::Expr(expr) and
-                    // remove Stmt::Return(None). This prevents emitting a Cranelift
-                    // `return` terminator mid-block (e.g., inside a for loop body).
+                    // remove Stmt::Return(None). This prevents emitting a
+                    // `ret` terminator mid-block (e.g., inside a for loop body).
                     // Only do this if returns are in safe positions (trailing).
                     let has_nested_return = inlined_stmts.iter().take(inlined_stmts.len().saturating_sub(1)).any(|s| {
                         fn stmt_has_return(s: &Stmt) -> bool {

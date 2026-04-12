@@ -83,6 +83,7 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
 pub fn compute_required_features(
     native_module_imports: &BTreeSet<String>,
     uses_fetch: bool,
+    uses_crypto_builtins: bool,
 ) -> BTreeSet<&'static str> {
     let mut features = BTreeSet::new();
     for module in native_module_imports {
@@ -93,6 +94,11 @@ pub fn compute_required_features(
     // Built-in `fetch()` and `node-fetch` both bottom out in reqwest.
     if uses_fetch {
         features.insert("http-client");
+    }
+    // Perry's bare `crypto.randomBytes` / `sha256` / etc. builtins bottom
+    // out in the perry-stdlib `crypto` feature.
+    if uses_crypto_builtins {
+        features.insert("crypto");
     }
     features
 }

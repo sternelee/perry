@@ -957,6 +957,11 @@ pub(crate) fn lower_var_decl_with_destructuring(
                                 ty = Type::Named("TextDecoder".to_string());
                             } else if class_name == "Uint8Array" || class_name == "Buffer" {
                                 ty = Type::Named("Uint8Array".to_string());
+                            } else if matches!(class_name,
+                                "Int8Array" | "Int16Array" | "Uint16Array" |
+                                "Int32Array" | "Uint32Array" | "Float32Array" | "Float64Array"
+                            ) {
+                                ty = Type::Named(class_name.to_string());
                             } else if ctx.classes_index.contains_key(class_name) {
                                 // User-defined class: infer type from new ClassName(...)
                                 let type_args: Vec<Type> = new_expr.type_args.as_ref()

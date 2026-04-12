@@ -14,17 +14,20 @@ import { audioStart, audioStop, audioGetLevel, audioGetPeak, audioGetWaveformSam
 
 audioStart();
 
-App("Sound Meter", () => {
-  const db = State(0);
+const db = State(0);
 
-  // Poll the level every 100ms
-  setInterval(() => {
-    db.set(audioGetLevel());
-  }, 100);
+// Poll the level every 100ms
+setInterval(() => {
+  db.set(audioGetLevel());
+}, 100);
 
-  return VStack([
-    Text(`${db.get()} dB`),
-  ]);
+App({
+  title: "Sound Meter",
+  width: 400,
+  height: 300,
+  body: VStack(16, [
+    Text(`${db.value} dB`),
+  ]),
 });
 ```
 

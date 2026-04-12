@@ -325,7 +325,7 @@ pub extern "C" fn js_weakset_delete(set: f64, value: f64) -> f64 {
 /// Used by codegen when the static AST key/value is a primitive literal so we can
 /// match the JS spec which mandates an exception in those cases.
 ///
-/// Marked `-> f64` for the Cranelift signature even though `js_throw` is `-> !`;
+/// Marked `-> f64` for the ABI signature even though `js_throw` is `-> !`;
 /// the function never actually returns.
 #[no_mangle]
 pub extern "C" fn js_weak_throw_primitive() -> f64 {

@@ -590,7 +590,7 @@ counterState.onChange((val: number) => {
 
 // Button — handle 3 (approx), widget_type=0
 const incrementBtn = Button("Increment", () => {
-  counterState.set(counterState.get() + 1);
+  counterState.set(counterState.value + 1);
 });
 
 const resetBtn = Button("Reset", () => {

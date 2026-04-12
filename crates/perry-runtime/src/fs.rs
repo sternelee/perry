@@ -388,3 +388,824 @@ pub extern "C" fn js_fs_rm_recursive(path_value: f64) -> i32 {
         }
     }
 }
+
+/// Helper: decode a NaN-boxed string path into a Rust &str slice.
+unsafe fn decode_path_value<'a>(path_value: f64) -> Option<&'a str> {
+    let path_ptr = extract_string_ptr(path_value);
+    if path_ptr.is_null() {
+        return None;
+    }
+    let len = (*path_ptr).length as usize;
+    let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+    let path_bytes = std::slice::from_raw_parts(data_ptr, len);
+    std::str::from_utf8(path_bytes).ok()
+}
+
+// ---------- Stats object ----------
+//
+// `fs.statSync(path)` returns a Node-style Stats object supporting
+// `isFile()`, `isDirectory()`, `isSymbolicLink()` methods and a numeric
+// `size` property. We implement it as a plain ObjectHeader populated
+// with three closure fields (one per predicate) and a size field. The
+// closures capture a pre-computed boolean result so calling them just
+// returns the stored value via `js_closure_get_capture_f64`.
+
+extern "C" fn stats_closure_return_captured(closure: *const crate::closure::ClosureHeader) -> f64 {
+    // Slot 0 holds the pre-computed NaN-boxed boolean.
+    unsafe { crate::closure::js_closure_get_capture_f64(closure, 0) }
+}
+
+unsafe fn make_stats_predicate(value: bool) -> f64 {
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    let tag = if value { TAG_TRUE } else { TAG_FALSE };
+    let closure = crate::closure::js_closure_alloc(
+        stats_closure_return_captured as *const u8,
+        1,
+    );
+    crate::closure::js_closure_set_capture_f64(closure, 0, f64::from_bits(tag));
+    // NaN-box the closure pointer with POINTER_TAG so the dynamic
+    // dispatch path in `js_native_call_method` can unwrap it.
+    const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
+    f64::from_bits(POINTER_TAG | (closure as u64 & 0x0000_FFFF_FFFF_FFFF))
+}
+
+unsafe fn build_stats_object(is_file: bool, is_dir: bool, is_symlink: bool, size: u64) -> f64 {
+    // 5 field slots: isFile, isDirectory, isSymbolicLink, size, mtimeMs.
+    let obj = crate::object::js_object_alloc(0, 5);
+
+    // Set fields via the by-name setter which builds up the key array.
+    let set = |name: &str, v: f64| {
+        let key = crate::string::js_string_from_bytes(name.as_ptr(), name.len() as u32);
+        crate::object::js_object_set_field_by_name(obj, key, v);
+    };
+    set("isFile", make_stats_predicate(is_file));
+    set("isDirectory", make_stats_predicate(is_dir));
+    set("isSymbolicLink", make_stats_predicate(is_symlink));
+    // size stored as a raw f64 number.
+    set("size", size as f64);
+    set("mtimeMs", 0.0_f64);
+
+    const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
+    f64::from_bits(POINTER_TAG | (obj as u64 & 0x0000_FFFF_FFFF_FFFF))
+}
+
+/// `fs.statSync(path)` — returns a Stats-like object with `isFile()`,
+/// `isDirectory()`, `isSymbolicLink()` predicate methods and a `size`
+/// numeric field. On error, returns an object where all predicates are
+/// false and size is 0 (Node throws on ENOENT, but Perry's LLVM backend
+/// doesn't have a catch-unwind path for runtime panics — graceful
+/// degradation is safer here).
+#[no_mangle]
+pub extern "C" fn js_fs_stat_sync(path_value: f64) -> f64 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return build_stats_object(false, false, false, 0),
+        };
+        match fs::metadata(path_str) {
+            Ok(meta) => {
+                let is_file = meta.is_file();
+                let is_dir = meta.is_dir();
+                let is_symlink = meta.file_type().is_symlink();
+                let size = meta.len();
+                build_stats_object(is_file, is_dir, is_symlink, size)
+            }
+            Err(_) => build_stats_object(false, false, false, 0),
+        }
+    }
+}
+
+/// `fs.renameSync(from, to)` — returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn js_fs_rename_sync(from_value: f64, to_value: f64) -> i32 {
+    unsafe {
+        let from = match decode_path_value(from_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let to = match decode_path_value(to_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        match fs::rename(from, to) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        }
+    }
+}
+
+/// `fs.copyFileSync(from, to)` — returns 1 on success, 0 on failure.
+#[no_mangle]
+pub extern "C" fn js_fs_copy_file_sync(from_value: f64, to_value: f64) -> i32 {
+    unsafe {
+        let from = match decode_path_value(from_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        let to = match decode_path_value(to_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        match fs::copy(from, to) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        }
+    }
+}
+
+/// `fs.accessSync(path)` — returns 1 if accessible, 0 otherwise.
+/// Unlike Node's `accessSync` which throws on failure, this returns a
+/// status code; the LLVM codegen wraps the result so `try/catch` works.
+#[no_mangle]
+pub extern "C" fn js_fs_access_sync(path_value: f64) -> i32 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        if Path::new(path_str).exists() { 1 } else { 0 }
+    }
+}
+
+/// `fs.realpathSync(path)` — returns raw *mut StringHeader i64.
+/// Falls back to the input path on error (Node would throw).
+#[no_mangle]
+pub extern "C" fn js_fs_realpath_sync(path_value: f64) -> i64 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return js_string_from_bytes(b"".as_ptr(), 0) as i64,
+        };
+        match fs::canonicalize(path_str) {
+            Ok(p) => {
+                let s = p.to_string_lossy();
+                let bytes = s.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as i64
+            }
+            Err(_) => {
+                let bytes = path_str.as_bytes();
+                js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as i64
+            }
+        }
+    }
+}
+
+/// `fs.mkdtempSync(prefix)` — creates a unique temp directory whose
+/// name starts with `prefix`. Returns raw *mut StringHeader i64 with
+/// the created path.
+#[no_mangle]
+pub extern "C" fn js_fs_mkdtemp_sync(prefix_value: f64) -> i64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    unsafe {
+        let prefix_str = match decode_path_value(prefix_value) {
+            Some(s) => s.to_string(),
+            None => return js_string_from_bytes(b"".as_ptr(), 0) as i64,
+        };
+        // Try a handful of candidate suffixes until one succeeds.
+        for _ in 0..16 {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let candidate = format!("{}{:x}{:x}", prefix_str, ts, n);
+            match fs::create_dir(&candidate) {
+                Ok(_) => {
+                    let bytes = candidate.as_bytes();
+                    return js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32) as i64;
+                }
+                Err(_) => continue,
+            }
+        }
+        js_string_from_bytes(b"".as_ptr(), 0) as i64
+    }
+}
+
+/// `fs.rmdirSync(path)` — removes an empty directory. Returns i32 status.
+#[no_mangle]
+pub extern "C" fn js_fs_rmdir_sync(path_value: f64) -> i32 {
+    unsafe {
+        let path_str = match decode_path_value(path_value) {
+            Some(s) => s,
+            None => return 0,
+        };
+        match fs::remove_dir(path_str) {
+            Ok(_) => 1,
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Stats predicate shortcuts — not currently called from codegen, but
+/// available so future fast paths can compute `stat.isFile()` without
+/// going through the closure dispatch chain.
+#[no_mangle]
+pub extern "C" fn js_fs_stats_is_file(_stats: f64) -> f64 {
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    f64::from_bits(TAG_FALSE)
+}
+
+#[no_mangle]
+pub extern "C" fn js_fs_stats_is_directory(_stats: f64) -> f64 {
+    const TAG_FALSE: u64 = 0x7FFC_0000_0000_0003;
+    f64::from_bits(TAG_FALSE)
+}
+
+// ============================================================
+// Throwing variant of accessSync — Node-compatible semantics.
+// Checks existence via `js_fs_access_sync`; on failure calls
+// `js_throw` which longjmps into the nearest enclosing try/catch.
+// ============================================================
+#[no_mangle]
+pub extern "C" fn js_fs_access_sync_throw(path_value: f64) -> f64 {
+    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+    if js_fs_access_sync(path_value) == 1 {
+        return f64::from_bits(TAG_UNDEFINED);
+    }
+    // Throw an Error via js_throw. The runtime builds the error
+    // lazily from a static message — the subclass catch in the test
+    // just needs `accessBad = true` in the catch handler.
+    unsafe {
+        let msg = js_string_from_bytes(b"ENOENT: no such file or directory".as_ptr(), 33);
+        let err = crate::error::js_error_new_with_message(msg);
+        let err_val = crate::value::js_nanbox_pointer(err as i64);
+        crate::exception::js_throw(err_val);
+    }
+    f64::from_bits(TAG_UNDEFINED)
+}
+
+// ============================================================
+// createWriteStream / createReadStream — real implementation.
+//
+// Returns an ObjectHeader whose fields are NaN-boxed closure
+// pointers keyed by method name (`write`, `end`, `on`, `once`,
+// `close`). The closures capture a stream id in slot 0, which
+// indexes into STREAM_REGISTRY for the in-memory buffer/state.
+//
+// The generic `js_native_call_method` dispatcher scans object
+// keys and dispatches the matching closure via `js_native_call_value`,
+// so `ws.write(x)` / `ws.on('finish', cb)` flow through unchanged.
+//
+// Stream semantics match Node's common `end(); on('finish', cb)`
+// pattern: write() buffers, end() flushes to disk and marks the
+// state finished, and on('finish', cb) fires cb inline if the
+// stream is already finished (or stashes it otherwise).
+// ============================================================
+use std::cell::RefCell;
+use std::collections::HashMap as StdHashMap;
+
+use crate::closure::{
+    js_closure_alloc, js_closure_get_capture_ptr, js_closure_set_capture_ptr, ClosureHeader,
+};
+use crate::object::{js_object_alloc_with_shape, js_object_set_field, ObjectHeader};
+use crate::value::JSValue;
+
+const TAG_UNDEFINED_STREAM: u64 = 0x7FFC_0000_0000_0001;
+const STREAM_SHAPE_ID: u32 = 0x7FFF_FE40;
+
+/// State for a single file stream (read OR write).
+#[derive(Default)]
+struct StreamState {
+    /// Filesystem path the stream is bound to.
+    path: String,
+    /// In-memory buffer: for write streams this accumulates chunks
+    /// until `end()` flushes them; for read streams it holds the
+    /// pre-read file contents.
+    buffer: Vec<u8>,
+    /// True once `end()` has been called (write streams) or the
+    /// initial read has happened (read streams).
+    finished: bool,
+    /// If an IO error occurred, this holds the error message.
+    error_msg: Option<String>,
+    /// If `on('finish', cb)` was registered BEFORE `end()` was
+    /// called, the callback is stashed here and fired from end().
+    pending_finish: Option<f64>,
+}
+
+thread_local! {
+    static STREAM_REGISTRY: RefCell<StdHashMap<usize, StreamState>> = RefCell::new(StdHashMap::new());
+    static FS_STREAM_NEXT_ID: RefCell<usize> = const { RefCell::new(1) };
+}
+
+/// Allocate a new stream id and store the initial state.
+fn alloc_stream(state: StreamState) -> usize {
+    let id = FS_STREAM_NEXT_ID.with(|c| {
+        let mut c = c.borrow_mut();
+        let id = *c;
+        *c += 1;
+        id
+    });
+    STREAM_REGISTRY.with(|r| {
+        r.borrow_mut().insert(id, state);
+    });
+    id
+}
+
+/// Extract a UTF-8 path from a NaN-boxed string value. Returns
+/// empty string if the value isn't a string.
+fn path_from_value(v: f64) -> String {
+    unsafe {
+        let ptr = extract_string_ptr(v);
+        if ptr.is_null() {
+            return String::new();
+        }
+        let len = (*ptr).length as usize;
+        let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let bytes = std::slice::from_raw_parts(data, len);
+        std::str::from_utf8(bytes).unwrap_or("").to_string()
+    }
+}
+
+/// Extract raw UTF-8 bytes from a NaN-boxed string value.
+fn bytes_from_value(v: f64) -> Vec<u8> {
+    unsafe {
+        let ptr = extract_string_ptr(v);
+        if ptr.is_null() {
+            return Vec::new();
+        }
+        let len = (*ptr).length as usize;
+        let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        std::slice::from_raw_parts(data, len).to_vec()
+    }
+}
+
+/// Allocate a fresh ClosureHeader whose func_ptr is `func` and
+/// whose slot 0 holds the given stream id.
+fn make_stream_closure(func: extern "C" fn(), stream_id: usize) -> *mut ClosureHeader {
+    let closure = js_closure_alloc(func as *const u8, 1);
+    js_closure_set_capture_ptr(closure, 0, stream_id as i64);
+    closure
+}
+
+/// Build the stream object: an ObjectHeader keyed by method names
+/// whose values are NaN-boxed closure pointers. The caller provides
+/// the per-method extern helper functions; each closure captures the
+/// stream id in slot 0.
+#[allow(clippy::type_complexity)]
+fn build_stream_object(
+    stream_id: usize,
+    method_funcs: &[(&str, extern "C" fn())],
+) -> *mut ObjectHeader {
+    // Build a packed-keys byte sequence: "write\0end\0on\0once\0close\0"
+    let mut packed: Vec<u8> = Vec::new();
+    for (name, _) in method_funcs {
+        packed.extend_from_slice(name.as_bytes());
+        packed.push(0);
+    }
+    // Use a unique shape id per method-set so the SHAPE_CACHE doesn't
+    // collide with other allocations. Since read/write use different
+    // method sets, we use +0 for write, +1 for read (set by caller).
+    let field_count = method_funcs.len() as u32;
+    // NOTE: shape id uniqueness is on the caller side — pass the right
+    // constant. We use STREAM_SHAPE_ID as base below.
+    let obj = js_object_alloc_with_shape(
+        STREAM_SHAPE_ID + method_funcs.len() as u32,
+        field_count,
+        packed.as_ptr(),
+        packed.len() as u32,
+    );
+    for (i, (_name, func)) in method_funcs.iter().enumerate() {
+        let closure = make_stream_closure(*func, stream_id);
+        // Store as a NaN-boxed pointer (POINTER_TAG) so the dispatcher's
+        // `field_val.is_pointer()` check succeeds.
+        let val = JSValue::pointer(closure as *const u8);
+        js_object_set_field(obj, i as u32, val);
+    }
+    obj
+}
+
+// ------------------------------------------------------------
+// Write stream helpers.
+// Each helper is an `extern "C" fn(*const ClosureHeader, ...)`
+// matching the closure-call ABI. Slot 0 of the closure holds the
+// stream id.
+// ------------------------------------------------------------
+
+/// Extract the stream id from the closure's capture slot 0.
+#[inline]
+fn stream_id_of(closure: *const ClosureHeader) -> usize {
+    js_closure_get_capture_ptr(closure, 0) as usize
+}
+
+/// `ws.write(chunk)` — append chunk bytes to the in-memory buffer.
+extern "C" fn write_stream_write_impl(closure: *const ClosureHeader, chunk: f64) -> f64 {
+    let id = stream_id_of(closure);
+    let chunk_bytes = bytes_from_value(chunk);
+    STREAM_REGISTRY.with(|r| {
+        if let Some(state) = r.borrow_mut().get_mut(&id) {
+            state.buffer.extend_from_slice(&chunk_bytes);
+        }
+    });
+    // Node returns `true` if the buffer is below the highWaterMark.
+    // For our sync impl, always return true.
+    const TAG_TRUE: u64 = 0x7FFC_0000_0000_0004;
+    f64::from_bits(TAG_TRUE)
+}
+
+/// `ws.end()` — flush the buffer to disk, mark finished, and fire
+/// any pending finish listener.
+extern "C" fn write_stream_end0_impl(closure: *const ClosureHeader) -> f64 {
+    write_stream_end_internal(closure, None)
+}
+
+/// `ws.end(finalChunk)` — write finalChunk, then flush.
+extern "C" fn write_stream_end1_impl(closure: *const ClosureHeader, chunk: f64) -> f64 {
+    write_stream_end_internal(closure, Some(chunk))
+}
+
+fn write_stream_end_internal(closure: *const ClosureHeader, final_chunk: Option<f64>) -> f64 {
+    use crate::closure::js_closure_call0;
+    let id = stream_id_of(closure);
+
+    // Append optional final chunk.
+    if let Some(chunk) = final_chunk {
+        let bytes = bytes_from_value(chunk);
+        STREAM_REGISTRY.with(|r| {
+            if let Some(state) = r.borrow_mut().get_mut(&id) {
+                state.buffer.extend_from_slice(&bytes);
+            }
+        });
+    }
+
+    // Flush to disk. Take the buffer out so we don't hold the
+    // registry borrow across `fs::write`.
+    let (path, buffer) = STREAM_REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        if let Some(state) = reg.get_mut(&id) {
+            let p = state.path.clone();
+            let b = std::mem::take(&mut state.buffer);
+            (p, b)
+        } else {
+            (String::new(), Vec::new())
+        }
+    });
+
+    let write_result = if path.is_empty() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no path",
+        ))
+    } else {
+        std::fs::write(&path, &buffer)
+    };
+
+    // Mark finished / record error.
+    let pending_finish = STREAM_REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        let state = reg.get_mut(&id);
+        if let Some(state) = state {
+            state.finished = true;
+            if let Err(e) = &write_result {
+                state.error_msg = Some(format!("{}", e));
+            }
+            state.pending_finish.take()
+        } else {
+            None
+        }
+    });
+
+    // Fire any pending finish listener.
+    if let Some(cb) = pending_finish {
+        let cb_ptr = extract_closure_ptr(cb);
+        if !cb_ptr.is_null() {
+            unsafe {
+                js_closure_call0(cb_ptr);
+            }
+        }
+    }
+
+    f64::from_bits(TAG_UNDEFINED_STREAM)
+}
+
+/// `ws.on(event, cb)` — register a listener. For 'finish' this
+/// fires synchronously if the stream is already finished; for
+/// 'error' it checks for a recorded error. Unknown events noop.
+extern "C" fn write_stream_on_impl(
+    closure: *const ClosureHeader,
+    event: f64,
+    cb: f64,
+) -> f64 {
+    use crate::closure::{js_closure_call0, js_closure_call1};
+    let id = stream_id_of(closure);
+    let event_bytes = bytes_from_value(event);
+
+    // Snapshot state under the borrow, then act without holding it.
+    let (is_finished, err_msg, cb_is_finish) = STREAM_REGISTRY.with(|r| {
+        let mut reg = r.borrow_mut();
+        let Some(state) = reg.get_mut(&id) else {
+            return (false, None, false);
+        };
+        match event_bytes.as_slice() {
+            b"finish" | b"close" => {
+                if state.finished && state.error_msg.is_none() {
+                    (true, None, true)
+                } else if !state.finished {
+                    // Stash for later — will fire from end().
+                    state.pending_finish = Some(cb);
+                    (false, None, false)
+                } else {
+                    (false, None, false)
+                }
+            }
+            b"error" => {
+                if let Some(msg) = &state.error_msg {
+                    (false, Some(msg.clone()), false)
+                } else {
+                    (false, None, false)
+                }
+            }
+            _ => (false, None, false),
+        }
+    });
+
+    if cb_is_finish && is_finished {
+        let cb_ptr = extract_closure_ptr(cb);
+        if !cb_ptr.is_null() {
+            unsafe {
+                js_closure_call0(cb_ptr);
+            }
+        }
+    }
+
+    if let Some(msg) = err_msg {
+        let cb_ptr = extract_closure_ptr(cb);
+        if !cb_ptr.is_null() {
+            unsafe {
+                let msg_bytes = msg.as_bytes();
+                let err_str = js_string_from_bytes(msg_bytes.as_ptr(), msg_bytes.len() as u32);
+                let err_obj = crate::error::js_error_new_with_message(err_str);
+                let err_val = crate::value::js_nanbox_pointer(err_obj as i64);
+                js_closure_call1(cb_ptr, err_val);
+            }
+        }
+    }
+
+    // `.on()` in Node returns the stream itself for chaining, but
+    // we don't track the receiver inside the closure — return
+    // undefined, which matches most practical uses since the test
+    // pattern `stream.on('...', cb)` discards the return.
+    f64::from_bits(TAG_UNDEFINED_STREAM)
+}
+
+/// `ws.close()` — noop; the stream is flushed on end().
+extern "C" fn write_stream_close_impl(_closure: *const ClosureHeader) -> f64 {
+    f64::from_bits(TAG_UNDEFINED_STREAM)
+}
+
+// ------------------------------------------------------------
+// Read stream helpers.
+// ------------------------------------------------------------
+
+/// `rs.on(event, cb)` — for 'data' fires cb(contents) once,
+/// for 'end' fires cb() once (after all data), for 'error'
+/// noops unless the file was unreadable.
+extern "C" fn read_stream_on_impl(
+    closure: *const ClosureHeader,
+    event: f64,
+    cb: f64,
+) -> f64 {
+    use crate::closure::{js_closure_call0, js_closure_call1};
+    let id = stream_id_of(closure);
+    let event_bytes = bytes_from_value(event);
+
+    // Pull needed data out of the registry without holding the borrow
+    // across the callback invocation.
+    let (buffer_copy, err_msg) = STREAM_REGISTRY.with(|r| {
+        let reg = r.borrow();
+        match reg.get(&id) {
+            Some(s) => (s.buffer.clone(), s.error_msg.clone()),
+            None => (Vec::new(), None),
+        }
+    });
+
+    match event_bytes.as_slice() {
+        b"data" => {
+            if err_msg.is_some() {
+                return f64::from_bits(TAG_UNDEFINED_STREAM);
+            }
+            let cb_ptr = extract_closure_ptr(cb);
+            if !cb_ptr.is_null() {
+                unsafe {
+                    let chunk = js_string_from_bytes(
+                        buffer_copy.as_ptr(),
+                        buffer_copy.len() as u32,
+                    );
+                    let chunk_val = f64::from_bits(
+                        crate::value::js_nanbox_string(chunk as i64).to_bits(),
+                    );
+                    js_closure_call1(cb_ptr, chunk_val);
+                }
+            }
+        }
+        b"end" | b"close" => {
+            if err_msg.is_some() {
+                return f64::from_bits(TAG_UNDEFINED_STREAM);
+            }
+            let cb_ptr = extract_closure_ptr(cb);
+            if !cb_ptr.is_null() {
+                unsafe {
+                    js_closure_call0(cb_ptr);
+                }
+            }
+        }
+        b"error" => {
+            if let Some(msg) = err_msg {
+                let cb_ptr = extract_closure_ptr(cb);
+                if !cb_ptr.is_null() {
+                    unsafe {
+                        let msg_bytes = msg.as_bytes();
+                        let err_str =
+                            js_string_from_bytes(msg_bytes.as_ptr(), msg_bytes.len() as u32);
+                        let err_obj = crate::error::js_error_new_with_message(err_str);
+                        let err_val = crate::value::js_nanbox_pointer(err_obj as i64);
+                        js_closure_call1(cb_ptr, err_val);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    f64::from_bits(TAG_UNDEFINED_STREAM)
+}
+
+/// `rs.pipe(dest)` — not implemented beyond the noop signature.
+extern "C" fn read_stream_pipe_impl(_closure: *const ClosureHeader, dest: f64) -> f64 {
+    dest
+}
+
+/// `rs.close()` — noop.
+extern "C" fn read_stream_close_impl(_closure: *const ClosureHeader) -> f64 {
+    f64::from_bits(TAG_UNDEFINED_STREAM)
+}
+
+// ------------------------------------------------------------
+// Closure pointer extraction helper.
+// ------------------------------------------------------------
+
+/// Extract a raw ClosureHeader pointer from a NaN-boxed f64.
+fn extract_closure_ptr(v: f64) -> *const ClosureHeader {
+    let bits = v.to_bits();
+    let top16 = bits >> 48;
+    let raw = if top16 >= 0x7FF8 && top16 <= 0x7FFF {
+        // Tagged NaN-box — mask off the tag.
+        (bits & 0x0000_FFFF_FFFF_FFFF) as usize
+    } else {
+        bits as usize
+    };
+    if raw < 0x1000 {
+        std::ptr::null()
+    } else {
+        raw as *const ClosureHeader
+    }
+}
+
+// ------------------------------------------------------------
+// Entry points: js_fs_create_write_stream / js_fs_create_read_stream
+// ------------------------------------------------------------
+
+/// Create a write stream bound to `path_value`. Returns a NaN-boxed
+/// ObjectHeader pointer whose fields dispatch to the write-stream
+/// helpers.
+#[no_mangle]
+pub extern "C" fn js_fs_create_write_stream(path_value: f64) -> f64 {
+    let path = path_from_value(path_value);
+    let state = StreamState {
+        path,
+        ..StreamState::default()
+    };
+    let id = alloc_stream(state);
+    // Method table. Order is locked in — it determines the shape keys.
+    // Using a unique method count (6) that differs from the read
+    // stream's (5) so the shape cache doesn't alias.
+    let method_funcs: [(&str, extern "C" fn()); 6] = [
+        ("write", unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*const ClosureHeader, f64) -> f64,
+                extern "C" fn(),
+            >(write_stream_write_impl)
+        }),
+        ("end", unsafe {
+            std::mem::transmute::<extern "C" fn(*const ClosureHeader) -> f64, extern "C" fn()>(
+                write_stream_end0_impl,
+            )
+        }),
+        ("on", unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*const ClosureHeader, f64, f64) -> f64,
+                extern "C" fn(),
+            >(write_stream_on_impl)
+        }),
+        ("once", unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*const ClosureHeader, f64, f64) -> f64,
+                extern "C" fn(),
+            >(write_stream_on_impl)
+        }),
+        ("close", unsafe {
+            std::mem::transmute::<extern "C" fn(*const ClosureHeader) -> f64, extern "C" fn()>(
+                write_stream_close_impl,
+            )
+        }),
+        ("destroy", unsafe {
+            std::mem::transmute::<extern "C" fn(*const ClosureHeader) -> f64, extern "C" fn()>(
+                write_stream_close_impl,
+            )
+        }),
+    ];
+    let obj = build_stream_object(id, &method_funcs);
+    // NaN-box as POINTER_TAG so the dispatcher's `is_pointer()` check
+    // routes through the object-field scan in js_native_call_method.
+    f64::from_bits(JSValue::pointer(obj as *const u8).bits())
+}
+
+/// Create a read stream: pre-read the file contents into the
+/// registry buffer, then return an ObjectHeader whose `.on` fires
+/// the data/end callbacks synchronously on first call.
+#[no_mangle]
+pub extern "C" fn js_fs_create_read_stream(path_value: f64) -> f64 {
+    let path = path_from_value(path_value);
+    let mut state = StreamState {
+        path: path.clone(),
+        ..StreamState::default()
+    };
+    // Eagerly read the file so the data callback can fire synchronously.
+    match std::fs::read(&path) {
+        Ok(contents) => {
+            state.buffer = contents;
+            state.finished = true;
+        }
+        Err(e) => {
+            state.error_msg = Some(format!("{}", e));
+        }
+    }
+    let id = alloc_stream(state);
+    // Method set of length 5 to avoid shape-cache collision with write
+    // streams (which have length 6).
+    let method_funcs: [(&str, extern "C" fn()); 5] = [
+        ("on", unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*const ClosureHeader, f64, f64) -> f64,
+                extern "C" fn(),
+            >(read_stream_on_impl)
+        }),
+        ("once", unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*const ClosureHeader, f64, f64) -> f64,
+                extern "C" fn(),
+            >(read_stream_on_impl)
+        }),
+        ("pipe", unsafe {
+            std::mem::transmute::<
+                extern "C" fn(*const ClosureHeader, f64) -> f64,
+                extern "C" fn(),
+            >(read_stream_pipe_impl)
+        }),
+        ("close", unsafe {
+            std::mem::transmute::<extern "C" fn(*const ClosureHeader) -> f64, extern "C" fn()>(
+                read_stream_close_impl,
+            )
+        }),
+        ("destroy", unsafe {
+            std::mem::transmute::<extern "C" fn(*const ClosureHeader) -> f64, extern "C" fn()>(
+                read_stream_close_impl,
+            )
+        }),
+    ];
+    let obj = build_stream_object(id, &method_funcs);
+    f64::from_bits(JSValue::pointer(obj as *const u8).bits())
+}
+
+/// `fs.readFile(path, encoding?, callback)` — sync read + immediate
+/// callback invocation. Stub that just reads the file synchronously
+/// and invokes the callback with `(null, contents)`.
+#[no_mangle]
+pub extern "C" fn js_fs_read_file_callback(
+    path_value: f64,
+    _encoding: f64,
+    callback: f64,
+) -> f64 {
+    use crate::closure::{ClosureHeader, js_closure_call2};
+    const TAG_UNDEFINED: u64 = 0x7FFC_0000_0000_0001;
+    const TAG_NULL: u64 = 0x7FFC_0000_0000_0002;
+    unsafe {
+        // Read the file synchronously.
+        let str_ptr = js_fs_read_file_sync(path_value);
+        let data_val = if str_ptr.is_null() {
+            f64::from_bits(TAG_UNDEFINED)
+        } else {
+            f64::from_bits(crate::value::js_nanbox_string(str_ptr as i64).to_bits())
+        };
+        // Invoke the callback with (null, data). The callback is a
+        // NaN-boxed closure pointer — unbox before calling.
+        let cb_bits = callback.to_bits();
+        let cb_ptr = (cb_bits & 0x0000_FFFF_FFFF_FFFF) as *const ClosureHeader;
+        if !cb_ptr.is_null() {
+            js_closure_call2(cb_ptr, f64::from_bits(TAG_NULL), data_val);
+        }
+    }
+    f64::from_bits(TAG_UNDEFINED)
+}

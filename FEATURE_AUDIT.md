@@ -6,7 +6,7 @@
 
 ## Overview
 
-Compilets is a native TypeScript compiler that compiles TypeScript to native executables using SWC (parsing) and Cranelift (code generation).
+Compilets is a native TypeScript compiler that compiles TypeScript to native executables using SWC (parsing) and LLVM (code generation).
 
 Run `./run_tests.sh` to execute the full test suite.
 

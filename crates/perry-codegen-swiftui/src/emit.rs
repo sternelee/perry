@@ -166,7 +166,7 @@ fn emit_static_timeline_provider(widget: &WidgetDecl, name: &str) -> String {
     out
 }
 
-/// Emit a TimelineProvider that calls a native Cranelift-compiled provider function
+/// Emit a TimelineProvider that calls a native LLVM-compiled provider function
 fn emit_native_timeline_provider(widget: &WidgetDecl, name: &str) -> String {
     let mut out = String::new();
     let func_name = widget.provider_func_name.as_deref().unwrap();
@@ -424,7 +424,7 @@ pub fn emit_widget_bundle(widget: &WidgetDecl, name: &str) -> String {
     out
 }
 
-/// Emit native provider bridge (glue code for calling Cranelift-compiled provider)
+/// Emit native provider bridge (glue code for calling LLVM-compiled provider)
 pub fn emit_glue(widget: &WidgetDecl, name: &str) -> String {
     let mut out = String::new();
 

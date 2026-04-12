@@ -1,11 +1,11 @@
 # Perry
 
-> Perry is a native TypeScript compiler that compiles TypeScript source code directly to native executables. No JavaScript runtime — your TypeScript compiles to a real binary via Cranelift.
+> Perry is a native TypeScript compiler that compiles TypeScript source code directly to native executables. No JavaScript runtime — your TypeScript compiles to a real binary via LLVM.
 
 ## Key Facts
 
 - Compiles TypeScript → native machine code (not JavaScript)
-- Uses SWC for parsing, Cranelift for code generation
+- Uses SWC for parsing, LLVM for code generation
 - 6 platform targets: macOS (AppKit), iOS (UIKit), Android (JNI), Windows (Win32), Linux (GTK4), Web (DOM)
 - Native UI module (`perry/ui`) with declarative widget API
 - 50+ npm packages compiled natively (fastify, mysql2, redis, bcrypt, lodash, etc.)

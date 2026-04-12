@@ -81,7 +81,7 @@ pub mod layout;
 pub mod screenshot;
 
 // =============================================================================
-// FFI exports — these are the functions called from Cranelift-generated code
+// FFI exports — these are the functions called from codegen-generated code
 // =============================================================================
 
 /// Create an app. title_ptr=raw string, width/height as f64.

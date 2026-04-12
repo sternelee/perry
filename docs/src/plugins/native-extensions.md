@@ -90,7 +90,7 @@ Each entry declares a native function the extension exports:
 | Field | Description |
 |-------|-------------|
 | `name` | Symbol name — must match the `#[no_mangle]` Rust function exactly |
-| `params` | Array of Cranelift types: `"i64"` for pointers/strings, `"f64"` for numbers, `"i32"` for integers |
+| `params` | Array of LLVM types: `"i64"` for pointers/strings, `"f64"` for numbers, `"i32"` for integers |
 | `returns` | Return type — typically `"f64"` (NaN-boxed value or promise handle) |
 
 #### `targets`

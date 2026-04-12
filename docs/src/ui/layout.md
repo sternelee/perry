@@ -9,12 +9,14 @@ Arranges children vertically (top to bottom).
 ```typescript
 import { VStack, Text, Button } from "perry/ui";
 
-VStack([
+VStack(16, [
   Text("First"),
   Text("Second"),
   Text("Third"),
 ]);
 ```
+
+`VStack(spacing, children)` — the first argument is the gap in points between children.
 
 **Methods:**
 - `setPadding(padding: number)` — Set padding around all edges
@@ -25,14 +27,16 @@ VStack([
 Arranges children horizontally (left to right).
 
 ```typescript
-import { HStack, Text, Button } from "perry/ui";
+import { HStack, Text, Button, Spacer } from "perry/ui";
 
-HStack([
+HStack(8, [
   Button("Cancel", () => {}),
   Spacer(),
   Button("OK", () => {}),
 ]);
 ```
+
+`HStack(spacing, children)` — the first argument is the gap in points between children.
 
 ## ZStack
 
@@ -41,7 +45,7 @@ Layers children on top of each other (back to front).
 ```typescript
 import { ZStack, Text, Image } from "perry/ui";
 
-ZStack([
+ZStack(0, [
   Image("background.png"),
   Text("Overlay text"),
 ]);
@@ -56,6 +60,7 @@ import { ScrollView, VStack, Text } from "perry/ui";
 
 ScrollView(
   VStack(
+    8,
     Array.from({ length: 100 }, (_, i) => Text(`Row ${i}`))
   )
 );
@@ -82,14 +87,16 @@ LazyVStack(1000, (index) => {
 A navigation container that supports push/pop navigation.
 
 ```typescript
-import { NavigationStack, Text, Button } from "perry/ui";
+import { NavigationStack, VStack, Text, Button } from "perry/ui";
 
-NavigationStack([
-  Text("Home Screen"),
-  Button("Go to Details", () => {
-    // Push a new view
-  }),
-]);
+NavigationStack(
+  VStack(16, [
+    Text("Home Screen"),
+    Button("Go to Details", () => {
+      // Push a new view
+    }),
+  ])
+);
 ```
 
 ## Spacer
@@ -99,7 +106,7 @@ A flexible space that expands to fill available room.
 ```typescript
 import { HStack, Text, Spacer } from "perry/ui";
 
-HStack([
+HStack(8, [
   Text("Left"),
   Spacer(),
   Text("Right"),
@@ -115,7 +122,7 @@ A visual separator line.
 ```typescript
 import { VStack, Text, Divider } from "perry/ui";
 
-VStack([
+VStack(12, [
   Text("Section 1"),
   Divider(),
   Text("Section 2"),
@@ -129,19 +136,22 @@ Layouts can be nested freely:
 ```typescript
 import { App, VStack, HStack, Text, Button, Spacer, Divider } from "perry/ui";
 
-App("Layout Example", () =>
-  VStack([
+App({
+  title: "Layout Example",
+  width: 800,
+  height: 600,
+  body: VStack(16, [
     // Header
-    HStack([
+    HStack(8, [
       Text("My App"),
       Spacer(),
       Button("Settings", () => {}),
     ]),
     Divider(),
     // Content
-    VStack([
+    VStack(12, [
       Text("Welcome!"),
-      HStack([
+      HStack(8, [
         Button("Action 1", () => {}),
         Button("Action 2", () => {}),
       ]),
@@ -149,8 +159,8 @@ App("Layout Example", () =>
     Spacer(),
     // Footer
     Text("v1.0.0"),
-  ])
-);
+  ]),
+});
 ```
 
 ## Child Management
@@ -158,7 +168,7 @@ App("Layout Example", () =>
 Containers support dynamic child management:
 
 ```typescript
-const stack = VStack([]);
+const stack = VStack(16, []);
 // Add children dynamically
 stack.addChild(Text("New child"));
 stack.addChildAt(0, Text("Prepended"));

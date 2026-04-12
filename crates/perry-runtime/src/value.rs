@@ -852,6 +852,32 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
         // objects fall back to "[object Object]".
         let ptr: *const u8 = jsval.as_pointer();
         if !ptr.is_null() && (ptr as usize) >= 0x10000 {
+            // Symbols: detect via the side-table before any GC header read.
+            if crate::symbol::is_registered_symbol(ptr as usize) {
+                return unsafe {
+                    crate::symbol::js_symbol_to_string(value)
+                        as *mut crate::string::StringHeader
+                };
+            }
+            // Consult `[Symbol.toPrimitive]("string")` if the object has a
+            // custom toPrimitive method registered in the symbol side-table.
+            // A changed result means the user-defined method produced a
+            // string-hint primitive — recurse so strings pass through as-is
+            // and numbers get js_number_to_string.
+            let primitive = unsafe { crate::symbol::js_to_primitive(value, 2) };
+            if primitive.to_bits() != value.to_bits() {
+                return js_jsvalue_to_string(primitive);
+            }
+            // Buffers: BufferHeader has no GC header, so we must detect via
+            // BUFFER_REGISTRY before computing gc_header (which would read
+            // garbage one word before the buffer). `Buffer.toString()` with
+            // no arg defaults to UTF-8 — Node prints the raw bytes.
+            if crate::buffer::is_registered_buffer(ptr as usize) {
+                return crate::buffer::js_buffer_to_string(
+                    ptr as *const crate::buffer::BufferHeader,
+                    0,
+                );
+            }
             unsafe {
                 let gc_header = ptr.sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
                 if (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY {
@@ -1245,6 +1271,7 @@ pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
 /// Everything else is truthy.
 /// Returns 1 if truthy, 0 if falsy.
 #[no_mangle]
+#[inline]
 pub extern "C" fn js_is_truthy(value: f64) -> i32 {
     let bits = value.to_bits();
 

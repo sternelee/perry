@@ -7,38 +7,44 @@ Perry supports native menu bars, context menus, and toolbar items across all pla
 Create a native application menu bar:
 
 ```typescript
-import { App, menuBarCreate, menuBarAddMenu, menuAddItem, menuAddSeparator, menuAddSubmenu, menuBarAttach } from "perry/ui";
+import { App, VStack, Text, menuBarCreate, menuBarAddMenu, menuAddItem, menuAddSeparator, menuAddSubmenu, menuBarAttach } from "perry/ui";
 
-App("Menu Demo", () => {
-  const menuBar = menuBarCreate();
+// Build the menu bar before App(...)
+const menuBar = menuBarCreate();
 
-  // File menu
-  const fileMenu = menuBarAddMenu(menuBar, "File");
-  menuAddItem(fileMenu, "New", () => newDoc(), "n");         // Cmd+N
-  menuAddItem(fileMenu, "Open", () => openDoc(), "o");       // Cmd+O
-  menuAddSeparator(fileMenu);
-  menuAddItem(fileMenu, "Save", () => saveDoc(), "s");       // Cmd+S
-  menuAddItem(fileMenu, "Save As...", () => saveAs(), "S");  // Cmd+Shift+S
+// File menu
+const fileMenu = menuBarAddMenu(menuBar, "File");
+menuAddItem(fileMenu, "New", () => newDoc(), "n");         // Cmd+N
+menuAddItem(fileMenu, "Open", () => openDoc(), "o");       // Cmd+O
+menuAddSeparator(fileMenu);
+menuAddItem(fileMenu, "Save", () => saveDoc(), "s");       // Cmd+S
+menuAddItem(fileMenu, "Save As...", () => saveAs(), "S");  // Cmd+Shift+S
 
-  // Edit menu
-  const editMenu = menuBarAddMenu(menuBar, "Edit");
-  menuAddItem(editMenu, "Undo", () => undo(), "z");
-  menuAddItem(editMenu, "Redo", () => redo(), "Z");         // Cmd+Shift+Z
-  menuAddSeparator(editMenu);
-  menuAddItem(editMenu, "Cut", () => cut(), "x");
-  menuAddItem(editMenu, "Copy", () => copy(), "c");
-  menuAddItem(editMenu, "Paste", () => paste(), "v");
+// Edit menu
+const editMenu = menuBarAddMenu(menuBar, "Edit");
+menuAddItem(editMenu, "Undo", () => undo(), "z");
+menuAddItem(editMenu, "Redo", () => redo(), "Z");         // Cmd+Shift+Z
+menuAddSeparator(editMenu);
+menuAddItem(editMenu, "Cut", () => cut(), "x");
+menuAddItem(editMenu, "Copy", () => copy(), "c");
+menuAddItem(editMenu, "Paste", () => paste(), "v");
 
-  // Submenu
-  const viewMenu = menuBarAddMenu(menuBar, "View");
-  const zoomSubmenu = menuAddSubmenu(viewMenu, "Zoom");
-  menuAddItem(zoomSubmenu, "Zoom In", () => zoomIn(), "+");
-  menuAddItem(zoomSubmenu, "Zoom Out", () => zoomOut(), "-");
-  menuAddItem(zoomSubmenu, "Actual Size", () => zoomReset(), "0");
+// Submenu
+const viewMenu = menuBarAddMenu(menuBar, "View");
+const zoomSubmenu = menuAddSubmenu(viewMenu, "Zoom");
+menuAddItem(zoomSubmenu, "Zoom In", () => zoomIn(), "+");
+menuAddItem(zoomSubmenu, "Zoom Out", () => zoomOut(), "-");
+menuAddItem(zoomSubmenu, "Actual Size", () => zoomReset(), "0");
 
-  menuBarAttach(menuBar);
+menuBarAttach(menuBar);
 
-  // ... rest of UI
+App({
+  title: "Menu Demo",
+  width: 800,
+  height: 600,
+  body: VStack(16, [
+    Text("App content here"),
+  ]),
 });
 ```
 
@@ -84,15 +90,20 @@ contextMenu(label, [
 Add a toolbar to the window:
 
 ```typescript
-import { App, toolbarCreate, toolbarAddItem } from "perry/ui";
+import { App, VStack, Text, toolbarCreate, toolbarAddItem } from "perry/ui";
 
-App("Toolbar Demo", () => {
-  const toolbar = toolbarCreate();
-  toolbarAddItem(toolbar, "New", () => newDoc());
-  toolbarAddItem(toolbar, "Save", () => saveDoc());
-  toolbarAddItem(toolbar, "Run", () => runCode());
+const toolbar = toolbarCreate();
+toolbarAddItem(toolbar, "New", () => newDoc());
+toolbarAddItem(toolbar, "Save", () => saveDoc());
+toolbarAddItem(toolbar, "Run", () => runCode());
 
-  // ... rest of UI
+App({
+  title: "Toolbar Demo",
+  width: 800,
+  height: 600,
+  body: VStack(16, [
+    Text("App content here"),
+  ]),
 });
 ```
 

@@ -25,6 +25,7 @@ pub enum NodeKind {
     Picker = 12,
     List = 13,
     NavigationStack = 14,
+    TextArea = 15,
 }
 
 /// A single node in the UI tree.
@@ -531,6 +532,39 @@ pub extern "C" fn perry_watchos_picker_changed(id: i64, index: i64) {
         let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) } as *const u8;
         unsafe {
             js_closure_call1(closure_ptr, index as f64);
+        }
+    }
+}
+
+/// Called from Swift when textarea content changes.
+#[no_mangle]
+pub extern "C" fn perry_watchos_textarea_changed(id: i64, text_ptr: *const std::ffi::c_char) {
+    extern "C" {
+        fn js_nanbox_get_pointer(value: f64) -> i64;
+        fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
+        fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;
+        fn js_nanbox_string(ptr: i64) -> f64;
+    }
+
+    let new_text = if text_ptr.is_null() {
+        CString::default()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(text_ptr) }.to_owned()
+    };
+    let bytes = new_text.as_bytes();
+
+    let closure = with_node_mut(id, |n| {
+        n.text = Some(new_text.clone());
+        n.on_change_closure
+    })
+    .flatten();
+
+    if let Some(closure_f64) = closure {
+        let str_ptr = unsafe { js_string_from_bytes(bytes.as_ptr(), bytes.len() as i64) };
+        let nanboxed = unsafe { js_nanbox_string(str_ptr as i64) };
+        let closure_ptr = unsafe { js_nanbox_get_pointer(closure_f64) } as *const u8;
+        unsafe {
+            js_closure_call1(closure_ptr, nanboxed);
         }
     }
 }

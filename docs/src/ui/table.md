@@ -81,33 +81,33 @@ const users = [
   { name: "Eve", email: "eve@example.com", role: "Editor" },
 ];
 
-App("Table Demo", () =>
-  VStack([
-    (() => {
-      const table = Table(users.length, 3, (row, col) => {
-        const user = users[row];
-        if (col === 0) return user.name;
-        if (col === 1) return user.email;
-        return user.role;
-      });
+const table = Table(users.length, 3, (row, col) => {
+  const user = users[row];
+  if (col === 0) return user.name;
+  if (col === 1) return user.email;
+  return user.role;
+});
 
-      table.setColumnHeader(0, "Name");
-      table.setColumnHeader(1, "Email");
-      table.setColumnHeader(2, "Role");
-      table.setColumnWidth(0, 150);
-      table.setColumnWidth(1, 250);
-      table.setColumnWidth(2, 100);
+table.setColumnHeader(0, "Name");
+table.setColumnHeader(1, "Email");
+table.setColumnHeader(2, "Role");
+table.setColumnWidth(0, 150);
+table.setColumnWidth(1, 250);
+table.setColumnWidth(2, 100);
 
-      table.setOnRowSelect((row) => {
-        selectedName.set(users[row].name);
-      });
+table.setOnRowSelect((row) => {
+  selectedName.set(users[row].name);
+});
 
-      return table;
-    })(),
-
-    Text(`Selected: ${selectedName.get()}`),
-  ])
-);
+App({
+  title: "Table Demo",
+  width: 600,
+  height: 400,
+  body: VStack(12, [
+    table,
+    Text(`Selected: ${selectedName.value}`),
+  ]),
+});
 ```
 
 ## Next Steps

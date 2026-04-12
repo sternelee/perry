@@ -50,9 +50,19 @@ unsafe fn sqlite_value_to_jsvalue(value: &SqliteValue) -> JSValue {
             JSValue::string_ptr(ptr)
         }
         SqliteValue::Blob(b) => {
-            // Return blob as hex string for now
-            let hex = hex::encode(b);
-            let ptr = js_string_from_bytes(hex.as_ptr(), hex.len() as u32);
+            // Return blob as hex string. Hand-rolled to avoid pulling in
+            // the `hex` crate, which lives behind the `crypto` Cargo
+            // feature — auto-optimize builds that enable only
+            // `database-sqlite` (e.g. mango: better-sqlite3 + mongodb +
+            // fetch, no crypto) would otherwise fail to resolve `hex::`
+            // and fall back to the prebuilt full stdlib.
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut out = Vec::with_capacity(b.len() * 2);
+            for &byte in b {
+                out.push(HEX[(byte >> 4) as usize]);
+                out.push(HEX[(byte & 0x0f) as usize]);
+            }
+            let ptr = js_string_from_bytes(out.as_ptr(), out.len() as u32);
             JSValue::string_ptr(ptr)
         }
     }

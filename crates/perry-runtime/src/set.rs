@@ -413,10 +413,14 @@ pub extern "C" fn js_set_foreach(set: *const SetHeader, callback: f64) {
             return;
         }
         let elements = elements_ptr(set);
+
+        // Extract the closure pointer from the NaN-boxed callback.
+        // Mask off the upper 16 bits (NaN-box tag) to get the real pointer.
+        let closure_ptr = (callback.to_bits() & 0x0000_FFFF_FFFF_FFFF) as *const crate::closure::ClosureHeader;
+
         for i in 0..size {
             let value = ptr::read(elements.add(i));
             // Call closure with (value, value) - Set.forEach callback gets (value, value) in JS
-            let closure_ptr = callback.to_bits() as *const crate::closure::ClosureHeader;
             crate::closure::js_closure_call2(closure_ptr, value, value);
         }
     }

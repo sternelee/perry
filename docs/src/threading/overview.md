@@ -225,7 +225,7 @@ Perry's threading model is built on three pillars:
 
 **1. Native Code, Not Interpreted**
 
-Perry compiles TypeScript to native machine code via Cranelift. There's no interpreter, no VM, no isolate. A function pointer is just a function pointer — it's valid on any thread.
+Perry compiles TypeScript to native machine code via LLVM. There's no interpreter, no VM, no isolate. A function pointer is just a function pointer — it's valid on any thread.
 
 **2. Thread-Local Memory**
 

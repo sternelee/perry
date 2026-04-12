@@ -465,11 +465,16 @@ pub extern "C" fn js_map_foreach(map: *const MapHeader, callback: f64) {
         let size = (*map).size as usize;
         let entries = entries_ptr(map);
 
+        // Extract the closure pointer from the NaN-boxed callback.
+        // The callback may be NaN-boxed with POINTER_TAG (0x7FFD) or
+        // passed as a raw pointer (i64 bitcast to f64). Mask off the
+        // upper 16 bits to get the real 48-bit pointer.
+        let closure_ptr = (callback.to_bits() & 0x0000_FFFF_FFFF_FFFF) as *const crate::closure::ClosureHeader;
+
         for i in 0..size {
             let key = ptr::read(entries.add(i * 2));
             let value = ptr::read(entries.add(i * 2 + 1));
             // Call closure with (value, key) - Map.forEach callback signature
-            let closure_ptr = callback.to_bits() as *const crate::closure::ClosureHeader;
             crate::closure::js_closure_call2(closure_ptr, value, key);
         }
     }

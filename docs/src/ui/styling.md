@@ -34,7 +34,7 @@ btn.setCornerRadius(12);
 ## Borders
 
 ```typescript
-const widget = VStack([]);
+const widget = VStack(0, []);
 widget.setBorderColor("#CCCCCC");
 widget.setBorderWidth(1);
 ```
@@ -42,7 +42,7 @@ widget.setBorderWidth(1);
 ## Padding and Insets
 
 ```typescript
-const stack = VStack([Text("Padded content")]);
+const stack = VStack(8, [Text("Padded content")]);
 stack.setPadding(16);
 stack.setEdgeInsets(10, 20, 10, 20); // top, right, bottom, left
 ```
@@ -50,7 +50,7 @@ stack.setEdgeInsets(10, 20, 10, 20); // top, right, bottom, left
 ## Sizing
 
 ```typescript
-const widget = VStack([]);
+const widget = VStack(0, []);
 widget.setWidth(300);
 widget.setHeight(200);
 widget.setFrame(0, 0, 300, 200);  // x, y, width, height
@@ -66,7 +66,7 @@ widget.setOpacity(0.5); // 0.0 to 1.0
 ## Background Gradient
 
 ```typescript
-const widget = VStack([]);
+const widget = VStack(0, []);
 widget.setBackgroundGradient("#FF0000", "#0000FF"); // Start color, end color
 ```
 
@@ -102,35 +102,38 @@ import { App, Text, Button, VStack, HStack, State, Spacer } from "perry/ui";
 
 const count = State(0);
 
-App("Styled App", () => {
-  const title = Text("Counter");
-  title.setFontSize(28);
-  title.setColor("#1A1A1A");
+const title = Text("Counter");
+title.setFontSize(28);
+title.setColor("#1A1A1A");
 
-  const display = Text(`${count.get()}`);
-  display.setFontSize(48);
-  display.setFontFamily("monospaced");
-  display.setColor("#007AFF");
+const display = Text(`${count.value}`);
+display.setFontSize(48);
+display.setFontFamily("monospaced");
+display.setColor("#007AFF");
 
-  const decBtn = Button("-", () => count.set(count.get() - 1));
-  decBtn.setCornerRadius(20);
-  decBtn.setBackgroundColor("#FF3B30");
+const decBtn = Button("-", () => count.set(count.value - 1));
+decBtn.setCornerRadius(20);
+decBtn.setBackgroundColor("#FF3B30");
 
-  const incBtn = Button("+", () => count.set(count.get() + 1));
-  incBtn.setCornerRadius(20);
-  incBtn.setBackgroundColor("#34C759");
+const incBtn = Button("+", () => count.set(count.value + 1));
+incBtn.setCornerRadius(20);
+incBtn.setBackgroundColor("#34C759");
 
-  const controls = HStack([decBtn, Spacer(), incBtn]);
-  controls.setPadding(20);
+const controls = HStack(8, [decBtn, Spacer(), incBtn]);
+controls.setPadding(20);
 
-  const container = VStack([title, display, controls]);
-  container.setPadding(40);
-  container.setCornerRadius(16);
-  container.setBackgroundColor("#FFFFFF");
-  container.setBorderColor("#E5E5E5");
-  container.setBorderWidth(1);
+const container = VStack(16, [title, display, controls]);
+container.setPadding(40);
+container.setCornerRadius(16);
+container.setBackgroundColor("#FFFFFF");
+container.setBorderColor("#E5E5E5");
+container.setBorderWidth(1);
 
-  return container;
+App({
+  title: "Styled App",
+  width: 400,
+  height: 300,
+  body: container,
 });
 ```
 

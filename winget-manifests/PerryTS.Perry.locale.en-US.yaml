@@ -10,12 +10,12 @@ PackageUrl: https://github.com/PerryTS/perry
 License: MIT
 LicenseUrl: https://github.com/PerryTS/perry/blob/main/LICENSE
 ShortDescription: Native TypeScript compiler that compiles TypeScript to native executables
-Description: Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and Cranelift for code generation.
+Description: Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 Tags:
   - typescript
   - compiler
   - native
   - rust
-  - cranelift
+  - llvm
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

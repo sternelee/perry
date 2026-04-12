@@ -1591,6 +1591,9 @@ impl JsEmitter {
                 if let Some(s) = size { self.emit_expr(s); }
                 self.output.push(')');
             }
+            // NOTE: TypedArrayNew variant referenced an HIR variant that was
+            // never landed; the corresponding lower.rs path was reverted.
+            // Reinstating it requires landing the typedarray HIR work.
             Expr::Uint8ArrayFrom(src) => {
                 self.output.push_str("Uint8Array.from(");
                 self.emit_expr(src);
@@ -2588,6 +2591,17 @@ impl JsEmitter {
             Expr::ObjectIsSealed(obj) => { self.output.push_str("Object.isSealed("); self.emit_expr(obj); self.output.push(')'); }
             Expr::ObjectIsExtensible(obj) => { self.output.push_str("Object.isExtensible("); self.emit_expr(obj); self.output.push(')'); }
             Expr::ObjectGetPrototypeOf(obj) => { self.output.push_str("Object.getPrototypeOf("); self.emit_expr(obj); self.output.push(')'); }
+            Expr::ObjectGetOwnPropertySymbols(obj) => { self.output.push_str("Object.getOwnPropertySymbols("); self.emit_expr(obj); self.output.push(')'); }
+            // Symbol stubs
+            Expr::SymbolNew(desc) => {
+                self.output.push_str("Symbol(");
+                if let Some(d) = desc { self.emit_expr(d); }
+                self.output.push(')');
+            }
+            Expr::SymbolFor(key) => { self.output.push_str("Symbol.for("); self.emit_expr(key); self.output.push(')'); }
+            Expr::SymbolKeyFor(sym) => { self.output.push_str("Symbol.keyFor("); self.emit_expr(sym); self.output.push(')'); }
+            Expr::SymbolDescription(sym) => { self.emit_expr(sym); self.output.push_str(".description"); }
+            Expr::SymbolToString(sym) => { self.emit_expr(sym); self.output.push_str(".toString()"); }
             // RegExp stubs
             Expr::RegExpExec { regex, string } => { self.emit_expr(regex); self.output.push_str(".exec("); self.emit_expr(string); self.output.push(')'); }
             Expr::RegExpSource(re) => { self.emit_expr(re); self.output.push_str(".source"); }
@@ -2597,6 +2611,141 @@ impl JsEmitter {
             Expr::RegExpReplaceFn { string, regex, callback } => { self.emit_expr(string); self.output.push_str(".replace("); self.emit_expr(regex); self.output.push_str(", "); self.emit_expr(callback); self.output.push(')'); }
             Expr::RegExpExecIndex => { self.output.push_str("__perry_exec_index"); }
             Expr::RegExpExecGroups => { self.output.push_str("__perry_exec_groups"); }
+            // Proxy / Reflect — JS backend emits direct JS forms.
+            Expr::ProxyNew { target, handler } => {
+                self.output.push_str("new Proxy(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(handler);
+                self.output.push(')');
+            }
+            Expr::ProxyGet { proxy, key } => {
+                self.emit_expr(proxy);
+                self.output.push('[');
+                self.emit_expr(key);
+                self.output.push(']');
+            }
+            Expr::ProxySet { proxy, key, value } => {
+                self.output.push('(');
+                self.emit_expr(proxy);
+                self.output.push('[');
+                self.emit_expr(key);
+                self.output.push_str("] = ");
+                self.emit_expr(value);
+                self.output.push_str(", true)");
+            }
+            Expr::ProxyHas { proxy, key } => {
+                self.output.push('(');
+                self.emit_expr(key);
+                self.output.push_str(" in ");
+                self.emit_expr(proxy);
+                self.output.push(')');
+            }
+            Expr::ProxyDelete { proxy, key } => {
+                self.output.push_str("delete ");
+                self.emit_expr(proxy);
+                self.output.push('[');
+                self.emit_expr(key);
+                self.output.push(']');
+            }
+            Expr::ProxyApply { proxy, args } => {
+                self.emit_expr(proxy);
+                self.output.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { self.output.push_str(", "); }
+                    self.emit_expr(a);
+                }
+                self.output.push(')');
+            }
+            Expr::ProxyConstruct { proxy, args } => {
+                self.output.push_str("new ");
+                self.emit_expr(proxy);
+                self.output.push('(');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { self.output.push_str(", "); }
+                    self.emit_expr(a);
+                }
+                self.output.push(')');
+            }
+            Expr::ProxyRevocable { target, handler } => {
+                self.output.push_str("Proxy.revocable(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(handler);
+                self.output.push(')');
+            }
+            Expr::ProxyRevoke(_) => {
+                self.output.push_str("undefined");
+            }
+            Expr::ReflectGet { target, key } => {
+                self.output.push_str("Reflect.get(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(key);
+                self.output.push(')');
+            }
+            Expr::ReflectSet { target, key, value } => {
+                self.output.push_str("Reflect.set(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(key);
+                self.output.push_str(", ");
+                self.emit_expr(value);
+                self.output.push(')');
+            }
+            Expr::ReflectHas { target, key } => {
+                self.output.push_str("Reflect.has(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(key);
+                self.output.push(')');
+            }
+            Expr::ReflectDelete { target, key } => {
+                self.output.push_str("Reflect.deleteProperty(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(key);
+                self.output.push(')');
+            }
+            Expr::ReflectOwnKeys(target) => {
+                self.output.push_str("Reflect.ownKeys(");
+                self.emit_expr(target);
+                self.output.push(')');
+            }
+            Expr::ReflectApply { func, this_arg, args } => {
+                self.output.push_str("Reflect.apply(");
+                self.emit_expr(func);
+                self.output.push_str(", ");
+                self.emit_expr(this_arg);
+                self.output.push_str(", ");
+                self.emit_expr(args);
+                self.output.push(')');
+            }
+            Expr::ReflectConstruct { target, args } => {
+                self.output.push_str("Reflect.construct(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(args);
+                self.output.push(')');
+            }
+            Expr::ReflectDefineProperty { target, key, descriptor } => {
+                self.output.push_str("Reflect.defineProperty(");
+                self.emit_expr(target);
+                self.output.push_str(", ");
+                self.emit_expr(key);
+                self.output.push_str(", ");
+                self.emit_expr(descriptor);
+                self.output.push(')');
+            }
+            Expr::ReflectGetPrototypeOf(target) => {
+                self.output.push_str("Reflect.getPrototypeOf(");
+                self.emit_expr(target);
+                self.output.push(')');
+            }
+            // Fallback for HIR variants the JS emitter doesn't model directly
+            // (e.g. TypedArrayNew). Emit `undefined` so the emitted JS still
+            // parses; these paths are unused for the LLVM-backend sweeps.
+            _ => self.output.push_str("undefined"),
         }
     }
 

@@ -8,7 +8,7 @@ Perry supports creating multiple native windows and controlling their appearance
 import { App, Window, Text, Button, VStack } from "perry/ui";
 
 const win = Window("Settings", 500, 400);
-win.setBody(VStack([
+win.setBody(VStack(16, [
   Text("Settings panel"),
 ]));
 win.show();
@@ -17,7 +17,7 @@ App({
   title: "My App",
   width: 800,
   height: 600,
-  body: VStack([
+  body: VStack(16, [
     Text("Main Window"),
     Button("Open Settings", () => win.show()),
   ]),
@@ -56,7 +56,7 @@ App({
   transparent: true,
   vibrancy: "sidebar",
   activationPolicy: "accessory",
-  body: VStack([
+  body: VStack(8, [
     Text("Search..."),
   ]),
 });

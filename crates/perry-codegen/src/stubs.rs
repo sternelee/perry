@@ -1,107 +1,120 @@
-//! Stub object generation for unresolved imports.
+//! Stub object generation for unresolved imports — LLVM port.
+//!
+//! This is the LLVM equivalent of `crates/perry-codegen/src/stubs.rs`.
+//! It produces a `.o` containing dummy globals/functions for symbols that
+//! the linker would otherwise fail on (missing imports from native modules
+//! that the user doesn't actually use, identity pass-throughs for runtime
+//! helpers absent in standalone mode, etc.).
+//!
+//! The strategy: emit a tiny LLVM IR text snippet and feed it to the
+//! existing `compile_ll_to_object` shellout. No special-case in the rest
+//! of the pipeline — the result is a normal object file.
 
-use anyhow::{anyhow, Result};
-use cranelift::prelude::*;
-use cranelift_codegen::ir::AbiParam;
-use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::FunctionBuilder;
-use cranelift_module::{DataDescription, Linkage, Module};
-use cranelift_object::{ObjectBuilder, ObjectModule};
-use std::str::FromStr;
+use anyhow::Result;
+
+use crate::linker::compile_ll_to_object;
+use crate::nanbox::TAG_UNDEFINED;
 
 /// Generate a stub object file for missing symbols from unresolved imports.
-/// `identity_func_symbols` are stubs that take an f64 arg and return it as-is (pass-through).
-pub fn generate_stub_object(missing_data_symbols: &[String], missing_func_symbols: &[String], identity_func_symbols: &[String], target: Option<&str>) -> Result<Vec<u8>> {
-    let mut flag_builder = settings::builder();
-    flag_builder.set("use_colocated_libcalls", "false").unwrap();
-    flag_builder.set("is_pic", "true").unwrap();
-    let isa = match target {
-        Some("ios-simulator") | Some("ios") => {
-            let triple = target_lexicon::Triple::from_str("aarch64-apple-ios")
-                .map_err(|e| anyhow!("Bad triple: {}", e))?;
-            let isa_builder = cranelift::codegen::isa::lookup(triple)
-                .map_err(|e| anyhow!("Failed to create iOS ISA: {}", e))?;
-            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
-        }
-        Some("android") => {
-            let triple = target_lexicon::Triple::from_str("aarch64-unknown-linux-android")
-                .map_err(|e| anyhow!("Bad triple: {}", e))?;
-            let isa_builder = cranelift::codegen::isa::lookup(triple)
-                .map_err(|e| anyhow!("Failed to create Android ISA: {}", e))?;
-            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
-        }
-        Some("macos") => {
-            let triple = target_lexicon::Triple::from_str("aarch64-apple-darwin")
-                .map_err(|e| anyhow!("Bad triple: {}", e))?;
-            let isa_builder = cranelift::codegen::isa::lookup(triple)
-                .map_err(|e| anyhow!("Failed to create macOS ISA: {}", e))?;
-            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
-        }
-        Some("windows") => {
-            let triple = target_lexicon::Triple::from_str("x86_64-pc-windows-msvc")
-                .map_err(|e| anyhow!("Bad triple: {}", e))?;
-            let isa_builder = cranelift::codegen::isa::lookup(triple)
-                .map_err(|e| anyhow!("Failed to create Windows ISA: {}", e))?;
-            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
-        }
-        _ => {
-            let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("{}", e))?;
-            isa_builder.finish(settings::Flags::new(flag_builder)).map_err(|e| anyhow!("{}", e))?
-        }
-    };
-    let builder = ObjectBuilder::new(isa, "perry_stubs", cranelift_module::default_libcall_names())?;
-    let mut module = ObjectModule::new(builder);
-    const TAG_UNDEF: u64 = 0x7FFC_0000_0000_0001;
+///
+/// Three kinds of stubs are produced:
+///
+/// 1. **Data symbols** — exported `i64` globals initialized to NaN-boxed
+///    `TAG_UNDEFINED`. Used when an `extern` data slot is referenced but
+///    the providing module isn't linked.
+/// 2. **Function symbols** — `double()` functions that return NaN-boxed
+///    `TAG_UNDEFINED`. Used for nullary helpers in standalone mode.
+/// 3. **Identity functions** — `double(double)` functions that pass their
+///    argument through unchanged. Used for `js_await_any_promise` and
+///    similar pass-through points where the V8 runtime is not present.
+///
+/// `target` is a Perry short target name (`macos`, `ios`, `android`,
+/// `linux`, `windows`, …) and is forwarded to clang via `-target` so the
+/// emitted object matches the rest of the link.
+pub fn generate_stub_object(
+    missing_data_symbols: &[String],
+    missing_func_symbols: &[String],
+    identity_func_symbols: &[String],
+    target: Option<&str>,
+) -> Result<Vec<u8>> {
+    let mut ll = String::new();
+
+    // Module header. We do not emit a target triple here — clang infers it
+    // from `-target` (set below) and from the host otherwise. Leaving it
+    // unspecified avoids a "warning: overriding the module target triple"
+    // when the caller passes a non-host target.
+    ll.push_str("; Perry stub object — generated by perry-codegen::stubs\n");
+    ll.push_str("; All stubs use NaN-boxed TAG_UNDEFINED as their value.\n\n");
+
+    // LLVM IR double constants are hex bit patterns: `0x` followed by 16
+    // hex digits, interpreted as the f64's IEEE 754 bit pattern. NaN-boxed
+    // undefined is u64 0x7FFC000000000001.
+    let undef_hex = format!("0x{:016X}", TAG_UNDEFINED);
+
+    // 1. Data symbols — i64 globals (the runtime treats the slot as a raw
+    //    bit pattern and re-interprets via NaN-box accessors).
     for name in missing_data_symbols {
-        let data_id = module.declare_data(name, Linkage::Export, true, false)?;
-        let mut dd = DataDescription::new();
-        dd.define(TAG_UNDEF.to_le_bytes().to_vec().into_boxed_slice());
-        module.define_data(data_id, &dd)?;
+        // global i64 with TAG_UNDEFINED bit pattern
+        ll.push_str(&format!(
+            "@{} = global i64 {}, align 8\n",
+            name, TAG_UNDEFINED as i64
+        ));
     }
+    if !missing_data_symbols.is_empty() {
+        ll.push('\n');
+    }
+
+    // 2. Nullary function stubs — `double name()` returning TAG_UNDEFINED.
     for name in missing_func_symbols {
-        let mut sig = module.make_signature();
-        sig.returns.push(AbiParam::new(types::F64));
-        let func_id = module.declare_function(name, Linkage::Export, &sig)?;
-        let mut ctx = module.make_context();
-        ctx.func.signature = sig;
-        let mut fc = cranelift_frontend::FunctionBuilderContext::new();
-        {
-            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fc);
-            let block = fb.create_block();
-            fb.append_block_params_for_function_params(block);
-            fb.switch_to_block(block);
-            fb.seal_block(block);
-            let undef = fb.ins().f64const(f64::from_bits(TAG_UNDEF));
-            fb.ins().return_(&[undef]);
-            fb.finalize();
-        }
-        module.define_function(func_id, &mut ctx)?;
-        module.clear_context(&mut ctx);
+        ll.push_str(&format!(
+            "define double @{}() {{\n  ret double {}\n}}\n\n",
+            name, undef_hex
+        ));
     }
-    // Identity stubs: fn(f64) -> f64, returns the argument as-is.
-    // Used for functions like js_await_any_promise that should pass through
-    // values in standalone mode (no V8 runtime).
+
+    // 3. Identity functions — `double name(double %0)` returning %0 as-is.
     for name in identity_func_symbols {
-        let mut sig = module.make_signature();
-        sig.params.push(AbiParam::new(types::F64));
-        sig.returns.push(AbiParam::new(types::F64));
-        let func_id = module.declare_function(name, Linkage::Export, &sig)?;
-        let mut ctx = module.make_context();
-        ctx.func.signature = sig;
-        let mut fc = cranelift_frontend::FunctionBuilderContext::new();
-        {
-            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fc);
-            let block = fb.create_block();
-            fb.append_block_params_for_function_params(block);
-            fb.switch_to_block(block);
-            fb.seal_block(block);
-            let arg = fb.block_params(block)[0];
-            fb.ins().return_(&[arg]);
-            fb.finalize();
-        }
-        module.define_function(func_id, &mut ctx)?;
-        module.clear_context(&mut ctx);
+        ll.push_str(&format!(
+            "define double @{}(double %0) {{\n  ret double %0\n}}\n\n",
+            name
+        ));
     }
-    let product = module.finish();
-    Ok(product.emit().map_err(|e| anyhow!("Failed to emit stub object: {}", e))?)
+
+    // If absolutely nothing was requested, emit a single dummy symbol so
+    // the resulting object isn't empty (some linkers complain about empty
+    // objects).
+    if missing_data_symbols.is_empty()
+        && missing_func_symbols.is_empty()
+        && identity_func_symbols.is_empty()
+    {
+        ll.push_str("@__perry_stubs_placeholder = global i64 0, align 8\n");
+    }
+
+    // Resolve the target triple via the same map the rest of the LLVM
+    // backend uses, so a Perry short name like "macos" / "ios" turns into
+    // the right LLVM triple for clang's `-target` flag.
+    let triple = target.and_then(crate::resolve_target_triple);
+
+    compile_ll_to_object(&ll, triple.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_stubs_produce_object() {
+        let bytes = generate_stub_object(&[], &[], &[], None).unwrap();
+        // Object files are not empty and start with a recognizable magic.
+        assert!(bytes.len() > 16, "stub object too small: {} bytes", bytes.len());
+    }
+
+    #[test]
+    fn data_func_and_identity_stubs() {
+        let data = vec!["__missing_data".to_string()];
+        let funcs = vec!["js_missing_helper".to_string()];
+        let id = vec!["js_await_any_promise".to_string()];
+        let bytes = generate_stub_object(&data, &funcs, &id, None).unwrap();
+        assert!(bytes.len() > 64);
+    }
 }

@@ -4,7 +4,7 @@
 // The value is determined at compile time (not runtime) based on the --target flag:
 //   0 = macOS  |  1 = iOS  |  2 = Android  |  3 = Windows  |  4 = Linux
 //
-// Because the value is a compile-time constant, Cranelift constant-folds all
+// Because the value is a compile-time constant, LLVM constant-folds all
 // comparisons and eliminates dead branches — true DCE with zero runtime cost.
 
 declare const __platform__: number;
@@ -17,7 +17,7 @@ export const Platform = {
   LINUX:   4,
 } as const;
 
-// Individual platform booleans — Cranelift folds these to true/false at compile time
+// Individual platform booleans — LLVM folds these to true/false at compile time
 export const isMac     = __platform__ === Platform.MACOS;
 export const isIOS     = __platform__ === Platform.IOS;
 export const isAndroid = __platform__ === Platform.ANDROID;

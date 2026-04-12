@@ -22,11 +22,11 @@ label.setFontFamily("Menlo");
 - `setFontFamily(family: string)` — Set font family (e.g., `"Menlo"` for monospaced)
 - `setAccessibilityLabel(label: string)` — Set accessibility label
 
-Text widgets inside template literals with `State.get()` update automatically:
+Text widgets inside template literals with `state.value` update automatically:
 
 ```typescript
 const count = State(0);
-Text(`Count: ${count.get()}`); // Updates when count changes
+Text(`Count: ${count.value}`); // Updates when count changes
 ```
 
 ## Button

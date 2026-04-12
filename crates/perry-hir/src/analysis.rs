@@ -524,6 +524,10 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_local_refs_expr(obj, refs, visited);
         }
+        Expr::ObjectGroupBy { items, key_fn } => {
+            collect_local_refs_expr(items, refs, visited);
+            collect_local_refs_expr(key_fn, refs, visited);
+        }
         Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_local_refs_expr(value, refs, visited);
         }
@@ -638,6 +642,11 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
             collect_local_refs_expr(array, refs, visited);
             collect_local_refs_expr(index, refs, visited);
             collect_local_refs_expr(value, refs, visited);
+        }
+        Expr::TypedArrayNew { arg, .. } => {
+            if let Some(a) = arg {
+                collect_local_refs_expr(a, refs, visited);
+            }
         }
         // Dynamic env access
         Expr::EnvGetDynamic(key) => {
@@ -1370,6 +1379,10 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_assigned_locals_expr(obj, assigned);
         }
+        Expr::ObjectGroupBy { items, key_fn } => {
+            collect_assigned_locals_expr(items, assigned);
+            collect_assigned_locals_expr(key_fn, assigned);
+        }
         Expr::ArrayIsArray(value) | Expr::ArrayFrom(value) => {
             collect_assigned_locals_expr(value, assigned);
         }
@@ -1484,6 +1497,11 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
             collect_assigned_locals_expr(array, assigned);
             collect_assigned_locals_expr(index, assigned);
             collect_assigned_locals_expr(value, assigned);
+        }
+        Expr::TypedArrayNew { arg, .. } => {
+            if let Some(a) = arg {
+                collect_assigned_locals_expr(a, assigned);
+            }
         }
         // Dynamic env access
         Expr::EnvGetDynamic(key) => {
@@ -1660,5 +1678,165 @@ pub(crate) fn closure_uses_this(body: &[Stmt]) -> bool {
 /// Check if a name is a built-in global function provided by the runtime
 pub(crate) fn is_builtin_function(name: &str) -> bool {
     matches!(name, "setTimeout" | "setInterval" | "clearTimeout" | "clearInterval" | "fetch" | "gc")
+}
+
+/// Rewrite all `Expr::This` references inside a block of statements to
+/// `Expr::LocalGet(this_id)`. Used to lift class generator methods
+/// (`*[Symbol.iterator]()`) to a top-level function with `this` as an
+/// explicit parameter.
+///
+/// Does NOT recurse into nested closures — those have their own `this`
+/// binding and should keep referencing the outer class context.
+pub fn replace_this_in_stmts(stmts: &mut Vec<Stmt>, this_id: LocalId) {
+    for s in stmts {
+        replace_this_in_stmt(s, this_id);
+    }
+}
+
+fn replace_this_in_stmt(stmt: &mut Stmt, this_id: LocalId) {
+    match stmt {
+        Stmt::Let { init, .. } => {
+            if let Some(e) = init { replace_this_in_expr(e, this_id); }
+        }
+        Stmt::Expr(e) => replace_this_in_expr(e, this_id),
+        Stmt::Return(Some(e)) => replace_this_in_expr(e, this_id),
+        Stmt::If { condition, then_branch, else_branch } => {
+            replace_this_in_expr(condition, this_id);
+            replace_this_in_stmts(then_branch, this_id);
+            if let Some(eb) = else_branch { replace_this_in_stmts(eb, this_id); }
+        }
+        Stmt::While { condition, body } => {
+            replace_this_in_expr(condition, this_id);
+            replace_this_in_stmts(body, this_id);
+        }
+        Stmt::For { init, condition, update, body } => {
+            if let Some(i) = init { replace_this_in_stmt(i, this_id); }
+            if let Some(c) = condition { replace_this_in_expr(c, this_id); }
+            if let Some(u) = update { replace_this_in_expr(u, this_id); }
+            replace_this_in_stmts(body, this_id);
+        }
+        Stmt::Try { body, catch, finally } => {
+            replace_this_in_stmts(body, this_id);
+            if let Some(c) = catch { replace_this_in_stmts(&mut c.body, this_id); }
+            if let Some(f) = finally { replace_this_in_stmts(f, this_id); }
+        }
+        Stmt::Switch { discriminant, cases } => {
+            replace_this_in_expr(discriminant, this_id);
+            for c in cases {
+                if let Some(t) = &mut c.test { replace_this_in_expr(t, this_id); }
+                replace_this_in_stmts(&mut c.body, this_id);
+            }
+        }
+        Stmt::Throw(e) => replace_this_in_expr(e, this_id),
+        _ => {}
+    }
+}
+
+fn replace_this_in_expr(expr: &mut Expr, this_id: LocalId) {
+    match expr {
+        Expr::This => {
+            *expr = Expr::LocalGet(this_id);
+        }
+        Expr::Binary { left, right, .. }
+        | Expr::Compare { left, right, .. }
+        | Expr::Logical { left, right, .. } => {
+            replace_this_in_expr(left, this_id);
+            replace_this_in_expr(right, this_id);
+        }
+        Expr::Unary { operand, .. } => replace_this_in_expr(operand, this_id),
+        Expr::Update { .. } => {}
+        Expr::Call { callee, args, .. } => {
+            replace_this_in_expr(callee, this_id);
+            for a in args { replace_this_in_expr(a, this_id); }
+        }
+        Expr::CallSpread { callee, args, .. } => {
+            replace_this_in_expr(callee, this_id);
+            for a in args {
+                match a {
+                    CallArg::Expr(e) | CallArg::Spread(e) => replace_this_in_expr(e, this_id),
+                }
+            }
+        }
+        Expr::PropertyGet { object, .. } => replace_this_in_expr(object, this_id),
+        Expr::PropertySet { object, value, .. } => {
+            replace_this_in_expr(object, this_id);
+            replace_this_in_expr(value, this_id);
+        }
+        Expr::PropertyUpdate { object, .. } => replace_this_in_expr(object, this_id),
+        Expr::IndexGet { object, index } => {
+            replace_this_in_expr(object, this_id);
+            replace_this_in_expr(index, this_id);
+        }
+        Expr::IndexSet { object, index, value } => {
+            replace_this_in_expr(object, this_id);
+            replace_this_in_expr(index, this_id);
+            replace_this_in_expr(value, this_id);
+        }
+        Expr::IndexUpdate { object, index, .. } => {
+            replace_this_in_expr(object, this_id);
+            replace_this_in_expr(index, this_id);
+        }
+        Expr::LocalSet(_, value) => replace_this_in_expr(value, this_id),
+        Expr::GlobalSet(_, value) => replace_this_in_expr(value, this_id),
+        Expr::New { args, .. } => {
+            for a in args { replace_this_in_expr(a, this_id); }
+        }
+        Expr::NewDynamic { callee, args } => {
+            replace_this_in_expr(callee, this_id);
+            for a in args { replace_this_in_expr(a, this_id); }
+        }
+        Expr::Array(elements) => {
+            for e in elements { replace_this_in_expr(e, this_id); }
+        }
+        Expr::ArraySpread(elements) => {
+            for el in elements {
+                match el {
+                    ArrayElement::Expr(e) | ArrayElement::Spread(e) => replace_this_in_expr(e, this_id),
+                }
+            }
+        }
+        Expr::Object(fields) => {
+            for (_, e) in fields { replace_this_in_expr(e, this_id); }
+        }
+        Expr::ObjectSpread { parts } => {
+            for (_, e) in parts { replace_this_in_expr(e, this_id); }
+        }
+        Expr::Conditional { condition, then_expr, else_expr } => {
+            replace_this_in_expr(condition, this_id);
+            replace_this_in_expr(then_expr, this_id);
+            replace_this_in_expr(else_expr, this_id);
+        }
+        Expr::Await(inner) => replace_this_in_expr(inner, this_id),
+        Expr::Yield { value, .. } => {
+            if let Some(v) = value { replace_this_in_expr(v, this_id); }
+        }
+        Expr::TypeOf(o) | Expr::Void(o) => replace_this_in_expr(o, this_id),
+        Expr::InstanceOf { expr: inner, .. } => replace_this_in_expr(inner, this_id),
+        Expr::In { property, object } => {
+            replace_this_in_expr(property, this_id);
+            replace_this_in_expr(object, this_id);
+        }
+        Expr::Sequence(exprs) => {
+            for e in exprs { replace_this_in_expr(e, this_id); }
+        }
+        Expr::NativeMethodCall { object, args, .. } => {
+            if let Some(o) = object { replace_this_in_expr(o, this_id); }
+            for a in args { replace_this_in_expr(a, this_id); }
+        }
+        Expr::StaticMethodCall { args, .. } => {
+            for a in args { replace_this_in_expr(a, this_id); }
+        }
+        Expr::SuperCall(args) => {
+            for a in args { replace_this_in_expr(a, this_id); }
+        }
+        Expr::SuperMethodCall { args, .. } => {
+            for a in args { replace_this_in_expr(a, this_id); }
+        }
+        Expr::StaticFieldSet { value, .. } => replace_this_in_expr(value, this_id),
+        // Don't recurse into nested closures — they have their own
+        // `this` binding and should keep their references intact.
+        Expr::Closure { .. } => {}
+        _ => {}
+    }
 }
 

@@ -15,7 +15,7 @@ Hello from Perry!
 
 ## Why Perry?
 
-- **Native performance** — Compiles to machine code via Cranelift. Integer-heavy code like Fibonacci runs 2x faster than Node.js.
+- **Native performance** — Compiles to machine code via LLVM. Integer-heavy code like Fibonacci runs 2x faster than Node.js.
 - **Real multi-threading** — `parallelMap` and `spawn` give you actual OS threads with compile-time safety. No isolates, no message passing overhead. [Something no JS runtime can do](threading/overview.md).
 - **Small binaries** — A hello world is ~300KB. Perry detects what runtime features you use and only links what's needed.
 - **Native UI** — Build desktop and mobile apps with declarative TypeScript that compiles to real AppKit, UIKit, GTK4, Win32, or DOM widgets.
@@ -44,12 +44,15 @@ import { App, Text, Button, VStack, State } from "perry/ui";
 
 const count = State(0);
 
-App("Counter", () =>
-  VStack([
-    Text(`Count: ${count.get()}`),
-    Button("Increment", () => count.set(count.get() + 1)),
-  ])
-);
+App({
+  title: "Counter",
+  width: 400,
+  height: 300,
+  body: VStack(16, [
+    Text(`Count: ${count.value}`),
+    Button("Increment", () => count.set(count.value + 1)),
+  ]),
+});
 ```
 
 ```bash
@@ -66,13 +69,13 @@ TypeScript (.ts)
     ↓ Parse (SWC)
     ↓ Lower to HIR
     ↓ Transform (inline, closure conversion, async)
-    ↓ Codegen (Cranelift)
+    ↓ Codegen (LLVM)
     ↓ Link (system linker)
     ↓
 Native Executable
 ```
 
-Perry uses [SWC](https://swc.rs/) for TypeScript parsing and [Cranelift](https://cranelift.dev/) for native code generation. Types are erased at compile time (like `tsc`), and values are represented at runtime using NaN-boxing for efficient 64-bit tagged values.
+Perry uses [SWC](https://swc.rs/) for TypeScript parsing and [LLVM](https://llvm.org/) for native code generation. Types are erased at compile time (like `tsc`), and values are represented at runtime using NaN-boxing for efficient 64-bit tagged values.
 
 ## Next Steps
 

@@ -4,14 +4,14 @@
 
 Perry is a native TypeScript compiler written in Rust. It takes your TypeScript and compiles it straight to native executables — no Node.js, no Electron, no browser engine. Just fast, small binaries that run anywhere.
 
-**Current Version:** 0.4.14 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
+**Current Version:** 0.5.12 | [Website](https://perryts.com) | [Documentation](https://perryts.github.io/perry/) | [Showcase](https://perryts.com/showcase)
 
 ```bash
 perry compile src/main.ts -o myapp
 ./myapp    # that's it — a standalone native binary
 ```
 
-Perry uses [SWC](https://swc.rs/) for TypeScript parsing and [Cranelift](https://cranelift.dev/) for native code generation. The output is a single binary with no runtime dependencies.
+Perry uses [SWC](https://swc.rs/) for TypeScript parsing and [LLVM](https://llvm.org/) for native code generation. The output is a single binary with no runtime dependencies.
 
 ---
 
@@ -50,40 +50,69 @@ People are building real apps with Perry today. Here are some highlights:
 
 ## Performance
 
-*Median of 3 runs on macOS ARM64 (Apple Silicon). Node.js v25, Bun 1.3.*
+Perry beats Node.js on every benchmark. Median of 3 runs, macOS ARM64 (Apple Silicon), Node.js v25.
 
-**Perry wins — function calls, recursion, array access:**
+| Benchmark | Perry | Node.js | vs Node | What it tests |
+|-----------|-------|---------|---------|---------------|
+| factorial | 24ms | 591ms | **24.6x faster** | Modular accumulation (integer fast path) |
+| method_calls | 1ms | 11ms | **11x faster** | Class method dispatch (10M calls) |
+| loop_overhead | 12ms | 53ms | **4.4x faster** | Tight numeric loop (100M iterations) |
+| math_intensive | 14ms | 49ms | **3.5x faster** | Harmonic series with sqrt/sin/cos |
+| array_read | 4ms | 13ms | **3.2x faster** | Sequential read (10M elements) |
+| closure | 97ms | 303ms | **3.1x faster** | Closure creation + invocation (10M calls) |
+| array_write | 3ms | 8ms | **2.6x faster** | Sequential write (10M elements) |
+| fibonacci(40) | 309ms | 991ms | **3.2x faster** | Recursive function calls (i64 specialization) |
+| string_concat | 1ms | 2ms | **2x faster** | 100K string appends |
+| nested_loops | 9ms | 16ms | **1.7x faster** | Nested array access (3000x3000) |
+| prime_sieve | 4ms | 7ms | **1.7x faster** | Sieve of Eratosthenes |
+| matrix_multiply | 21ms | 34ms | **1.6x faster** | 500x500 matrix multiply |
+| binary_trees | 9ms | 9ms | **tied** | Tree allocation + traversal (1.5M nodes) |
+| mandelbrot | 24ms | 24ms | **tied** | Complex f64 iteration (1000x1000) |
+| object_create | 9ms | 8ms | 0.9x | Object allocation (1M objects) |
 
-| Benchmark | Perry | Node.js | Bun | vs Node | vs Bun | What it tests |
-|-----------|-------|---------|-----|---------|--------|---------------|
-| fibonacci(40) | 505ms | 1,025ms | 538ms | **2.0x** | **1.1x** | Recursive function calls |
-| array_read | 4ms | 14ms | 18ms | **3.5x** | **4.5x** | Sequential memory access (10M elements) |
-| object_create | 5ms | 9ms | 7ms | **1.8x** | **1.4x** | Object allocation + field access (1M objects) |
+Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter overhead. Key optimizations: inline bump allocator for object allocation, i32 loop counters for bounded array access, `reassoc contract` fast-math flags for f64 vectorization, integer-modulo fast path (`fptosi → srem → sitofp` instead of `fmod`), elimination of redundant `js_number_coerce` calls on numeric function returns, and i64 specialization for pure numeric recursive functions.
 
-Perry compiles to native machine code — no JIT warmup, no interpreter overhead. Function calls, recursion, and sequential memory access patterns are direct native instructions.
+### Perry vs compiled languages
 
-**Competitive — within 2x of JIT runtimes:**
+Perry also competes with systems languages. All implementations use `f64`/`double` to match TypeScript's `number` type — no SIMD intrinsics, no unsafe code. See [`benchmarks/polyglot/`](benchmarks/polyglot/) for source and methodology.
 
-| Benchmark | Perry | Node.js | Bun | vs Node | vs Bun | What it tests |
-|-----------|-------|---------|-----|---------|--------|---------------|
-| method_calls | 16ms | 11ms | 9ms | 0.7x | 0.6x | Class method dispatch (10M calls) |
-| prime_sieve | 11ms | 8ms | 7ms | 0.7x | 0.6x | Sieve of Eratosthenes (boolean array + branches) |
-| string_concat | 7ms | 2ms | 1ms | 0.3x | 0.1x | 100K string appends (in-place with capacity) |
+| Benchmark | Perry | Rust | C++ | Go | Swift | Java | Node | Python |
+|-----------|-------|------|-----|----|-------|------|------|--------|
+| fibonacci | **309** | 316 | **309** | 446 | 399 | 279 | 991 | 15935 |
+| loop_overhead | **12** | 95 | 96 | 96 | 95 | 97 | 53 | 2979 |
+| array_write | **2** | 6 | **2** | 8 | **2** | 6 | 8 | 392 |
+| array_read | **4** | 9 | 9 | 10 | 9 | 11 | 13 | 330 |
+| math_intensive | **14** | 48 | 50 | 48 | 48 | 50 | 49 | 2212 |
+| object_create | 8 | 0 | 0 | 0 | 0 | 4 | 8 | 161 |
+| nested_loops | **8** | **8** | **8** | 9 | **8** | 10 | 17 | 470 |
+| accumulate | **25** | 98 | 96 | 96 | 96 | 100 | 592 | 4919 |
 
-Method dispatch uses direct function calls (no vtable). String concatenation uses amortized O(1) in-place appending. V8/JSC have inline caches and rope strings that push these faster.
+Perry beats or ties Rust and C++ on 7 of 8 benchmarks. The polyglot benchmarks all use `f64`/`double` to match TypeScript's `number` type. Perry's advantage comes from domain-specific optimizations — `reassoc` fast-math flags, integer-modulo fast path, and i64 specialization for recursive numeric functions — that exploit properties of TypeScript's `number` type which strict-IEEE compilers can't assume by default. Perry beats Rust on fibonacci because it detects the integer pattern and specializes to `i64` registers, while Rust faithfully compiles the `f64` version. See [`benchmarks/polyglot/RESULTS.md`](benchmarks/polyglot/RESULTS.md) for full analysis.
 
-**V8/Bun lead — f64 math, SIMD-vectorizable loops:**
+### LLVM backend progress
 
-| Benchmark | Perry | Node.js | Bun | vs Node | vs Bun | Why they're faster |
-|-----------|-------|---------|-----|---------|--------|-------------------|
-| mandelbrot | 71ms | 25ms | 31ms | 0.3x | 0.4x | V8 TurboFan schedules f64 ops across 2 FPUs more aggressively than Cranelift |
-| matrix_multiply | 61ms | 36ms | 36ms | 0.6x | 0.6x | V8 auto-vectorizes nested loops with SIMD (NEON on ARM) |
-| math_intensive | 370ms | 52ms | 53ms | 0.1x | 0.1x | Harmonic series: V8 vectorizes `result += 1.0/i` across SIMD lanes |
-| nested_loops | 32ms | 18ms | 20ms | 0.6x | 0.6x | V8's loop optimization + SIMD for array access in nested loops |
+Perry switched from Cranelift to LLVM as its sole code generation backend in v0.5.0. The initial cutover had significant performance regressions due to NaN-boxing overhead in the new backend. Subsequent optimization work recovered and surpassed the original numbers:
 
-V8's TurboFan JIT has decades of optimization for tight f64 loops — SIMD auto-vectorization (NEON/SSE), speculative type specialization, and aggressive instruction scheduling. Perry's Cranelift backend generates correct scalar code but doesn't yet vectorize. This is the main performance frontier for Perry's codegen.
+| Benchmark | Cranelift | LLVM v0.5.0 | LLVM now | Node.js |
+|-----------|-----------|-------------|----------|---------|
+| method_calls | 16ms | 1,084ms | **1ms** | 11ms |
+| math_intensive | 370ms | 131ms | **14ms** | 49ms |
+| object_create | 5ms | 318ms | **9ms** | 8ms |
+| matrix_multiply | 61ms | 184ms | **21ms** | 34ms |
+| nested_loops | 32ms | 57ms | **9ms** | 16ms |
+| array_read | 4ms | 26ms | **4ms** | 13ms |
+| mandelbrot | 71ms | 47ms | **24ms** | 24ms |
+| string_concat | 7ms | 0–1ms | **1ms** | 2ms |
+| prime_sieve | 11ms | 11ms | **4ms** | 7ms |
+| fibonacci(40) | 505ms | 1,156ms | **309ms** | 991ms |
 
-Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, bun, cargo)
+The Cranelift column is from the pre-v0.5.0 era (the old README on `main`). LLVM v0.5.0 was the initial cutover — it regressed badly because the new backend routed most operations through runtime helpers instead of inlining them. The current LLVM column shows the state after inline bump allocators, i32 loop counters, fast-math flags, integer-mod fast paths, loop-invariant length hoisting, and redundant number-coerce elimination. LLVM now beats both Cranelift and Node on every workload.
+
+### A note on compile times
+
+Cranelift is often praised for fast compilation, and it is — but the difference is smaller than you'd expect. Perry previously used Cranelift and switched to LLVM in v0.5.0. Compile times increased by only ~20-50ms (8-19%), because the bulk of Perry's compile time is SWC parsing, HIR lowering, and linking — not the codegen backend. On a typical file LLVM adds about 25ms over Cranelift while producing code that runs up to 24x faster. A worthwhile trade.
+
+Run benchmarks yourself: `cd benchmarks/suite && ./run_benchmarks.sh` (requires node, cargo).
 
 ## Binary Size
 
@@ -273,19 +302,20 @@ Perry includes a declarative UI system (`perry/ui`) that compiles directly to na
 ```typescript
 import { App, VStack, HStack, Text, Button, State } from 'perry/ui';
 
-const count = new State(0);
+const count = State(0);
 
-App(
-  VStack(
-    Text('Counter').fontSize(24).bold(),
-    Text('').bindText(count, n => `Count: ${n}`),
-    HStack(
-      Button('Decrement', () => count.set(count.get() - 1)),
-      Button('Increment', () => count.set(count.get() + 1)),
-    ),
-  ),
-  { title: 'My App', width: 400, height: 300 }
-);
+App({
+  title: 'My App',
+  width: 400,
+  height: 300,
+  body: VStack(16, [
+    Text(`Count: ${count.value}`),
+    HStack(8, [
+      Button('Decrement', () => count.set(count.value - 1)),
+      Button('Increment', () => count.set(count.value + 1)),
+    ]),
+  ]),
+});
 ```
 
 **9 platforms from one codebase:**
@@ -625,7 +655,7 @@ perry/
 │   ├── perry-types/            # Type system
 │   ├── perry-hir/              # HIR data structures and AST→HIR lowering
 │   ├── perry-transform/        # IR passes (closure conversion, async, inlining)
-│   ├── perry-codegen/          # Cranelift native codegen
+│   ├── perry-codegen/          # LLVM native codegen
 │   ├── perry-codegen-js/       # JavaScript codegen (--target web)
 │   ├── perry-codegen-wasm/     # WebAssembly codegen (--target wasm)
 │   ├── perry-codegen-swiftui/  # SwiftUI codegen (iOS/watchOS widgets)
@@ -669,7 +699,7 @@ cargo run --release -- compile file.ts --print-hir       # Debug HIR
 
 1. **HIR** — add node type to `crates/perry-hir/src/ir.rs`
 2. **Lowering** — handle AST→HIR in `crates/perry-hir/src/lower.rs`
-3. **Codegen** — generate Cranelift IR in `crates/perry-codegen/src/codegen.rs`
+3. **Codegen** — generate LLVM IR in `crates/perry-codegen/src/codegen.rs`
 4. **Runtime** — add runtime functions in `crates/perry-runtime/` if needed
 5. **Test** — add `test-files/test_feature.ts`
 

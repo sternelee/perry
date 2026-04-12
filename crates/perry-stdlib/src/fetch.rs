@@ -484,10 +484,16 @@ pub extern "C" fn js_fetch_response_ok(handle: i64) -> f64 {
 
 /// Get response body as text
 /// response.text() -> Promise<string>
+///
+/// The body is already in-memory at the point of the call, so resolve
+/// the promise synchronously via `js_promise_resolve` rather than
+/// routing through the deferred `PENDING_RESOLUTIONS` queue. This
+/// avoids a hang in the LLVM backend's await loop (which does not
+/// drain the pump — see `crates/perry-codegen/src/expr.rs`
+/// `Expr::Await` for the rationale).
 #[no_mangle]
 pub unsafe extern "C" fn js_fetch_response_text(handle: i64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let promise_ptr = promise as usize;
     let response_id = handle as usize;
 
     // Clone the body — JS spec says each body is readable once, but other
@@ -501,19 +507,18 @@ pub unsafe extern "C" fn js_fetch_response_text(handle: i64) -> *mut perry_runti
             None => {
                 let err_msg = "Invalid response handle";
                 let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                let err_nan = f64::from_bits(JSValue::pointer(err_str as *const u8).bits());
+                perry_runtime::js_promise_reject(promise, err_nan);
                 return promise;
             }
         }
     };
 
-    // Convert body to string
+    // Convert body to string and resolve synchronously.
     let text = String::from_utf8_lossy(&body).to_string();
     let result_str = js_string_from_bytes(text.as_ptr(), text.len() as u32);
-    let result_bits = JSValue::string_ptr(result_str).bits();
-    queue_promise_resolution(promise_ptr, true, result_bits);
-
+    let result_nan = f64::from_bits(JSValue::string_ptr(result_str).bits());
+    perry_runtime::js_promise_resolve(promise, result_nan);
     promise
 }
 
@@ -565,7 +570,6 @@ unsafe fn json_value_to_jsvalue(value: &serde_json::Value) -> JSValue {
 #[no_mangle]
 pub unsafe extern "C" fn js_fetch_response_json(handle: i64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let promise_ptr = promise as usize;
     let response_id = handle as usize;
 
     // Take (not clone) the body — consumes the FETCH_RESPONSES entry.
@@ -576,25 +580,27 @@ pub unsafe extern "C" fn js_fetch_response_json(handle: i64) -> *mut perry_runti
             None => {
                 let err_msg = "Invalid response handle";
                 let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
-                queue_promise_resolution(promise_ptr, false, err_bits);
+                let err_nan = f64::from_bits(JSValue::pointer(err_str as *const u8).bits());
+                perry_runtime::js_promise_reject(promise, err_nan);
                 return promise;
             }
         }
     };
 
-    // Convert body to string and parse as JSON
+    // Convert body to string and parse as JSON. Resolve the promise
+    // synchronously — see comment on `js_fetch_response_text`.
     let text = String::from_utf8_lossy(&body).to_string();
     match serde_json::from_str::<serde_json::Value>(&text) {
         Ok(json_value) => {
             let js_value = json_value_to_jsvalue(&json_value);
-            queue_promise_resolution(promise_ptr, true, js_value.bits());
+            let result_nan = f64::from_bits(js_value.bits());
+            perry_runtime::js_promise_resolve(promise, result_nan);
         }
         Err(e) => {
             let err_msg = format!("JSON parse error: {}", e);
             let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
-            queue_promise_resolution(promise_ptr, false, err_bits);
+            let err_nan = f64::from_bits(JSValue::pointer(err_str as *const u8).bits());
+            perry_runtime::js_promise_reject(promise, err_nan);
         }
     }
 
@@ -1006,11 +1012,12 @@ pub extern "C" fn js_response_clone(handle: f64) -> f64 {
 }
 
 /// response.arrayBuffer() — returns an object { byteLength: N, __isArrayBuffer: true }
-/// (Wrapped in a Promise via codegen await.)
+/// (Wrapped in a Promise via codegen await.) Resolved synchronously so
+/// the LLVM backend's await loop (which doesn't pump deferred
+/// resolutions) doesn't hang. See `js_fetch_response_text` for rationale.
 #[no_mangle]
 pub unsafe extern "C" fn js_response_array_buffer(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let promise_ptr = promise as usize;
     let id = handle as usize;
     let body_len = {
         let guard = FETCH_RESPONSES.lock().unwrap();
@@ -1024,15 +1031,15 @@ pub unsafe extern "C" fn js_response_array_buffer(handle: f64) -> *mut perry_run
     let obj = js_object_alloc_with_shape(0x7FFE_FE01, 1, packed, 11);
     perry_runtime::js_object_set_field(obj, 0, JSValue::number(body_len as f64));
     let val = JSValue::object_ptr(obj as *mut u8);
-    queue_promise_resolution(promise_ptr, true, val.bits());
+    perry_runtime::js_promise_resolve(promise, f64::from_bits(val.bits()));
     promise
 }
 
 /// response.blob() — returns an object { size: N, type: "..." }
+/// Resolved synchronously; see `js_fetch_response_text`.
 #[no_mangle]
 pub unsafe extern "C" fn js_response_blob(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
-    let promise_ptr = promise as usize;
     let id = handle as usize;
     let (body_len, content_type) = {
         let guard = FETCH_RESPONSES.lock().unwrap();
@@ -1053,7 +1060,7 @@ pub unsafe extern "C" fn js_response_blob(handle: f64) -> *mut perry_runtime::Pr
     let type_str = js_string_from_bytes(content_type.as_ptr(), content_type.len() as u32);
     perry_runtime::js_object_set_field(obj, 1, JSValue::string_ptr(type_str));
     let val = JSValue::object_ptr(obj as *mut u8);
-    queue_promise_resolution(promise_ptr, true, val.bits());
+    perry_runtime::js_promise_resolve(promise, f64::from_bits(val.bits()));
     promise
 }
 

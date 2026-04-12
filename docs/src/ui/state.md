@@ -17,7 +17,7 @@ const items = State<string[]>([]); // array state
 ## Reading and Writing
 
 ```typescript
-const value = count.get();  // Read current value
+const value = count.value;  // Read current value
 count.set(42);              // Set new value → triggers UI update
 ```
 
@@ -25,17 +25,17 @@ Every `.set()` call re-renders the widget tree with the new value.
 
 ## Reactive Text
 
-Template literals with `state.get()` update automatically:
+Template literals with `state.value` update automatically:
 
 ```typescript
 import { Text, State } from "perry/ui";
 
 const count = State(0);
-Text(`Count: ${count.get()}`);
+Text(`Count: ${count.value}`);
 // The text updates whenever count changes
 ```
 
-This works because Perry detects `State.get()` calls inside template literals and creates reactive bindings.
+This works because Perry detects `state.value` reads inside template literals and creates reactive bindings.
 
 ## Two-Way Binding
 
@@ -47,7 +47,7 @@ import { TextField, State } from "perry/ui";
 const input = State("");
 TextField(input, "Type here...");
 
-// input.get() always reflects what the user typed
+// input.value always reflects what the user typed
 // input.set("hello") updates the text field
 ```
 
@@ -73,28 +73,33 @@ count.onChange((newValue) => {
 
 ## ForEach
 
-Render a list from array state:
+Render a list from numeric state (the index count):
 
 ```typescript
 import { VStack, Text, ForEach, State } from "perry/ui";
 
 const items = State(["Apple", "Banana", "Cherry"]);
+const itemCount = State(3);
 
-VStack([
-  ForEach(items, (item, index) =>
-    Text(`${index + 1}. ${item}`)
+VStack(16, [
+  ForEach(itemCount, (i: number) =>
+    Text(`${i + 1}. ${items.value[i]}`)
   ),
 ]);
 ```
 
-`ForEach` re-renders the list when the state changes:
+> **Note:** `ForEach` iterates by index over a numeric state. Keep a count state in sync with your array, then read the items via `array.value[i]` inside the closure.
+
+`ForEach` re-renders the list when the count state changes:
 
 ```typescript
 // Add an item
-items.set([...items.get(), "Date"]);
+items.set([...items.value, "Date"]);
+itemCount.set(itemCount.value + 1);
 
 // Remove an item
-items.set(items.get().filter((_, i) => i !== 1));
+items.set(items.value.filter((_, i) => i !== 1));
+itemCount.set(itemCount.value - 1);
 ```
 
 ## Conditional Rendering
@@ -106,9 +111,9 @@ import { VStack, Text, Button, State } from "perry/ui";
 
 const showDetails = State(false);
 
-VStack([
-  Button("Toggle", () => showDetails.set(!showDetails.get())),
-  showDetails.get() ? Text("Details are visible!") : Spacer(),
+VStack(16, [
+  Button("Toggle", () => showDetails.set(!showDetails.value)),
+  showDetails.value ? Text("Details are visible!") : Spacer(),
 ]);
 ```
 
@@ -120,7 +125,7 @@ Text can depend on multiple state values:
 const firstName = State("John");
 const lastName = State("Doe");
 
-Text(`Hello, ${firstName.get()} ${lastName.get()}!`);
+Text(`Hello, ${firstName.value} ${lastName.value}!`);
 // Updates when either firstName or lastName changes
 ```
 
@@ -130,15 +135,15 @@ Text(`Hello, ${firstName.get()} ${lastName.get()}!`);
 const user = State({ name: "Perry", age: 0 });
 
 // Update by replacing the whole object
-user.set({ ...user.get(), age: 1 });
+user.set({ ...user.value, age: 1 });
 
 const todos = State<{ text: string; done: boolean }[]>([]);
 
 // Add a todo
-todos.set([...todos.get(), { text: "New task", done: false }]);
+todos.set([...todos.value, { text: "New task", done: false }]);
 
 // Toggle a todo
-const items = todos.get();
+const items = todos.value;
 items[0].done = !items[0].done;
 todos.set([...items]);
 ```
@@ -151,18 +156,23 @@ todos.set([...items]);
 import { App, Text, Button, TextField, VStack, HStack, State, ForEach, Spacer, Divider } from "perry/ui";
 
 const todos = State<string[]>([]);
+const count = State(0);
 const input = State("");
 
-App("Todo App", () =>
-  VStack([
+App({
+  title: "Todo App",
+  width: 480,
+  height: 600,
+  body: VStack(16, [
     Text("My Todos"),
 
-    HStack([
+    HStack(8, [
       TextField(input, "What needs to be done?"),
       Button("Add", () => {
-        const text = input.get();
+        const text = input.value;
         if (text.length > 0) {
-          todos.set([...todos.get(), text]);
+          todos.set([...todos.value, text]);
+          count.set(count.value + 1);
           input.set("");
         }
       }),
@@ -170,20 +180,21 @@ App("Todo App", () =>
 
     Divider(),
 
-    ForEach(todos, (todo, index) =>
-      HStack([
-        Text(todo),
+    ForEach(count, (i: number) =>
+      HStack(8, [
+        Text(todos.value[i]),
         Spacer(),
         Button("Delete", () => {
-          todos.set(todos.get().filter((_, i) => i !== index));
+          todos.set(todos.value.filter((_, idx) => idx !== i));
+          count.set(count.value - 1);
         }),
       ])
     ),
 
     Spacer(),
-    Text(`${todos.get().length} items`),
-  ])
-);
+    Text(`${count.value} items`),
+  ]),
+});
 ```
 
 ## Next Steps

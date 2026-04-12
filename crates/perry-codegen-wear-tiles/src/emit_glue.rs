@@ -1,4 +1,4 @@
-//! JNI bridge generation for native Cranelift-compiled widget providers on Wear OS
+//! JNI bridge generation for native LLVM-compiled widget providers on Wear OS
 //!
 //! Generates Kotlin code that loads the native library and calls the provider function.
 //! Same pattern as phone Glance widgets — Wear OS is Android.

@@ -110,7 +110,7 @@ When you run `perry file.ts -o output`, Perry:
 1. Parses your TypeScript with SWC
 2. Lowers the AST to an intermediate representation (HIR)
 3. Applies optimizations (inlining, closure conversion, etc.)
-4. Generates native machine code with Cranelift
+4. Generates native machine code with LLVM
 5. Links with your system's C compiler
 
 The result is a standalone executable with no external dependencies.

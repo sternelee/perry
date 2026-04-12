@@ -197,6 +197,21 @@ pub extern "C" fn perry_ui_textfield_create(placeholder_ptr: i64, on_change: f64
 }
 
 #[no_mangle]
+pub extern "C" fn perry_ui_textarea_create(placeholder_ptr: i64, on_change: f64) -> i64 {
+    widgets::textarea::create(placeholder_ptr as *const u8, on_change)
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_set_string(handle: i64, text_ptr: i64) {
+    widgets::textarea::set_string(handle, text_ptr as *const u8);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_ui_textarea_get_string(handle: i64) -> i64 {
+    widgets::textarea::get_string(handle) as i64
+}
+
+#[no_mangle]
 pub extern "C" fn perry_ui_toggle_create(label_ptr: i64, on_change: f64) -> i64 {
     widgets::toggle::create(label_ptr as *const u8, on_change)
 }

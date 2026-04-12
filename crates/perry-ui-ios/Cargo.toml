@@ -44,6 +44,7 @@ objc2-ui-kit = { version = "0.3", features = [
     "UISlider",
     "UIScrollView",
     "UITextField",
+    "UITextView",
     "UIColor",
     "UIFont",
     "UIControl",

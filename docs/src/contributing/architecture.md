@@ -11,7 +11,7 @@ TypeScript (.ts)
     ↓ Lower (perry-hir)
     ↓ HIR (High-level IR)
     ↓ Transform (inline, closure conversion, async lowering)
-    ↓ Codegen (Cranelift)
+    ↓ Codegen (LLVM)
     ↓ Object file (.o)
     ↓ Link (system cc)
     ↓
@@ -27,7 +27,7 @@ Native Executable
 | `perry-types` | Type system definitions |
 | `perry-hir` | HIR data structures (`ir.rs`) and AST→HIR lowering (`lower.rs`) |
 | `perry-transform` | IR passes: function inlining, closure conversion, async lowering |
-| `perry-codegen` | Cranelift-based native code generation (12 modules) |
+| `perry-codegen-llvm` | LLVM-based native code generation |
 | `perry-codegen-wasm` | WebAssembly code generation for `--target web` / `--target wasm` (HIR → WASM bytecode + JS bridge) |
 | `perry-codegen-js` | Legacy JavaScript code generator (still present for the JS minifier; the JS-emit `--target web` path was consolidated into `perry-codegen-wasm`) |
 | `perry-codegen-swiftui` | SwiftUI code generation for WidgetKit extensions |
@@ -63,10 +63,10 @@ UI widgets are represented as small integer handles NaN-boxed with `POINTER_TAG`
 
 ## Source Code Organization
 
-The codegen crate was split into 12 focused modules:
+The codegen crate is organized into focused modules:
 
 ```
-perry-codegen/src/
+perry-codegen-llvm/src/
   codegen.rs       # Main entry, module compilation
   types.rs         # Type definitions, context structs
   util.rs          # Helper functions

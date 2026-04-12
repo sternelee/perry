@@ -7,11 +7,14 @@ Perry's `perry/ui` module lets you build native desktop and mobile apps with dec
 ```typescript
 import { App, Text, VStack } from "perry/ui";
 
-App("My App", () =>
-  VStack([
+App({
+  title: "My App",
+  width: 400,
+  height: 300,
+  body: VStack(16, [
     Text("Hello from Perry!"),
-  ])
-);
+  ]),
+});
 ```
 
 ```bash
@@ -25,14 +28,13 @@ Every Perry UI app starts with `App()`:
 ```typescript
 import { App, VStack, Text } from "perry/ui";
 
-const body = VStack(10);
-body.addChild(Text("Content here"));
-
 App({
   title: "Window Title",
   width: 800,
   height: 600,
-  body: body,
+  body: VStack(16, [
+    Text("Content here"),
+  ]),
 });
 ```
 
@@ -66,7 +68,7 @@ onTerminate(() => {
   console.log("App is closing");
 });
 
-App("My App", () => { /* ... */ });
+App({ title: "My App", width: 800, height: 600, body: /* ... */ });
 ```
 
 ## Widget Tree
@@ -76,19 +78,22 @@ Perry UIs are built as a tree of widgets:
 ```typescript
 import { App, Text, Button, VStack, HStack } from "perry/ui";
 
-App("Layout Demo", () =>
-  VStack([
+App({
+  title: "Layout Demo",
+  width: 400,
+  height: 300,
+  body: VStack(16, [
     Text("Header"),
-    HStack([
+    HStack(8, [
       Button("Left", () => console.log("left")),
       Button("Right", () => console.log("right")),
     ]),
     Text("Footer"),
-  ])
-);
+  ]),
+});
 ```
 
-Widgets are created by calling their constructor functions. Layout containers (`VStack`, `HStack`, `ZStack`) accept arrays of child widgets.
+Widgets are created by calling their constructor functions. Layout containers (`VStack`, `HStack`, `ZStack`) accept a spacing value (in points) followed by an array of child widgets.
 
 ## Handle-Based Architecture
 

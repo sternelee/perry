@@ -109,6 +109,11 @@ pub extern "C" fn js_math_acosh(x: f64) -> f64 { x.acosh() }
 #[no_mangle]
 pub extern "C" fn js_math_atanh(x: f64) -> f64 { x.atanh() }
 
+/// Math.hypot(a, b) -> number — sqrt(a² + b²), numerically stable.
+/// Multi-arg forms are chained in the codegen: hypot(a, b, c) ≡ hypot(hypot(a, b), c).
+#[no_mangle]
+pub extern "C" fn js_math_hypot(a: f64, b: f64) -> f64 { a.hypot(b) }
+
 /// Math.random() -> number (0 <= x < 1)
 #[no_mangle]
 pub extern "C" fn js_math_random() -> f64 {

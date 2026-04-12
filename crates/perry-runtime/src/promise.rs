@@ -355,6 +355,187 @@ pub extern "C" fn js_promise_resolved(value: f64) -> *mut Promise {
     promise
 }
 
+/// `Array.fromAsync(input)` — Node 22+ static method.
+///
+/// Returns a Promise that resolves to an Array. Two input shapes:
+///   1. **Array**: each element is awaited (if it's a Promise) and the
+///      results are collected. Equivalent to `Promise.all(input)`.
+///   2. **Async iterator** (object with a `.next()` method): we call
+///      `.next()` repeatedly via the closure-chained .then() pattern,
+///      pushing each `value` until `done` is true, then resolve the
+///      output Promise with the collected array.
+///
+/// `input` is the NaN-boxed input value. Returns a NaN-boxed Promise
+/// pointer (POINTER_TAG) so the caller's `await` can unwrap it.
+#[no_mangle]
+pub extern "C" fn js_array_from_async(input: f64) -> f64 {
+    use crate::array::{js_array_alloc, ArrayHeader};
+    use crate::closure::{js_closure_alloc, js_closure_set_capture_ptr};
+    use crate::value::js_nanbox_get_pointer;
+
+    // Strip NaN-box to get the raw pointer.
+    let raw_ptr = js_nanbox_get_pointer(input) as usize;
+    if raw_ptr == 0 {
+        // null/undefined input — resolve to empty array
+        let empty = js_array_alloc(0);
+        unsafe { (*empty).length = 0; }
+        let arr_f64 = crate::value::js_nanbox_pointer(empty as i64);
+        let p = js_promise_resolved(arr_f64);
+        return crate::value::js_nanbox_pointer(p as i64);
+    }
+
+    // Path 1: input is an Array. Reuse Promise.all behavior — js_promise_all
+    // handles a mix of promise and non-promise elements correctly.
+    unsafe {
+        let gc_header = (raw_ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY {
+            let arr_ptr = raw_ptr as *const ArrayHeader;
+            let p = js_promise_all(arr_ptr);
+            return crate::value::js_nanbox_pointer(p as i64);
+        }
+    }
+
+    // Path 2: async iterator (or any other object). Allocate a result
+    // Promise and an empty result Array, then kick off the .next() chain.
+    let result_promise = js_promise_new();
+    let result_arr = js_array_alloc(0);
+    unsafe { (*result_arr).length = 0; }
+
+    // Build the recursive .next() handler closure. Captures:
+    //   [0] result_promise (Promise to resolve at the end)
+    //   [1] result_arr (Array to push each value into)
+    //   [2] iter object (raw pointer; we re-NaN-box on .next() call)
+    let chain_closure = js_closure_alloc(array_from_async_step as *const u8, 3);
+    js_closure_set_capture_ptr(chain_closure, 0, result_promise as i64);
+    js_closure_set_capture_ptr(chain_closure, 1, result_arr as i64);
+    js_closure_set_capture_ptr(chain_closure, 2, raw_ptr as i64);
+
+    // Kick off the first .next() call. The handler returns the iter result
+    // (or undefined for done) — we wire it through `.then(chain_closure)`
+    // which will recurse.
+    unsafe {
+        array_from_async_call_next(raw_ptr, chain_closure);
+    }
+
+    crate::value::js_nanbox_pointer(result_promise as i64)
+}
+
+/// Helper that calls `iter.next()` (returning a Promise) and attaches
+/// `chain_closure` as both fulfill and reject handlers. Used by the async
+/// iterator path of `js_array_from_async`.
+unsafe fn array_from_async_call_next(
+    iter_ptr: usize,
+    chain_closure: *const crate::closure::ClosureHeader,
+) {
+    // Re-NaN-box the iter pointer for js_native_call_method.
+    let iter_f64 = crate::value::js_nanbox_pointer(iter_ptr as i64);
+    let method_name = b"next";
+    // Call iter.next() — returns a Promise<{value, done}> for async generators
+    // or `{value, done}` directly for sync iterators.
+    let next_result = crate::object::js_native_call_method(
+        iter_f64,
+        method_name.as_ptr() as *const i8,
+        method_name.len(),
+        std::ptr::null(),
+        0,
+    );
+
+    // If the result is a Promise pointer, attach the handler via .then.
+    let next_ptr = crate::value::js_nanbox_get_pointer(next_result) as usize;
+    if next_ptr != 0 {
+        let gc_header = (next_ptr as *const u8).sub(crate::gc::GC_HEADER_SIZE)
+            as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_PROMISE {
+            let next_promise = next_ptr as *mut Promise;
+            // Use the chain_closure for both fulfill and reject. On rejection
+            // we just propagate by resolving the result_promise with undefined.
+            js_promise_then(next_promise, chain_closure as *const _, chain_closure as *const _);
+            return;
+        }
+    }
+    // Synchronous iterator path: invoke the handler directly with the
+    // result so the iteration loop continues without going through .then.
+    array_from_async_step(chain_closure as *const _, next_result);
+}
+
+/// `.then(...)` handler invoked once per `.next()` resolution. Reads the
+/// `{value, done}` iter-result, pushes `value` into the accumulator array,
+/// and either resolves the output Promise (when `done`) or schedules
+/// another `.next()` call.
+extern "C" fn array_from_async_step(
+    closure: *const crate::closure::ClosureHeader,
+    iter_result: f64,
+) -> f64 {
+    use crate::array::{ArrayHeader, js_array_push_f64};
+    use crate::closure::{js_closure_get_capture_ptr, js_closure_set_capture_ptr};
+
+    let result_promise = js_closure_get_capture_ptr(closure, 0) as *mut Promise;
+    let mut result_arr = js_closure_get_capture_ptr(closure, 1) as *mut ArrayHeader;
+    let iter_ptr = js_closure_get_capture_ptr(closure, 2) as usize;
+
+    if result_promise.is_null() || result_arr.is_null() || iter_ptr == 0 {
+        return 0.0;
+    }
+
+    // Read `done` and `value` off the iter result. The result is either an
+    // object with those fields, or undefined (if next() returned undefined).
+    let result_bits = iter_result.to_bits();
+    let result_obj_ptr = if (result_bits >> 48) == 0x7FFD {
+        (result_bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::object::ObjectHeader
+    } else if result_bits != 0 && result_bits <= 0x0000_FFFF_FFFF_FFFF {
+        result_bits as *const crate::object::ObjectHeader
+    } else {
+        // Treat malformed result as `done: true`.
+        std::ptr::null()
+    };
+
+    if result_obj_ptr.is_null() {
+        // No more values — resolve the output promise with the collected array.
+        let arr_f64 = crate::value::js_nanbox_pointer(result_arr as i64);
+        unsafe { js_promise_resolve(result_promise, arr_f64); }
+        return 0.0;
+    }
+
+    // Look up "done" and "value" fields by name.
+    let done_key = make_static_string(b"done");
+    let value_key = make_static_string(b"value");
+    let done_jv = unsafe {
+        crate::object::js_object_get_field_by_name(result_obj_ptr, done_key)
+    };
+    let value_jv = unsafe {
+        crate::object::js_object_get_field_by_name(result_obj_ptr, value_key)
+    };
+    let done_f64 = f64::from_bits(done_jv.bits());
+    let value_f64 = f64::from_bits(value_jv.bits());
+
+    if crate::value::js_is_truthy(done_f64) != 0 {
+        // Iteration complete — resolve with the accumulated array.
+        let arr_f64 = crate::value::js_nanbox_pointer(result_arr as i64);
+        unsafe { js_promise_resolve(result_promise, arr_f64); }
+        return 0.0;
+    }
+
+    // Push the value (push_f64 may grow & return a new pointer).
+    result_arr = js_array_push_f64(result_arr, value_f64);
+    // Update the closure capture so subsequent steps see the (possibly
+    // moved) array.
+    js_closure_set_capture_ptr(closure as *mut _, 1, result_arr as i64);
+
+    // Recurse: call iter.next() again. The same closure will be invoked
+    // when the next promise resolves.
+    unsafe {
+        array_from_async_call_next(iter_ptr, closure);
+    }
+
+    0.0
+}
+
+/// Helper to allocate a static StringHeader for property-name lookups.
+/// Reuses `js_string_from_bytes` so the result is GC-tracked.
+fn make_static_string(bytes: &[u8]) -> *const crate::string::StringHeader {
+    crate::string::js_string_from_bytes(bytes.as_ptr(), bytes.len() as u32)
+}
+
 /// Create a rejected promise with the given reason
 #[no_mangle]
 pub extern "C" fn js_promise_rejected(reason: f64) -> *mut Promise {
@@ -372,6 +553,40 @@ pub extern "C" fn js_is_promise(ptr: *mut Promise) -> i32 {
     }
     // Basic sanity check - could be more sophisticated
     1
+}
+
+/// Safe `await`-side check: given a NaN-boxed JSValue, return 1 if it
+/// points at a real Promise allocation and 0 otherwise. Used by the
+/// LLVM backend's `Expr::Await` lowering so that `await <non-promise>`
+/// doesn't dereference a garbage pointer as if it were a `Promise`.
+///
+/// Inspects the NaN-box tag and, when the value is a pointer, walks
+/// back to the `GcHeader` to read the `obj_type`. Any non-POINTER_TAG
+/// bits (primitives, strings, bigints, null, undefined) return 0.
+#[no_mangle]
+pub extern "C" fn js_value_is_promise(value: f64) -> i32 {
+    const POINTER_TAG: u64 = 0x7FFD_0000_0000_0000;
+    const TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+    let bits = value.to_bits();
+    let tag = bits & TAG_MASK;
+    if tag != POINTER_TAG {
+        return 0;
+    }
+    let ptr_usize = (bits & POINTER_MASK) as usize;
+    if ptr_usize < 0x10000 {
+        return 0;
+    }
+    unsafe {
+        let gc_header = (ptr_usize as *const u8).sub(crate::gc::GC_HEADER_SIZE)
+            as *const crate::gc::GcHeader;
+        if (*gc_header).obj_type == crate::gc::GC_TYPE_PROMISE {
+            1
+        } else {
+            0
+        }
+    }
 }
 
 // Queue for scheduled promise resolutions
@@ -702,7 +917,7 @@ extern "C" fn promise_race_reject_handler(closure: *const crate::closure::Closur
 
 /// Await any promise value.
 /// In native-only mode (no V8), all promises are native POINTER_TAG promises.
-/// The Cranelift-generated busy-wait loop handles polling the promise state,
+/// The codegen-emitted busy-wait loop handles polling the promise state,
 /// so we just return the value as-is.
 /// In V8 mode (perry-jsruntime), this function is overridden by the V8-aware
 /// version that can also handle JS_HANDLE_TAG promises.

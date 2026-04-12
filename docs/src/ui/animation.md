@@ -31,18 +31,20 @@ import { App, Text, Button, VStack, State } from "perry/ui";
 
 const visible = State(false);
 
-App("Animation Demo", () =>
-  VStack([
+const label = Text("Hello!");
+label.animateOpacity(visible.value ? 1.0 : 0.0, 0.3);
+
+App({
+  title: "Animation Demo",
+  width: 400,
+  height: 300,
+  body: VStack(16, [
     Button("Toggle", () => {
-      visible.set(!visible.get());
+      visible.set(!visible.value);
     }),
-    (() => {
-      const label = Text("Hello!");
-      label.animateOpacity(visible.get() ? 1.0 : 0.0, 0.3);
-      return label;
-    })(),
-  ])
-);
+    label,
+  ]),
+});
 ```
 
 ## Platform Notes

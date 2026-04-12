@@ -90,7 +90,7 @@ const safariIcon = getAppIcon("/Applications/Safari.app");
 const firefoxIcon = getAppIcon("/usr/share/applications/firefox.desktop");
 
 // Use icons in your UI
-HStack([
+HStack(8, [
   finderIcon,
   Text("Finder"),
 ]);

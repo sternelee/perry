@@ -24,7 +24,7 @@ The binary is at `target/release/perry`.
 cargo build --release -p perry-runtime -p perry-stdlib
 
 # Codegen only
-cargo build --release -p perry-codegen
+cargo build --release -p perry-codegen-llvm
 ```
 
 > **Important**: When rebuilding `perry-runtime`, you must also rebuild `perry-stdlib` because `libperry_stdlib.a` embeds perry-runtime as a static dependency.
@@ -37,7 +37,7 @@ cargo test --workspace --exclude perry-ui-ios
 
 # Specific crate
 cargo test -p perry-hir
-cargo test -p perry-codegen
+cargo test -p perry-codegen-llvm
 ```
 
 ## Compile and Run TypeScript
@@ -68,7 +68,7 @@ perry/
 │   ├── perry-types/        # Type definitions
 │   ├── perry-hir/          # HIR and lowering
 │   ├── perry-transform/    # IR passes
-│   ├── perry-codegen/      # Cranelift native codegen
+│   ├── perry-codegen-llvm/ # LLVM native codegen
 │   ├── perry-codegen-wasm/ # WebAssembly codegen (--target web / --target wasm)
 │   ├── perry-codegen-js/   # JS minifier (formerly the web target's codegen)
 │   ├── perry-codegen-swiftui/ # Widget codegen

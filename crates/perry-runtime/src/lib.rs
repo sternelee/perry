@@ -20,6 +20,7 @@ pub mod bigint;
 pub mod closure;
 pub mod exception;
 pub mod error;
+pub mod symbol;
 pub mod promise;
 pub mod timer;
 pub mod builtins;
@@ -33,6 +34,8 @@ pub mod url;
 pub mod regex;
 pub mod os;
 pub mod buffer;
+pub mod typedarray;
+pub mod text;
 pub mod child_process;
 pub mod net;
 pub mod json;
@@ -45,6 +48,7 @@ pub mod stdlib_stubs;
 pub mod plugin;
 pub mod thread;
 pub mod geisterhand_registry;
+pub mod proxy;
 #[cfg(all(any(target_os = "ios", target_os = "tvos"), feature = "ios-game-loop"))]
 pub mod ios_game_loop;
 
@@ -105,7 +109,7 @@ mod stdlib_pump {
 }
 
 // Module init guard for preventing circular dependency stack overflow.
-// Uses a simple bitset in the runtime so Cranelift cannot optimize it away.
+// Uses a simple bitset in the runtime so the compiler cannot optimize it away.
 mod init_guard {
     use std::sync::atomic::{AtomicU8, Ordering};
 

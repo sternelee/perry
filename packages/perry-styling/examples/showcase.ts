@@ -265,7 +265,7 @@ const platformLine = Text("Platform: " + platformName + "   |   Layout: " + layo
 applyFontSize(platformLine, t.fontSize.sm);
 applyTextColor(platformLine, cMuted.r, cMuted.g, cMuted.b, cMuted.a);
 
-const platformNote = Text("These are compile-time constants — Cranelift eliminates the dead branches.");
+const platformNote = Text("These are compile-time constants — LLVM eliminates the dead branches.");
 applyFontSize(platformNote, t.fontSize.sm);
 applyTextColor(platformNote, cMuted.r, cMuted.g, cMuted.b, cMuted.a);
 

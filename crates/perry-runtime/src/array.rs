@@ -142,10 +142,11 @@ pub extern "C" fn js_array_get_element_f64(arr: i64, index: i64) -> f64 {
 pub extern "C" fn js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::NAN; }
+    const TAG_UNDEFINED_F64: f64 = unsafe { std::mem::transmute(0x7FFC_0000_0000_0001u64) };
     unsafe {
         let length = (*arr).length;
-        if index >= length { return f64::NAN; }
-        if length > 100000 { return f64::NAN; }
+        if index >= length { return TAG_UNDEFINED_F64; }
+        if length > 100000 { return TAG_UNDEFINED_F64; }
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
         *elements_ptr.add(index as usize)
     }
@@ -156,6 +157,13 @@ pub extern "C" fn js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::NAN; }
+    // Check if this is actually a TypedArray — dispatch through typed array helper
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_get(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            index as i32,
+        );
+    }
     // Check if this is actually a buffer (Uint8Array) — read individual bytes
     if crate::buffer::is_registered_buffer(arr as usize) {
         let byte_val = crate::buffer::js_buffer_get(arr as *const crate::buffer::BufferHeader, index as i32);
@@ -166,7 +174,7 @@ pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
         let set = arr as *const crate::set::SetHeader;
         unsafe {
             let size = (*set).size;
-            if index >= size { return f64::NAN; }
+            if index >= size { return TAG_UNDEFINED_F64; }
             let elements = (*set).elements as *const f64;
             return std::ptr::read(elements.add(index as usize));
         }
@@ -176,20 +184,24 @@ pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
         let map = arr as *const crate::map::MapHeader;
         unsafe {
             let size = (*map).size;
-            if index >= size { return f64::NAN; }
+            if index >= size { return TAG_UNDEFINED_F64; }
             let entries = (*map).entries as *const f64;
             // Map entries: key at index*2, return key for simple iteration
             return std::ptr::read(entries.add(index as usize * 2));
         }
     }
+    // JS spec: out-of-bounds array access returns `undefined`, not NaN.
+    // This matters for destructuring defaults (`const [a, b, c = 30] = [1, 2]`)
+    // where the `?? fallback` must see TAG_UNDEFINED, not NaN.
+    const TAG_UNDEFINED_F64: f64 = unsafe { std::mem::transmute(0x7FFC_0000_0000_0001u64) };
     unsafe {
         let length = (*arr).length;
         if index >= length {
-            return f64::NAN; // Out of bounds returns NaN (like undefined coerced to number)
+            return TAG_UNDEFINED_F64;
         }
         // Guard: corrupted arrays with unreasonably large length
         if length > 100000 {
-            return f64::NAN;
+            return TAG_UNDEFINED_F64;
         }
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
         *elements_ptr.add(index as usize)
@@ -343,6 +355,26 @@ pub extern "C" fn js_array_pop_f64(arr: *mut ArrayHeader) -> f64 {
         let value = *elements_ptr.add(new_length as usize);
         (*arr).length = new_length;
         value
+    }
+}
+
+/// Delete an element from an array by index, creating a "hole".
+/// Sets the element to undefined without changing the array length.
+/// Matches JavaScript `delete arr[index]` semantics.
+/// Returns 1 (true) on success, 0 (false) on failure.
+#[no_mangle]
+pub extern "C" fn js_array_delete(arr: *mut ArrayHeader, index: u32) -> i32 {
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return 1; }
+    unsafe {
+        let length = (*arr).length;
+        if index >= length {
+            return 1; // delete on out-of-bounds always returns true in JS
+        }
+        const TAG_UNDEFINED_F64: f64 = unsafe { std::mem::transmute(0x7FFC_0000_0000_0001u64) };
+        let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+        std::ptr::write(elements_ptr.add(index as usize), TAG_UNDEFINED_F64);
+        1
     }
 }
 
@@ -683,6 +715,14 @@ pub extern "C" fn js_array_push_jsvalue(arr: *mut ArrayHeader, value: u64) -> *m
 pub extern "C" fn js_array_concat(dest: *mut ArrayHeader, src: *const ArrayHeader) -> *mut ArrayHeader {
     let src = clean_arr_ptr(src);
     if src.is_null() { return dest; }
+    // Detect non-array sources: Sets register themselves in
+    // SET_REGISTRY; convert to array first so spread-into-array
+    // `[...new Set(...)]` reads the right elements instead of the
+    // SetHeader's raw memory.
+    if crate::set::is_registered_set(src as usize) {
+        let arr = unsafe { crate::set::js_set_to_array(src as *const crate::set::SetHeader) };
+        return js_array_concat(dest, arr);
+    }
     unsafe {
         let src_len = (*src).length;
         if src_len == 0 {
@@ -1237,6 +1277,12 @@ pub extern "C" fn js_array_findIndex(arr: *const ArrayHeader, callback: *const C
 pub extern "C" fn js_array_find_last(arr: *const ArrayHeader, callback: *const ClosureHeader) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::from_bits(crate::value::TAG_UNDEFINED); }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_find_last(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            callback,
+        );
+    }
     unsafe {
         let length = (*arr).length as usize;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -1256,6 +1302,13 @@ pub extern "C" fn js_array_find_last(arr: *const ArrayHeader, callback: *const C
 pub extern "C" fn js_array_find_last_index(arr: *const ArrayHeader, callback: *const ClosureHeader) -> i32 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return -1; }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        let r = crate::typedarray::js_typed_array_find_last_index(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            callback,
+        );
+        return r as i32;
+    }
     unsafe {
         let length = (*arr).length as usize;
         let elements_ptr = (arr as *const u8).add(std::mem::size_of::<ArrayHeader>()) as *const f64;
@@ -1275,6 +1328,29 @@ pub extern "C" fn js_array_find_last_index(arr: *const ArrayHeader, callback: *c
 pub extern "C" fn js_array_at(arr: *const ArrayHeader, index: f64) -> f64 {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::from_bits(crate::value::TAG_UNDEFINED); }
+    // If this pointer is actually a typed-array, dispatch there. Typed arrays
+    // and Uint8Array/Buffer have different layouts than ArrayHeader, and the
+    // codegen happily routes their `.at(i)` through this generic helper.
+    let addr = arr as usize;
+    if crate::typedarray::lookup_typed_array_kind(addr).is_some() {
+        return crate::typedarray::js_typed_array_at(
+            addr as *const crate::typedarray::TypedArrayHeader,
+            index,
+        );
+    }
+    if crate::buffer::is_registered_buffer(addr) {
+        let buf = addr as *const crate::buffer::BufferHeader;
+        unsafe {
+            let length = (*buf).length as i64;
+            let mut idx = index as i64;
+            if idx < 0 { idx += length; }
+            if idx < 0 || idx >= length {
+                return f64::from_bits(crate::value::TAG_UNDEFINED);
+            }
+            let data = (buf as *const u8).add(std::mem::size_of::<crate::buffer::BufferHeader>());
+            return *data.add(idx as usize) as f64;
+        }
+    }
     unsafe {
         let length = (*arr).length as i64;
         let mut idx = index as i64;
@@ -1602,6 +1678,11 @@ pub extern "C" fn js_array_reduce_right(
 pub extern "C" fn js_array_to_reversed(arr: *const ArrayHeader) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return js_array_alloc(0); }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_to_reversed(
+            arr as *const crate::typedarray::TypedArrayHeader,
+        ) as *mut ArrayHeader;
+    }
     unsafe {
         let len = (*arr).length as usize;
         let new_arr = js_array_alloc(len as u32);
@@ -1619,6 +1700,11 @@ pub extern "C" fn js_array_to_reversed(arr: *const ArrayHeader) -> *mut ArrayHea
 #[no_mangle]
 pub extern "C" fn js_array_to_sorted_default(arr: *const ArrayHeader) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
+    if !arr.is_null() && crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_to_sorted_default(
+            arr as *const crate::typedarray::TypedArrayHeader,
+        ) as *mut ArrayHeader;
+    }
     if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let len = (*arr).length as usize;
@@ -1638,6 +1724,12 @@ pub extern "C" fn js_array_to_sorted_default(arr: *const ArrayHeader) -> *mut Ar
 #[no_mangle]
 pub extern "C" fn js_array_to_sorted_with_comparator(arr: *const ArrayHeader, comparator: *const ClosureHeader) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
+    if !arr.is_null() && crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_to_sorted_with_comparator(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            comparator,
+        ) as *mut ArrayHeader;
+    }
     if arr.is_null() { return js_array_alloc(0); }
     unsafe {
         let len = (*arr).length as usize;
@@ -1707,6 +1799,13 @@ pub extern "C" fn js_array_to_spliced(
 pub extern "C" fn js_array_with(arr: *const ArrayHeader, index: f64, value: f64) -> *mut ArrayHeader {
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return js_array_alloc(0); }
+    if crate::typedarray::lookup_typed_array_kind(arr as usize).is_some() {
+        return crate::typedarray::js_typed_array_with(
+            arr as *const crate::typedarray::TypedArrayHeader,
+            index,
+            value,
+        ) as *mut ArrayHeader;
+    }
     unsafe {
         let len = (*arr).length as isize;
         let mut idx = index as isize;
@@ -1795,8 +1894,8 @@ mod tests {
         assert_eq!(js_array_get_f64(arr, 1), 2.0);
         assert_eq!(js_array_get_f64(arr, 2), 3.0);
 
-        // Out of bounds
-        assert!(js_array_get_f64(arr, 5).is_nan());
+        // Out of bounds returns TAG_UNDEFINED (JS spec: arr[OOB] === undefined)
+        assert_eq!(js_array_get_f64(arr, 5).to_bits(), 0x7FFC_0000_0000_0001u64);
     }
 
     #[test]
@@ -1838,9 +1937,9 @@ mod tests {
         let arr = js_array_alloc(4);
         js_array_push_f64(arr, 1.0);
 
-        // Out of bounds should return NaN
-        assert!(js_array_get_f64_unchecked(arr, 1).is_nan());
-        assert!(js_array_get_f64_unchecked(arr, 100).is_nan());
+        // Out of bounds should return TAG_UNDEFINED (JS spec)
+        assert_eq!(js_array_get_f64_unchecked(arr, 1).to_bits(), 0x7FFC_0000_0000_0001u64);
+        assert_eq!(js_array_get_f64_unchecked(arr, 100).to_bits(), 0x7FFC_0000_0000_0001u64);
     }
 
     #[test]
@@ -1859,9 +1958,11 @@ mod tests {
                 "parity mismatch at index {}: checked={}, unchecked={}", i, checked, unchecked);
         }
 
-        // Out of bounds parity
-        assert!(js_array_get_f64(arr, 100).is_nan());
-        assert!(js_array_get_f64_unchecked(arr, 100).is_nan());
+        // Out of bounds parity — both return TAG_UNDEFINED
+        let oob_checked = js_array_get_f64(arr, 100);
+        let oob_unchecked = js_array_get_f64_unchecked(arr, 100);
+        assert_eq!(oob_checked.to_bits(), 0x7FFC_0000_0000_0001u64);
+        assert_eq!(oob_unchecked.to_bits(), 0x7FFC_0000_0000_0001u64);
     }
 
     #[test]

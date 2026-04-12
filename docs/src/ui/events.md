@@ -127,9 +127,22 @@ registerShortcut("r", () => {
   lastEvent.set("Keyboard: Cmd+R");
 });
 
-App("Events Demo", () =>
-  VStack([
-    Text(`Last event: ${lastEvent.get()}`),
+const hoverBtn = Button("Hover me", () => {});
+hoverBtn.setOnHover((h) => {
+  lastEvent.set(h ? "Mouse entered" : "Mouse left");
+});
+
+const dblLabel = Text("Double-click me");
+dblLabel.setOnDoubleClick(() => {
+  lastEvent.set("Double-clicked!");
+});
+
+App({
+  title: "Events Demo",
+  width: 400,
+  height: 300,
+  body: VStack(16, [
+    Text(`Last event: ${lastEvent.value}`),
 
     Spacer(),
 
@@ -137,23 +150,10 @@ App("Events Demo", () =>
       lastEvent.set("Button clicked");
     }),
 
-    (() => {
-      const hoverBtn = Button("Hover me", () => {});
-      hoverBtn.setOnHover((h) => {
-        lastEvent.set(h ? "Mouse entered" : "Mouse left");
-      });
-      return hoverBtn;
-    })(),
-
-    (() => {
-      const dblLabel = Text("Double-click me");
-      dblLabel.setOnDoubleClick(() => {
-        lastEvent.set("Double-clicked!");
-      });
-      return dblLabel;
-    })(),
-  ])
-);
+    hoverBtn,
+    dblLabel,
+  ]),
+});
 ```
 
 ## Next Steps

@@ -14,26 +14,29 @@ import { CameraView, cameraStart, cameraStop, cameraFreeze, cameraUnfreeze, came
 import { App, VStack, Text, State } from "perry/ui";
 import { CameraView, cameraStart, cameraStop, cameraSampleColor, cameraSetOnTap } from "perry/ui";
 
-App("Color Picker", () => {
-  const colorHex = State("#000000");
+const colorHex = State("#000000");
 
-  const cam = CameraView();
-  cameraStart(cam);
+const cam = CameraView();
+cameraStart(cam);
 
-  cameraSetOnTap(cam, (x, y) => {
-    const rgb = cameraSampleColor(x, y);
-    if (rgb >= 0) {
-      const r = Math.floor(rgb / 65536);
-      const g = Math.floor((rgb % 65536) / 256);
-      const b = Math.floor(rgb % 256);
-      colorHex.set(`#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`);
-    }
-  });
+cameraSetOnTap(cam, (x, y) => {
+  const rgb = cameraSampleColor(x, y);
+  if (rgb >= 0) {
+    const r = Math.floor(rgb / 65536);
+    const g = Math.floor((rgb % 65536) / 256);
+    const b = Math.floor(rgb % 256);
+    colorHex.set(`#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`);
+  }
+});
 
-  return VStack([
+App({
+  title: "Color Picker",
+  width: 400,
+  height: 600,
+  body: VStack(16, [
     cam,
-    Text(`Color: ${colorHex.get()}`),
-  ]);
+    Text(`Color: ${colorHex.value}`),
+  ]),
 });
 ```
 

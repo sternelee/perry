@@ -106,11 +106,14 @@ tvOS apps use `UIApplicationMain` with the same lifecycle as iOS. When using `pe
 ```typescript
 import { App, Text, VStack } from "perry/ui";
 
-App("My TV App", () =>
-  VStack([
+App({
+  title: "My TV App",
+  width: 1920,
+  height: 1080,
+  body: VStack(16, [
     Text("Hello, Apple TV!"),
-  ])
-);
+  ]),
+});
 ```
 
 When using a game engine with `--features ios-game-loop`, the runtime starts `UIApplicationMain` on the main thread and runs your game code on a dedicated game thread.

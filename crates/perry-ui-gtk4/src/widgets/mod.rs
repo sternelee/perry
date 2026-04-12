@@ -4,6 +4,7 @@ pub mod vstack;
 pub mod hstack;
 pub mod spacer;
 pub mod divider;
+pub mod textarea;
 pub mod textfield;
 pub mod toggle;
 pub mod slider;

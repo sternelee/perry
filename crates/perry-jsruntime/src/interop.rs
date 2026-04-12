@@ -1186,7 +1186,7 @@ pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
     if tag == 0x7FFB {
         // JS_HANDLE_TAG — delegate to js_await_js_promise (runs V8 event loop).
         // This returns the resolved value directly (not a Promise).
-        // Wrap it in a fulfilled native Promise so the Cranelift busy-wait loop
+        // Wrap it in a fulfilled native Promise so the codegen busy-wait loop
         // can find state=Fulfilled immediately and read the value.
         let resolved_value = js_await_js_promise(value);
         let promise_ptr = perry_runtime::promise::js_promise_resolved(resolved_value);
@@ -1196,7 +1196,7 @@ pub extern "C" fn js_await_any_promise(value: f64) -> f64 {
     }
 
     // For POINTER_TAG (native promises) and all other values, return as-is.
-    // The Cranelift-generated busy-wait loop handles native promise polling correctly
+    // The codegen-emitted busy-wait loop handles native promise polling correctly
     // using the same thread's microtask queue.
     value
 }

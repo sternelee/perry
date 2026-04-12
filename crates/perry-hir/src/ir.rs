@@ -5,6 +5,31 @@
 
 use perry_types::{FuncId, GlobalId, LocalId, Type, TypeParam};
 
+/// TypedArray element-kind tags. Must match `crates/perry-runtime/src/typedarray.rs`.
+pub const TYPED_ARRAY_KIND_INT8: u8 = 0;
+pub const TYPED_ARRAY_KIND_UINT8: u8 = 1;
+pub const TYPED_ARRAY_KIND_INT16: u8 = 2;
+pub const TYPED_ARRAY_KIND_UINT16: u8 = 3;
+pub const TYPED_ARRAY_KIND_INT32: u8 = 4;
+pub const TYPED_ARRAY_KIND_UINT32: u8 = 5;
+pub const TYPED_ARRAY_KIND_FLOAT32: u8 = 6;
+pub const TYPED_ARRAY_KIND_FLOAT64: u8 = 7;
+
+/// Map a class name (e.g. "Int32Array") to its `TYPED_ARRAY_KIND_*` tag.
+pub fn typed_array_kind_for_name(name: &str) -> Option<u8> {
+    match name {
+        "Int8Array" => Some(TYPED_ARRAY_KIND_INT8),
+        "Uint8Array" | "Uint8ClampedArray" => Some(TYPED_ARRAY_KIND_UINT8),
+        "Int16Array" => Some(TYPED_ARRAY_KIND_INT16),
+        "Uint16Array" => Some(TYPED_ARRAY_KIND_UINT16),
+        "Int32Array" => Some(TYPED_ARRAY_KIND_INT32),
+        "Uint32Array" => Some(TYPED_ARRAY_KIND_UINT32),
+        "Float32Array" => Some(TYPED_ARRAY_KIND_FLOAT32),
+        "Float64Array" => Some(TYPED_ARRAY_KIND_FLOAT64),
+        _ => None,
+    }
+}
+
 /// Known native module names that map to stdlib implementations.
 /// These are npm packages that have native Rust replacements.
 pub const NATIVE_MODULES: &[&str] = &[
@@ -226,7 +251,7 @@ pub struct WidgetDecl {
     pub entry_param_name: String,
     /// AppIntent configuration parameters
     pub config_params: Vec<WidgetConfigParam>,
-    /// Name of the lowered provider function (compiled via Cranelift)
+    /// Name of the lowered provider function (compiled via LLVM)
     pub provider_func_name: Option<String>,
     /// Placeholder data for widget gallery preview
     pub placeholder: Option<Vec<(String, WidgetPlaceholderValue)>>,
@@ -1055,6 +1080,14 @@ pub enum Expr {
     ObjectIsSealed(Box<Expr>),                             // Object.isSealed(obj)
     ObjectIsExtensible(Box<Expr>),                         // Object.isExtensible(obj)
     ObjectGetPrototypeOf(Box<Expr>),                       // Object.getPrototypeOf(obj)
+    ObjectGetOwnPropertySymbols(Box<Expr>),                // Object.getOwnPropertySymbols(obj) -> symbol[]
+
+    // Symbol operations
+    SymbolNew(Option<Box<Expr>>),                          // Symbol() / Symbol(description)
+    SymbolFor(Box<Expr>),                                  // Symbol.for(key) -> registered symbol
+    SymbolKeyFor(Box<Expr>),                               // Symbol.keyFor(sym) -> key | undefined
+    SymbolDescription(Box<Expr>),                          // sym.description
+    SymbolToString(Box<Expr>),                             // sym.toString()
 
     // URL operations
     FileURLToPath(Box<Expr>),            // url.fileURLToPath(url) -> string
@@ -1234,6 +1267,11 @@ pub enum Expr {
         index: Box<Expr>,
         value: Box<Expr>,
     },
+
+    /// Generic typed array constructor: `new Int32Array([1, 2, 3])` etc.
+    /// `kind` is one of the `TYPED_ARRAY_KIND_*` constants.
+    /// `arg` is `None` for `new Int32Array()`, `Some(expr)` for `(length)` or `(arrayLike)`.
+    TypedArrayNew { kind: u8, arg: Option<Box<Expr>> },
 
     // Child Process operations
     ChildProcessExecSync {               // execSync(cmd, opts?) -> Buffer | string
@@ -1564,6 +1602,10 @@ pub enum Expr {
     /// Object.entries(obj) -> [string, any][]
     /// Returns an array of the object's own enumerable [key, value] pairs
     ObjectEntries(Box<Expr>),
+    /// Object.groupBy(items, keyFn) -> { [key]: items[] }
+    /// Walks `items` and groups each element by the string key returned
+    /// from `keyFn(item, index)`. Lowered through `js_object_group_by`.
+    ObjectGroupBy { items: Box<Expr>, key_fn: Box<Expr> },
     /// Object rest destructuring: copies all properties except the excluded keys
     /// Used for `const { a, b, ...rest } = obj` → rest = ObjectRest(obj, ["a", "b"])
     ObjectRest { object: Box<Expr>, exclude_keys: Vec<String> },
@@ -1711,6 +1753,26 @@ pub enum Expr {
     /// import.meta.url - returns the URL of the current module
     /// The string is the file:// URL of the source file
     ImportMetaUrl(String),
+
+    // --- Proxy / Reflect (metaprogramming) -----------------------------
+    ProxyNew { target: Box<Expr>, handler: Box<Expr> },
+    ProxyGet { proxy: Box<Expr>, key: Box<Expr> },
+    ProxySet { proxy: Box<Expr>, key: Box<Expr>, value: Box<Expr> },
+    ProxyHas { proxy: Box<Expr>, key: Box<Expr> },
+    ProxyDelete { proxy: Box<Expr>, key: Box<Expr> },
+    ProxyApply { proxy: Box<Expr>, args: Vec<Expr> },
+    ProxyConstruct { proxy: Box<Expr>, args: Vec<Expr> },
+    ProxyRevocable { target: Box<Expr>, handler: Box<Expr> },
+    ProxyRevoke(Box<Expr>),
+    ReflectGet { target: Box<Expr>, key: Box<Expr> },
+    ReflectSet { target: Box<Expr>, key: Box<Expr>, value: Box<Expr> },
+    ReflectHas { target: Box<Expr>, key: Box<Expr> },
+    ReflectDelete { target: Box<Expr>, key: Box<Expr> },
+    ReflectOwnKeys(Box<Expr>),
+    ReflectApply { func: Box<Expr>, this_arg: Box<Expr>, args: Box<Expr> },
+    ReflectConstruct { target: Box<Expr>, args: Box<Expr> },
+    ReflectDefineProperty { target: Box<Expr>, key: Box<Expr>, descriptor: Box<Expr> },
+    ReflectGetPrototypeOf(Box<Expr>),
 }
 
 /// Binary operators

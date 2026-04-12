@@ -56,8 +56,8 @@ Sheets are modal panels attached to a window:
 ```typescript
 import { Sheet, Text, Button, VStack } from "perry/ui";
 
-const sheet = Sheet(() =>
-  VStack([
+const sheet = Sheet(
+  VStack(16, [
     Text("Sheet Content"),
     Button("Close", () => {
       sheet.dismiss();
@@ -82,15 +82,18 @@ sheet.present();
 ## Complete Example
 
 ```typescript
-import { App, Text, Button, VStack, HStack, State, openFileDialog, saveFileDialog, alert } from "perry/ui";
+import { App, Text, Button, TextField, VStack, HStack, State, openFileDialog, saveFileDialog, alert } from "perry/ui";
 import { readFileSync, writeFileSync } from "perry/fs";
 
 const content = State("");
 const filePath = State("");
 
-App("Text Editor", () =>
-  VStack([
-    HStack([
+App({
+  title: "Text Editor",
+  width: 800,
+  height: 600,
+  body: VStack(12, [
+    HStack(8, [
       Button("Open", () => {
         const path = openFileDialog();
         if (path) {
@@ -101,16 +104,16 @@ App("Text Editor", () =>
       Button("Save As", () => {
         const path = saveFileDialog();
         if (path) {
-          writeFileSync(path, content.get());
+          writeFileSync(path, content.value);
           filePath.set(path);
           alert("Saved", `File saved to ${path}`);
         }
       }),
     ]),
-    Text(`File: ${filePath.get() || "No file open"}`),
+    Text(`File: ${filePath.value || "No file open"}`),
     TextField(content, "Start typing..."),
-  ])
-);
+  ]),
+});
 ```
 
 ## Next Steps

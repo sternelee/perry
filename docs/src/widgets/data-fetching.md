@@ -5,7 +5,7 @@ The `provider` function is the heart of a dynamic widget. It fetches data, trans
 ## Provider Lifecycle
 
 1. The system calls your provider when the widget is first added, when a snapshot is needed, and when the reload policy expires.
-2. Your provider runs as native Cranelift-compiled code linked into the widget extension.
+2. Your provider runs as native LLVM-compiled code linked into the widget extension.
 3. The provider returns one or more timeline entries. The system renders each entry at its scheduled time.
 4. After the last entry, the reload policy determines when the provider runs again.
 

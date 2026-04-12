@@ -178,6 +178,17 @@ pub fn register_external_nsview(nsview_ptr: i64) -> i64 {
                 let layer: *mut AnyObject = objc2::msg_send![&*nsview, layer];
                 if !layer.is_null() {
                     let _: () = objc2::msg_send![layer, setMasksToBounds: true];
+                    // Ensure the layer renders at Retina resolution.
+                    // External NSViews (e.g. hone-editor) may set this during
+                    // init, but embedding into an NSStackView can reset it.
+                    let screen: *mut AnyObject = objc2::msg_send![
+                        objc2::runtime::AnyClass::get(c"NSScreen").unwrap(),
+                        mainScreen
+                    ];
+                    if !screen.is_null() {
+                        let scale: f64 = objc2::msg_send![screen, backingScaleFactor];
+                        let _: () = objc2::msg_send![layer, setContentsScale: scale];
+                    }
                 }
             }
             register_widget(nsview)

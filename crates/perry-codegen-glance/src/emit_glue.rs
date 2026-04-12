@@ -1,4 +1,4 @@
-//! JNI bridge generation for native Cranelift-compiled widget providers on Android
+//! JNI bridge generation for native LLVM-compiled widget providers on Android
 //!
 //! Generates Kotlin code that loads the native library and calls the provider function.
 
@@ -26,7 +26,7 @@ pub fn emit_bridge(widget: &WidgetDecl, name: &str, package: &str) -> String {
 
     // Native method declarations
     if let Some(ref func_name) = widget.provider_func_name {
-        writeln!(out, "    // Native provider function compiled by Cranelift").unwrap();
+        writeln!(out, "    // Native provider function compiled by LLVM").unwrap();
         writeln!(out, "    @JvmStatic").unwrap();
         writeln!(out, "    private external fun {}(configJson: String): String", func_name).unwrap();
         writeln!(out).unwrap();
