@@ -243,8 +243,23 @@ impl LlBlock {
         r
     }
 
+    /// Load with `volatile` — prevents the optimizer from caching,
+    /// reordering, or eliminating the load. Used for module globals
+    /// that may be written by `optnone` functions.
+    pub fn load_volatile(&mut self, ty: LlvmType, ptr: &str) -> String {
+        let r = self.reg();
+        self.emit(format!("{} = load volatile {}, ptr {}", r, ty, ptr));
+        r
+    }
+
     pub fn store(&mut self, ty: LlvmType, val: &str, ptr: &str) {
         self.emit(format!("store {} {}, ptr {}", ty, val, ptr));
+    }
+
+    /// Store with `volatile` — prevents optimizer from eliminating or
+    /// reordering. Used for module globals.
+    pub fn store_volatile(&mut self, ty: LlvmType, val: &str, ptr: &str) {
+        self.emit(format!("store volatile {} {}, ptr {}", ty, val, ptr));
     }
 
     // -------- Conversions / bitcasts --------
