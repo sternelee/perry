@@ -1934,7 +1934,15 @@ pub(crate) fn lower_new(
         }
         // If no parent constructor was found (imported class with no
         // inlineable constructor body), call the cross-module constructor.
-        if let Some((ctor_name, _param_count)) = ctx.imported_class_ctors.get(class_name).cloned() {
+        if let Some((ctor_name, param_count)) = ctx.imported_class_ctors.get(class_name).cloned() {
+            // Pad missing optional args with TAG_UNDEFINED so the constructor
+            // doesn't read garbage from stale registers.
+            let undef_lit = crate::nanbox::double_literal(f64::from_bits(
+                crate::nanbox::TAG_UNDEFINED,
+            ));
+            while lowered_args.len() < param_count {
+                lowered_args.push(undef_lit.clone());
+            }
             // Pass `this` as NaN-boxed double (same as compile_method's this_arg).
             let mut ctor_args: Vec<(crate::types::LlvmType, &str)> = Vec::with_capacity(1 + lowered_args.len());
             ctor_args.push((DOUBLE, &obj_box));

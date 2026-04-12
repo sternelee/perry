@@ -46,6 +46,11 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         // small for typical user programs (<1s of overhead) compared
         // to the runtime perf wins on tight loops.
         .arg("-O3")
+        // Include DWARF debug info so crash symbolicators can map
+        // addresses back to function names. Only enabled when
+        // PERRY_DEBUG_SYMBOLS=1 is set — otherwise omitted to keep
+        // binaries small.
+        .args(if std::env::var("PERRY_DEBUG_SYMBOLS").is_ok() { vec!["-g"] } else { vec![] })
         // We want LLVM to reassociate f64 ops (for loop unrolling)
         // but NOT to assume NaN never occurs — Perry's NaN-boxing uses
         // NaN bit patterns for ALL non-number values (strings, objects,

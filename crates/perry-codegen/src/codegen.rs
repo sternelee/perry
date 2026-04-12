@@ -92,6 +92,13 @@ pub struct CompileOptions {
     pub imported_func_param_counts: std::collections::HashMap<String, usize>,
     /// Imported function return types, keyed by local function name.
     pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+    /// Names of imports that are exported VARIABLES (not functions). When an
+    /// `ExternFuncRef` with one of these names appears as a value (not as a
+    /// Call callee), the codegen calls the getter function to fetch the value
+    /// instead of wrapping it as a closure reference. Without this, `import
+    /// { HONE_VERSION } from './version'` followed by `let v = HONE_VERSION`
+    /// would create a closure wrapper around the getter, not the actual string.
+    pub imported_vars: std::collections::HashSet<String>,
 
     // ── Feature plumbing ──
     //
@@ -198,6 +205,14 @@ pub(crate) struct CrossModuleCtx {
     /// and threaded through every `FnCtx` instantiation as a shared
     /// borrow via `cross_module.i18n`.
     pub i18n: Option<crate::expr::I18nLowerCtx>,
+    /// Names of imports that are exported variables (not functions).
+    pub imported_vars: std::collections::HashSet<String>,
+    /// Compile-time constant values for module globals. Maps LocalId → f64
+    /// for variables like `__platform__` whose value is known at compile time.
+    /// Used by `lower_if` to constant-fold platform checks and skip emitting
+    /// dead branches (which may reference FFI functions that don't exist on
+    /// the current target).
+    pub compile_time_constants: std::collections::HashMap<u32, f64>,
 }
 
 /// Compile a Perry HIR module to an object file via LLVM IR.
@@ -438,6 +453,34 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         class_keys_init_data.push((global_name, String::new(), 0));
     }
 
+    // Derive __platform__ number from target triple:
+    //   0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux, 5 = Web
+    let platform_number: f64 = {
+        let t = triple.to_lowercase();
+        if t.contains("ios") { 1.0 }
+        else if t.contains("tvos") { 1.0 }
+        else if t.contains("android") { 2.0 }
+        else if t.contains("windows") || t.contains("mingw") || t.contains("msvc") { 3.0 }
+        else if t.contains("linux") { 4.0 }
+        else if t.contains("wasm") || t.contains("emscripten") { 5.0 }
+        else { 0.0 } // macOS / darwin default
+    };
+    // Pre-scan hir.init for compile-time constant variables. These are
+    // `declare const __platform__: number` / `declare const __plugins__: number`
+    // that other backends (JS, WASM) inject at build time. The LLVM backend
+    // uses these to constant-fold platform checks in `lower_if`, eliminating
+    // dead branches that reference extern FFI functions absent on the target.
+    let mut compile_time_constants: HashMap<u32, f64> = HashMap::new();
+    for s in &hir.init {
+        if let perry_hir::Stmt::Let { id, name, init: None, .. } = s {
+            match name.as_str() {
+                "__platform__" => { compile_time_constants.insert(*id, platform_number); }
+                "__plugins__" => { compile_time_constants.insert(*id, 0.0); }
+                _ => {}
+            }
+        }
+    }
+
     // Build the cross-module context bundle from CompileOptions.
     let cross_module = CrossModuleCtx {
         namespace_imports: opts.namespace_imports.iter().cloned().collect(),
@@ -466,6 +509,8 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 }
             },
         ),
+        imported_vars: opts.imported_vars,
+        compile_time_constants,
     };
 
     // Module-level globals registry. Pre-walk:
@@ -542,11 +587,21 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 // modules can reference them. Internal for the rest.
                 let is_exported = exported_var_names.contains(name);
                 let global_name = format!("perry_global_{}__{}", module_prefix, id);
-                if is_exported {
-                    llmod.add_global(&global_name, DOUBLE, "0.0");
+                // Use the compile-time constant value if one was registered
+                // (e.g., __platform__, __plugins__). Otherwise default to 0.0.
+                let init_value = if let Some(cv) = cross_module.compile_time_constants.get(id) {
+                    format!("{:.1}", cv)
                 } else {
-                    llmod.add_internal_global(&global_name, DOUBLE, "0.0");
-                }
+                    "0.0".to_string()
+                };
+                // Use default (external) linkage for ALL module globals.
+                // `internal` linkage lets clang -O3 assume the global is
+                // never written by optnone functions (setjmp/try-catch),
+                // causing it to constant-fold reads to 0.0. With external
+                // linkage, the optimizer can't make cross-TU assumptions.
+                // The module-unique name (perry_global_<prefix>__N)
+                // prevents symbol collisions across modules.
+                llmod.add_global(&global_name, DOUBLE, &init_value);
                 module_globals.insert(*id, global_name.clone());
 
                 // For exported variables, also emit a trivial getter
@@ -1295,6 +1350,8 @@ fn compile_function(
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
+        imported_vars: &cross_module.imported_vars,
+        compile_time_constants: &cross_module.compile_time_constants,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1530,6 +1587,8 @@ fn compile_closure(
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
+        imported_vars: &cross_module.imported_vars,
+        compile_time_constants: &cross_module.compile_time_constants,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1659,6 +1718,8 @@ fn compile_method(
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
+        imported_vars: &cross_module.imported_vars,
+        compile_time_constants: &cross_module.compile_time_constants,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -1791,6 +1852,8 @@ fn compile_module_entry(
             i18n: &cross_module.i18n,
             local_class_aliases: HashMap::new(),
             local_id_to_name: HashMap::new(),
+            imported_vars: &cross_module.imported_vars,
+            compile_time_constants: &cross_module.compile_time_constants,
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -1895,6 +1958,8 @@ fn compile_module_entry(
             i18n: &cross_module.i18n,
             local_class_aliases: HashMap::new(),
             local_id_to_name: HashMap::new(),
+            imported_vars: &cross_module.imported_vars,
+            compile_time_constants: &cross_module.compile_time_constants,
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -2156,6 +2221,8 @@ fn compile_static_method(
         i18n: &cross_module.i18n,
         local_class_aliases: HashMap::new(),
         local_id_to_name: HashMap::new(),
+        imported_vars: &cross_module.imported_vars,
+        compile_time_constants: &cross_module.compile_time_constants,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;

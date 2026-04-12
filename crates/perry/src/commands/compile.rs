@@ -3747,6 +3747,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         }
     }
 
+    // Set of exported VARIABLES (not functions) — keyed by (module_path, name).
+    // Used to distinguish variable getters from function references when an
+    // ExternFuncRef appears as a value in an importing module.
+    let mut exported_var_names: BTreeSet<(String, String)> = BTreeSet::new();
     // Build a map of all exported functions with their param counts from all modules
     let mut exported_func_param_counts: BTreeMap<(String, String), usize> = BTreeMap::new();
     // Build a map of all exported functions with their return types from all modules
@@ -3804,6 +3808,18 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // Populate exported_var_names: names that are in exported_objects but NOT
+    // in exported_func_param_counts (closures assigned to const are in both).
+    for (path, hir_module) in &ctx.native_modules {
+        let path_str = path.to_string_lossy().to_string();
+        for obj_name in &hir_module.exported_objects {
+            let key = (path_str.clone(), obj_name.clone());
+            if !exported_func_param_counts.contains_key(&key) {
+                exported_var_names.insert(key);
             }
         }
     }
@@ -4260,6 +4276,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             let mut imported_async_set: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut imported_param_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
             let mut imported_return_types: std::collections::HashMap<String, perry_types::Type> = std::collections::HashMap::new();
+            let mut imported_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
 
             for import in &hir_module.imports {
                 if import.module_kind != perry_hir::ModuleKind::NativeCompiled {
@@ -4339,6 +4356,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                     import_function_prefixes.insert(exported_name.clone(), effective_prefix.clone());
                     if local_name != exported_name {
                         import_function_prefixes.insert(local_name.clone(), effective_prefix.clone());
+                    }
+
+                    // Imported variables (not functions) — ExternFuncRef-as-value
+                    // should call the getter, not wrap as closure.
+                    if exported_var_names.contains(&key) {
+                        imported_vars.insert(exported_name.clone());
+                        if local_name != exported_name {
+                            imported_vars.insert(local_name.clone());
+                        }
                     }
 
                     // Imported classes
@@ -4436,6 +4462,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
                 type_aliases: type_alias_map,
                 imported_func_param_counts: imported_param_counts,
                 imported_func_return_types: imported_return_types,
+                imported_vars,
 
                 // Feature plumbing
                 output_type: args.output_type.clone(),
@@ -6700,7 +6727,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
 
     // Strip debug symbols from the final binary (reduces size significantly)
     // Skip for iOS/Android cross-compilation — host strip can't handle foreign architectures
-    if !is_dylib && !is_ios && !is_tvos && target.as_deref() != Some("android") {
+    // Skip when PERRY_DEBUG_SYMBOLS=1 is set — keep symbols for crash debugging
+    if !is_dylib && !is_ios && !is_tvos && target.as_deref() != Some("android")
+        && std::env::var("PERRY_DEBUG_SYMBOLS").is_err() {
         if ctx.needs_plugins {
             // When plugins are enabled, use strip -x to keep exported symbols
             // (dlopen'd plugins need to resolve hone_host_api_* from the main executable)

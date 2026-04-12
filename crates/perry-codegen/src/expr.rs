@@ -413,6 +413,20 @@ pub(crate) struct FnCtx<'a> {
     /// check `ctx.local_class_aliases` (which is keyed by name).
     /// Populated by Stmt::Let alongside `ctx.local_class_aliases`.
     pub local_id_to_name: std::collections::HashMap<u32, String>,
+
+    /// Names of imports that are exported variables (not functions).
+    /// When an ExternFuncRef with one of these names appears as a value,
+    /// the codegen calls the getter instead of wrapping as a closure.
+    pub imported_vars: &'a std::collections::HashSet<String>,
+
+    /// Compile-time constant values for specific module globals. When a
+    /// global is a known compile-time constant (e.g., `__platform__`),
+    /// its LocalId maps to the constant f64 value here. `lower_if` checks
+    /// this to constant-fold comparisons like `if (__platform__ === 1)`
+    /// and skip emitting dead branches — essential because those branches
+    /// may reference extern FFI functions that don't exist on the current
+    /// target (e.g., iOS-only `hone_get_documents_dir` on macOS).
+    pub compile_time_constants: &'a std::collections::HashMap<u32, f64>,
 }
 
 /// Per-module i18n table snapshot used by the LLVM codegen to resolve
@@ -6304,6 +6318,16 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // need a separate runtime path that this commit doesn't add.
         Expr::ExternFuncRef { name, .. } => {
             if let Some(source_prefix) = ctx.import_function_prefixes.get(name).cloned() {
+                // Imported VARIABLES (exported consts/lets) need to be
+                // called through their getter to fetch the value, not
+                // wrapped as closures. Without this, `let v = HONE_VERSION`
+                // creates a closure wrapper instead of the actual string.
+                if ctx.imported_vars.contains(name) {
+                    let fname = format!("perry_fn_{}__{}", source_prefix, name);
+                    ctx.pending_declares
+                        .push((fname.clone(), DOUBLE, vec![]));
+                    return Ok(ctx.block().call(DOUBLE, &fname, &[]));
+                }
                 let global_name = format!(
                     "__perry_extern_closure_{}__{}",
                     source_prefix, name
