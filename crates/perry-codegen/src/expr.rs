@@ -3196,11 +3196,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // `<Buffer xx xx ...>`. Buffer methods (`.length`, `.toString`, etc.)
         // also flow through the raw-pointer fallback.
         Expr::FsReadFileBinary(path) => {
+            // Use js_fs_read_file_sync (returns StringHeader*) instead of
+            // js_fs_read_file_binary (returns BufferHeader*). StringHeader
+            // is 12 bytes (length, capacity, refcount) while BufferHeader
+            // is 8 bytes (length, capacity). Treating a Buffer pointer as
+            // a String skips 4 bytes of data (offset 12 vs 8), causing
+            // "sidebarLocation" to become "barLocation".
             let path_box = lower_expr(ctx, path)?;
             let blk = ctx.block();
             let str_handle = blk.call(
                 I64,
-                "js_fs_read_file_binary",
+                "js_fs_read_file_sync",
                 &[(DOUBLE, &path_box)],
             );
             Ok(nanbox_string_inline(blk, &str_handle))

@@ -524,6 +524,33 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         if is_string_expr(ctx, object) {
             return lower_string_method(ctx, object, property, args);
         }
+        // String method fallback for Any-typed receivers: when the method
+        // name is a well-known string method that has no array/object
+        // equivalent, route through the string dispatcher. This handles
+        // the common pattern where a cross-module function returns a string
+        // but the local is typed as Any (e.g., `readFileSync(path).split('\n')`).
+        // Without this, .split/.charCodeAt/.charAt/etc. on Any-typed strings
+        // fall through to js_native_call_method which returns [object Object].
+        {
+            // Only include methods that are EXCLUSIVELY string methods
+            // (no array/map/set equivalent). Exclude: slice, indexOf,
+            // lastIndexOf, includes, at, concat — these also exist on
+            // arrays and would break when the receiver is an Any-typed
+            // array. Also exclude multi-arg variants that the string
+            // dispatcher doesn't support (startsWith 2-arg, etc.).
+            let is_string_only_method = match property.as_str() {
+                "split" | "charCodeAt" | "charAt"
+                | "trim" | "trimStart" | "trimEnd" | "substring"
+                | "substr" | "toLowerCase" | "toUpperCase"
+                | "replaceAll" | "padStart" | "padEnd" | "repeat"
+                | "normalize" | "codePointAt"
+                | "localeCompare" => true,
+                _ => false,
+            };
+            if is_string_only_method && !is_array_expr(ctx, object) {
+                return lower_string_method(ctx, object, property, args);
+            }
+        }
         if is_array_expr(ctx, object) {
             return lower_array_method(ctx, object, property, args);
         }
