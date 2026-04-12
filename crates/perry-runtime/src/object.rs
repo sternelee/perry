@@ -1249,6 +1249,9 @@ pub extern "C" fn js_object_set_field(obj: *mut ObjectHeader, field_index: u32, 
 /// Get the class ID of an object
 #[no_mangle]
 pub extern "C" fn js_object_get_class_id(obj: *const ObjectHeader) -> u32 {
+    if obj.is_null() || (obj as usize) < 0x1000 {
+        return 0;
+    }
     unsafe { (*obj).class_id }
 }
 
@@ -1585,6 +1588,10 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         // Validate this is an ObjectHeader, not some other heap type.
         // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
         // for static/const objects that don't have GcHeaders.
+        // Guard: ensure we can safely read GC_HEADER_SIZE bytes before obj
+        if (obj as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+            return JSValue::undefined();
+        }
         let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
         let gc_type = (*gc_header).obj_type;
         // Error objects: route the common instance properties (message,
@@ -1949,6 +1956,10 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         // Validate this is an ObjectHeader, not some other heap type.
         // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
         // for static/const objects that don't have GcHeaders.
+        // Guard: ensure we can safely read GC_HEADER_SIZE bytes before obj
+        if (obj as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+            return;
+        }
         let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
         let gc_type = (*gc_header).obj_type;
         if gc_type != crate::gc::GC_TYPE_OBJECT && gc_type != crate::gc::GC_TYPE_CLOSURE {
@@ -2916,6 +2927,10 @@ pub unsafe extern "C" fn js_native_call_method(
         // Validate this is an ObjectHeader, not some other heap type.
         // Check GcHeader first (reliable for heap objects), then fallback to ObjectHeader.object_type
         // for static/const objects that don't have GcHeaders.
+        // Guard: ensure we can safely read GC_HEADER_SIZE bytes before obj
+        if (obj as usize) < crate::gc::GC_HEADER_SIZE + 0x1000 {
+            return 0.0;
+        }
         let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
         let gc_type = (*gc_header).obj_type;
         if gc_type != crate::gc::GC_TYPE_OBJECT {
