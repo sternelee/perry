@@ -3198,12 +3198,12 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         Expr::FsReadFileBinary(path) => {
             let path_box = lower_expr(ctx, path)?;
             let blk = ctx.block();
-            let buf_handle = blk.call(
+            let str_handle = blk.call(
                 I64,
                 "js_fs_read_file_binary",
                 &[(DOUBLE, &path_box)],
             );
-            Ok(blk.bitcast_i64_to_double(&buf_handle))
+            Ok(nanbox_string_inline(blk, &str_handle))
         }
 
         // -------- instanceof --------
