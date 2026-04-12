@@ -487,6 +487,30 @@ fn collect_closures_in_expr(
         Expr::Yield { value, .. } => {
             if let Some(v) = value { walk(v, seen, out); }
         }
+        // Child process expressions — walk all sub-expressions.
+        Expr::ChildProcessExecSync { command, options } => {
+            walk(command, seen, out);
+            if let Some(o) = options { walk(o, seen, out); }
+        }
+        Expr::ChildProcessSpawnSync { command, args, options } |
+        Expr::ChildProcessSpawn { command, args, options } => {
+            walk(command, seen, out);
+            if let Some(a) = args { walk(a, seen, out); }
+            if let Some(o) = options { walk(o, seen, out); }
+        }
+        Expr::ChildProcessExec { command, options, callback } => {
+            walk(command, seen, out);
+            if let Some(o) = options { walk(o, seen, out); }
+            if let Some(c) = callback { walk(c, seen, out); }
+        }
+        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
+            walk(command, seen, out);
+            if let Some(a) = args { walk(a, seen, out); }
+            walk(log_file, seen, out);
+            if let Some(e) = env_json { walk(e, seen, out); }
+        }
+        Expr::ChildProcessGetProcessStatus(h) |
+        Expr::ChildProcessKillProcess(h) => walk(h, seen, out),
         // Reflect.* and other iterator/json wrappers — can carry callbacks.
         Expr::IteratorToArray(o) | Expr::ArrayIsArray(o) => walk(o, seen, out),
         Expr::JsonStringify(o) | Expr::JsonParse(o) => walk(o, seen, out),

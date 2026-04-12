@@ -6487,6 +6487,143 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_string_inline(ctx.block(), &final_handle))
         }
 
+        // -------- Child Process --------
+        Expr::ChildProcessExecSync { command, options } => {
+            let cmd_box = lower_expr(ctx, command)?;
+            let blk = ctx.block();
+            let cmd_str = unbox_to_i64(blk, &cmd_box);
+            let opts_str = if let Some(opts) = options {
+                let o = lower_expr(ctx, opts)?;
+                unbox_to_i64(ctx.block(), &o)
+            } else {
+                "0".to_string()
+            };
+            // js_child_process_exec_sync(cmd: i64, opts: i64) -> i64 (string handle)
+            let result = ctx.block().call(
+                I64,
+                "js_child_process_exec_sync",
+                &[(I64, &cmd_str), (I64, &opts_str)],
+            );
+            Ok(nanbox_string_inline(ctx.block(), &result))
+        }
+
+        Expr::ChildProcessSpawnSync { command, args, options } => {
+            let cmd_box = lower_expr(ctx, command)?;
+            let blk = ctx.block();
+            let cmd_str = unbox_to_i64(blk, &cmd_box);
+            let args_str = if let Some(a) = args {
+                let v = lower_expr(ctx, a)?;
+                unbox_to_i64(ctx.block(), &v)
+            } else {
+                "0".to_string()
+            };
+            let opts_str = if let Some(o) = options {
+                let v = lower_expr(ctx, o)?;
+                unbox_to_i64(ctx.block(), &v)
+            } else {
+                "0".to_string()
+            };
+            // js_child_process_spawn_sync(cmd: i64, args: i64, opts: i64) -> i64
+            let result = ctx.block().call(
+                I64,
+                "js_child_process_spawn_sync",
+                &[(I64, &cmd_str), (I64, &args_str), (I64, &opts_str)],
+            );
+            Ok(nanbox_pointer_inline(ctx.block(), &result))
+        }
+
+        Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
+            let cmd_box = lower_expr(ctx, command)?;
+            let args_box = if let Some(a) = args {
+                lower_expr(ctx, a)?
+            } else {
+                double_literal(0.0)
+            };
+            let log_box = lower_expr(ctx, log_file)?;
+            let blk = ctx.block();
+            let log_str = unbox_to_i64(blk, &log_box);
+            let log_nanbox = nanbox_string_inline(ctx.block(), &log_str);
+            let env_box = if let Some(e) = env_json {
+                lower_expr(ctx, e)?
+            } else {
+                double_literal(0.0)
+            };
+            // js_child_process_spawn_background(cmd: f64, args_arr: i64, logFile: f64, envJson: f64) -> i64
+            let blk = ctx.block();
+            let cmd_str = unbox_to_i64(blk, &cmd_box);
+            let result = ctx.block().call(
+                I64,
+                "js_child_process_spawn_background",
+                &[(DOUBLE, &cmd_box), (I64, &cmd_str), (DOUBLE, &log_nanbox), (DOUBLE, &env_box)],
+            );
+            Ok(nanbox_pointer_inline(ctx.block(), &result))
+        }
+
+        Expr::ChildProcessSpawn { command, args, options } => {
+            let cmd_box = lower_expr(ctx, command)?;
+            let blk = ctx.block();
+            let cmd_str = unbox_to_i64(blk, &cmd_box);
+            let args_str = if let Some(a) = args {
+                let v = lower_expr(ctx, a)?;
+                unbox_to_i64(ctx.block(), &v)
+            } else {
+                "0".to_string()
+            };
+            let opts_str = if let Some(o) = options {
+                let v = lower_expr(ctx, o)?;
+                unbox_to_i64(ctx.block(), &v)
+            } else {
+                "0".to_string()
+            };
+            let result = ctx.block().call(
+                I64,
+                "js_child_process_spawn_sync",
+                &[(I64, &cmd_str), (I64, &args_str), (I64, &opts_str)],
+            );
+            Ok(nanbox_pointer_inline(ctx.block(), &result))
+        }
+
+        Expr::ChildProcessExec { command, options, callback } => {
+            let cmd_box = lower_expr(ctx, command)?;
+            let blk = ctx.block();
+            let cmd_str = unbox_to_i64(blk, &cmd_box);
+            let opts_str = if let Some(o) = options {
+                let v = lower_expr(ctx, o)?;
+                unbox_to_i64(ctx.block(), &v)
+            } else {
+                "0".to_string()
+            };
+            if let Some(cb) = callback {
+                let _ = lower_expr(ctx, cb)?;
+            }
+            let result = ctx.block().call(
+                I64,
+                "js_child_process_exec_sync",
+                &[(I64, &cmd_str), (I64, &opts_str)],
+            );
+            Ok(nanbox_string_inline(ctx.block(), &result))
+        }
+
+        Expr::ChildProcessGetProcessStatus(handle) => {
+            let h = lower_expr(ctx, handle)?;
+            let result = ctx.block().call(
+                I64,
+                "js_child_process_get_process_status",
+                &[(DOUBLE, &h)],
+            );
+            Ok(nanbox_pointer_inline(ctx.block(), &result))
+        }
+
+        Expr::ChildProcessKillProcess(handle) => {
+            let h = lower_expr(ctx, handle)?;
+            let _ = ctx.block().call(
+                I32,
+                "js_child_process_kill_process",
+                &[(DOUBLE, &h)],
+            );
+            Ok(double_literal(0.0))
+        }
+
         // -------- Unsupported (clear error) --------
         other => bail!(
             "perry-codegen Phase 2: expression {} not yet supported",
