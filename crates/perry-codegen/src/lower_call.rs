@@ -219,6 +219,13 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             }
             _ => {}
         }
+        // perry/system dispatch: map JS names (isDarkMode, getDeviceIdiom,
+        // keychainSave, etc.) to their perry_system_* / perry_* C symbols.
+        // These arrive as ExternFuncRef because perry/system imports aren't
+        // lowered to NativeMethodCall in the HIR.
+        if let Some(sig) = perry_system_table_lookup(name) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
         // Built-in runtime extern functions (`js_weakmap_set`,
         // `js_regexp_exec`, etc.) that start with `js_` are resolved
         // directly against the runtime library — bypass the import-
@@ -3621,6 +3628,38 @@ fn perry_ui_table_lookup(method: &str) -> Option<&'static UiSig> {
 
 fn perry_ui_instance_method_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_UI_INSTANCE_TABLE.iter().find(|s| s.method == method)
+}
+
+// =============================================================================
+// perry/system dispatch table
+// =============================================================================
+
+/// Maps JS import names from `perry/system` to their `perry_system_*` / `perry_*`
+/// runtime C symbols. Uses the same UiSig + lower_perry_ui_table_call machinery
+/// since the calling convention is identical.
+static PERRY_SYSTEM_TABLE: &[UiSig] = &[
+    UiSig { method: "isDarkMode", runtime: "perry_system_is_dark_mode",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "getDeviceIdiom", runtime: "perry_get_device_idiom",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "openURL", runtime: "perry_system_open_url",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "keychainSave", runtime: "perry_system_keychain_save",
+            args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "keychainGet", runtime: "perry_system_keychain_get",
+            args: &[UiArgKind::Str], ret: UiReturnKind::F64 },
+    UiSig { method: "keychainDelete", runtime: "perry_system_keychain_delete",
+            args: &[UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "preferencesGet", runtime: "perry_system_preferences_get",
+            args: &[UiArgKind::Str], ret: UiReturnKind::F64 },
+    UiSig { method: "preferencesSet", runtime: "perry_system_preferences_set",
+            args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "notificationSend", runtime: "perry_system_notification_send",
+            args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
+];
+
+fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_SYSTEM_TABLE.iter().find(|s| s.method == method)
 }
 
 /// Lower a perry/ui call described by `sig`. Walks each arg, applies

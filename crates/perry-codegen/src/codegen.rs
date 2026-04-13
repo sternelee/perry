@@ -2496,9 +2496,12 @@ fn default_target_triple() -> String {
 ///  * anything else                    → None (use host default)
 pub fn resolve_target_triple(name: &str) -> Option<String> {
     match name {
-        "ios" | "ios-simulator" => Some("aarch64-apple-ios".to_string()),
-        "watchos" | "watchos-simulator" => Some("aarch64-apple-watchos".to_string()),
-        "tvos" | "tvos-simulator" => Some("aarch64-apple-tvos".to_string()),
+        "ios" => Some("aarch64-apple-ios".to_string()),
+        "ios-simulator" => Some("arm64-apple-ios17.0-simulator".to_string()),
+        "watchos" => Some("aarch64-apple-watchos".to_string()),
+        "watchos-simulator" => Some("arm64-apple-watchos10.0-simulator".to_string()),
+        "tvos" => Some("aarch64-apple-tvos".to_string()),
+        "tvos-simulator" => Some("arm64-apple-tvos17.0-simulator".to_string()),
         "android" => Some("aarch64-unknown-linux-android".to_string()),
         "linux" => Some("x86_64-unknown-linux-gnu".to_string()),
         "linux-aarch64" => Some("aarch64-unknown-linux-gnu".to_string()),

@@ -223,6 +223,13 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
             if let Some(init_expr) = init {
                 let v = lower_expr(ctx, init_expr)?;
                 ctx.block().store(DOUBLE, &v, &slot);
+            } else if let Some(cv) = ctx.compile_time_constants.get(id) {
+                // Compile-time constants (e.g. `declare const __platform__: number`)
+                // have no init expression but their value is known. Store the
+                // constant value so runtime reads get the correct number instead
+                // of TAG_UNDEFINED (a NaN that fails all numeric comparisons).
+                let lit = crate::nanbox::double_literal(*cv);
+                ctx.block().store(DOUBLE, &lit, &slot);
             }
             Ok(())
         }
