@@ -461,10 +461,11 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
     }
 
     // Derive __platform__ number from target triple:
-    //   0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux, 5 = Web
+    //   0 = macOS, 1 = iOS, 2 = Android, 3 = Windows, 4 = Linux, 5 = watchOS, 6 = Web
     let platform_number: f64 = {
         let t = triple.to_lowercase();
-        if t.contains("ios") { 1.0 }
+        if t.contains("watchos") { 5.0 }
+        else if t.contains("ios") { 1.0 }
         else if t.contains("tvos") { 1.0 }
         else if t.contains("android") { 2.0 }
         else if t.contains("windows") || t.contains("mingw") || t.contains("msvc") { 3.0 }
@@ -1355,6 +1356,11 @@ fn compile_function(
     // `BinaryOp::Mod` to emit integer modulo instead of libm `fmod()`.
     let integer_locals = crate::collectors::collect_integer_locals(&f.body);
 
+    // Pre-walk: which `let x = new Class(...)` locals never escape?
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        &f.body, &boxed_vars, module_globals,
+    );
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -1401,6 +1407,9 @@ fn compile_function(
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1588,6 +1597,10 @@ fn compile_closure(
 
     let integer_locals = crate::collectors::collect_integer_locals(body);
 
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        body, &closure_boxed_vars, module_globals,
+    );
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -1638,6 +1651,9 @@ fn compile_closure(
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1726,6 +1742,10 @@ fn compile_method(
 
     let integer_locals = crate::collectors::collect_integer_locals(&method.body);
 
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        &method.body, &method_boxed_vars, module_globals,
+    );
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -1772,6 +1792,9 @@ fn compile_method(
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
     };
 
     stmt::lower_stmts(&mut ctx, &method.body)
@@ -1860,6 +1883,9 @@ fn compile_module_entry(
 
         let main_boxed_vars = module_boxed_vars.clone();
         let main_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let main_non_escaping_news = crate::collectors::collect_non_escaping_news(
+            &hir.init, &main_boxed_vars, module_globals,
+        );
         let mut ctx = FnCtx {
             func: main,
             locals: HashMap::new(),
@@ -1906,6 +1932,9 @@ fn compile_module_entry(
             local_id_to_name: HashMap::new(),
             imported_vars: &cross_module.imported_vars,
             compile_time_constants: &cross_module.compile_time_constants,
+            scalar_replaced: std::collections::HashMap::new(),
+            scalar_ctor_target: Vec::new(),
+            non_escaping_news: main_non_escaping_news,
         };
         // Initialize static class fields with their declared init
         // expressions. Runs once at the top of main, before user code.
@@ -1966,6 +1995,9 @@ fn compile_module_entry(
 
         let init_boxed_vars = module_boxed_vars.clone();
         let init_integer_locals = crate::collectors::collect_integer_locals(&hir.init);
+        let init_non_escaping_news = crate::collectors::collect_non_escaping_news(
+            &hir.init, &init_boxed_vars, module_globals,
+        );
         let mut ctx = FnCtx {
             func: init_fn,
             locals: HashMap::new(),
@@ -2012,6 +2044,9 @@ fn compile_module_entry(
             local_id_to_name: HashMap::new(),
             imported_vars: &cross_module.imported_vars,
             compile_time_constants: &cross_module.compile_time_constants,
+            scalar_replaced: std::collections::HashMap::new(),
+            scalar_ctor_target: Vec::new(),
+            non_escaping_news: init_non_escaping_news,
         };
         init_static_fields(&mut ctx, hir)?;
         stmt::lower_stmts(&mut ctx, &hir.init)
@@ -2225,6 +2260,11 @@ fn compile_static_method(
 
     let integer_locals = crate::collectors::collect_integer_locals(&f.body);
 
+    let static_boxed_vars = module_boxed_vars.clone();
+    let non_escaping_news = crate::collectors::collect_non_escaping_news(
+        &f.body, &static_boxed_vars, module_globals,
+    );
+
     let mut ctx = FnCtx {
         func: lf,
         locals,
@@ -2254,7 +2294,7 @@ fn compile_static_method(
         class_keys_globals: &cross_module.class_keys_globals,
             imported_class_ctors: &cross_module.imported_class_ctors,
         func_signatures,
-        boxed_vars: module_boxed_vars.clone(),
+        boxed_vars: static_boxed_vars,
         closure_rest_params,
         local_closure_func_ids: HashMap::new(),
         namespace_imports: &cross_module.namespace_imports,
@@ -2275,6 +2315,9 @@ fn compile_static_method(
         local_id_to_name: HashMap::new(),
         imported_vars: &cross_module.imported_vars,
         compile_time_constants: &cross_module.compile_time_constants,
+        scalar_replaced: std::collections::HashMap::new(),
+        scalar_ctor_target: Vec::new(),
+        non_escaping_news,
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;
@@ -2485,7 +2528,8 @@ fn default_target_triple() -> String {
 ///
 /// Supported:
 ///  * `ios`, `ios-simulator`           → aarch64-apple-ios
-///  * `watchos`, `watchos-simulator`   → aarch64-apple-watchos
+///  * `watchos`                         → arm64_32-apple-watchos (ILP32)
+///  * `watchos-simulator`               → arm64-apple-watchos10.0-simulator
 ///  * `tvos`, `tvos-simulator`         → aarch64-apple-tvos
 ///  * `android`                        → aarch64-unknown-linux-android
 ///  * `linux` (x86_64 alias)           → x86_64-unknown-linux-gnu
@@ -2498,7 +2542,7 @@ pub fn resolve_target_triple(name: &str) -> Option<String> {
     match name {
         "ios" => Some("aarch64-apple-ios".to_string()),
         "ios-simulator" => Some("arm64-apple-ios17.0-simulator".to_string()),
-        "watchos" => Some("aarch64-apple-watchos".to_string()),
+        "watchos" => Some("arm64_32-apple-watchos".to_string()),
         "watchos-simulator" => Some("arm64-apple-watchos10.0-simulator".to_string()),
         "tvos" => Some("aarch64-apple-tvos".to_string()),
         "tvos-simulator" => Some("arm64-apple-tvos17.0-simulator".to_string()),

@@ -803,7 +803,7 @@ fn unbox_pointer_ac(v: f64) -> *mut ObjectHeader {
     let bits = v.to_bits();
     if (bits & 0xFFFF_0000_0000_0000) != POINTER_TAG_AC {
         // Fallback: legacy raw bitcast path
-        return unsafe { std::mem::transmute::<f64, *mut ObjectHeader>(v) };
+        return (v.to_bits() as usize) as *mut ObjectHeader;
     }
     (bits & 0x0000_FFFF_FFFF_FFFF) as *mut ObjectHeader
 }

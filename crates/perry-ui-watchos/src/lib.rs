@@ -5,6 +5,7 @@
 //! it as SwiftUI views reactively.
 
 pub mod app;
+pub mod audio;
 pub mod tree;
 pub mod state;
 pub mod widgets;
@@ -656,10 +657,10 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 
 #[no_mangle] pub extern "C" fn perry_system_open_url(_url: i64) {}
 #[no_mangle] pub extern "C" fn perry_system_request_location(_cb: f64) {}
-#[no_mangle] pub extern "C" fn perry_system_audio_start() -> i64 { 0 }
-#[no_mangle] pub extern "C" fn perry_system_audio_stop() {}
-#[no_mangle] pub extern "C" fn perry_system_audio_get_level() -> f64 { 0.0 }
-#[no_mangle] pub extern "C" fn perry_system_audio_get_peak() -> f64 { 0.0 }
+#[no_mangle] pub extern "C" fn perry_system_audio_start() -> f64 { 1.0 }
+#[no_mangle] pub extern "C" fn perry_system_audio_stop() { audio::stop() }
+#[no_mangle] pub extern "C" fn perry_system_audio_get_level() -> f64 { audio::get_level() }
+#[no_mangle] pub extern "C" fn perry_system_audio_get_peak() -> f64 { audio::get_peak() }
 #[no_mangle] pub extern "C" fn perry_system_audio_get_waveform(_count: f64) -> f64 { 0.0 }
 #[no_mangle] pub extern "C" fn perry_system_get_device_model() -> i64 { 0 }
 #[no_mangle] pub extern "C" fn perry_system_is_dark_mode() -> i64 { 0 }

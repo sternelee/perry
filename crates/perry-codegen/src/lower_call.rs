@@ -2050,6 +2050,14 @@ pub(crate) fn lower_new(
 /// child, matching JavaScript / TypeScript class semantics where fields
 /// are initialized before user-written constructor code executes (field
 /// initializers are conceptually prepended to the constructor body).
+/// Public entry point for scalar-replacement path in stmt.rs.
+pub(crate) fn apply_field_initializers_recursive_pub(
+    ctx: &mut FnCtx<'_>,
+    class_name: &str,
+) -> Result<()> {
+    apply_field_initializers_recursive(ctx, class_name)
+}
+
 fn apply_field_initializers_recursive(
     ctx: &mut FnCtx<'_>,
     class_name: &str,
@@ -2269,6 +2277,13 @@ pub(crate) fn lower_native_method_call(
     // to the perry_ui_* runtime function and arg shape. Most setters
     // follow `(widget, …number args)` and most constructors return a
     // widget handle that gets NaN-boxed as POINTER on the way out.
+    // perry/system dispatch: audioStart, audioGetLevel, getDeviceModel, etc.
+    if module == "perry/system" && object.is_none() {
+        if let Some(sig) = perry_system_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+    }
+
     if module == "perry/ui"
         && object.is_none()
         && method != "App"
@@ -3664,6 +3679,18 @@ static PERRY_SYSTEM_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Str, UiArgKind::F64], ret: UiReturnKind::Void },
     UiSig { method: "notificationSend", runtime: "perry_system_notification_send",
             args: &[UiArgKind::Str, UiArgKind::Str], ret: UiReturnKind::Void },
+    UiSig { method: "audioStart", runtime: "perry_system_audio_start",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "audioStop", runtime: "perry_system_audio_stop",
+            args: &[], ret: UiReturnKind::Void },
+    UiSig { method: "audioGetLevel", runtime: "perry_system_audio_get_level",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "audioGetPeak", runtime: "perry_system_audio_get_peak",
+            args: &[], ret: UiReturnKind::F64 },
+    UiSig { method: "audioGetWaveform", runtime: "perry_system_audio_get_waveform",
+            args: &[UiArgKind::F64], ret: UiReturnKind::F64 },
+    UiSig { method: "getDeviceModel", runtime: "perry_system_get_device_model",
+            args: &[], ret: UiReturnKind::F64 },
 ];
 
 fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> {

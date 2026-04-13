@@ -102,7 +102,7 @@ unsafe fn mark_all_keys(obj: *mut ObjectHeader, drop_writable: bool, _drop_enume
         return;
     }
     let keys_ptr = keys as usize;
-    if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+    if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
         return;
     }
     let key_count = crate::array::js_array_length(keys) as usize;
@@ -684,7 +684,7 @@ fn get_parent_class_id(class_id: u32) -> Option<u32> {
 /// Values below that are likely INT32_TAG extracts, small handles, or null.
 #[inline(always)]
 fn is_valid_obj_ptr(ptr: *const u8) -> bool {
-    let addr = ptr as usize;
+    let addr = ptr as u64;
     // macOS ARM64: heap/code/stack pointers are > 0x100000000 (4GB).
     addr > 0x100000000 && addr < 0x800000000000
 }
@@ -1192,7 +1192,7 @@ pub unsafe extern "C" fn js_object_copy_own_fields(dst_i64: i64, src_f64: f64) {
 /// Get a field from an object by index
 #[no_mangle]
 pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32) -> JSValue {
-    let obj = { let b = obj as usize; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return JSValue::undefined(); } (b & 0x0000_FFFF_FFFF_FFFF) as *const ObjectHeader } else { obj } };
+    let obj = { let b = obj as u64; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return JSValue::undefined(); } (b & 0x0000_FFFF_FFFF_FFFF) as *const ObjectHeader } else { obj } };
     if obj.is_null() || (obj as usize) < 0x1000000 { return JSValue::undefined(); }
     unsafe {
         // Bounds check: check inline fields first, then overflow map
@@ -1225,7 +1225,7 @@ pub extern "C" fn js_object_get_field(obj: *const ObjectHeader, field_index: u32
 /// Set a field on an object by index
 #[no_mangle]
 pub extern "C" fn js_object_set_field(obj: *mut ObjectHeader, field_index: u32, value: JSValue) {
-    let obj = { let b = obj as usize; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return; } (b & 0x0000_FFFF_FFFF_FFFF) as *mut ObjectHeader } else { obj } };
+    let obj = { let b = obj as u64; let t = b >> 48; if t >= 0x7FF8 { if t == 0x7FFC || (b & 0x0000_FFFF_FFFF_FFFF) == 0 || (b & 0x0000_FFFF_FFFF_FFFF) < 0x10000 { return; } (b & 0x0000_FFFF_FFFF_FFFF) as *mut ObjectHeader } else { obj } };
     if obj.is_null() || (obj as usize) < 0x1000000 { return; }
     unsafe {
         // Bounds check: guard against out-of-range field writes that corrupt adjacent
@@ -1522,7 +1522,7 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
 pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *const crate::StringHeader) -> JSValue {
     // Strip NaN-boxing tags if present (defensive: handle POINTER_TAG, UNDEFINED, NULL, etc.)
     let obj = {
-        let bits = obj as usize;
+        let bits = obj as u64;
         let top16 = bits >> 48;
         if top16 >= 0x7FF8 {
             // NaN-boxed value — extract lower 48 bits as pointer
@@ -1764,7 +1764,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         // If the object is actually a non-Object type (closure, array, map, etc.), keys_array at offset
         // 16 may contain garbage. An invalid upper 16-bit value catches this case defensively.
         let keys_ptr = keys as usize;
-        if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+        if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
             return JSValue::undefined();
         }
 
@@ -1921,7 +1921,7 @@ pub extern "C" fn js_object_get_field_by_name_f64(obj: *const ObjectHeader, key:
 pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *const crate::StringHeader, value: f64) {
     // Strip NaN-boxing tags if present (defensive: handle POINTER_TAG, UNDEFINED, NULL, etc.)
     let obj = {
-        let bits = obj as usize;
+        let bits = obj as u64;
         let top16 = bits >> 48;
         if top16 >= 0x7FF8 {
             // NaN-boxed value — extract lower 48 bits as pointer
@@ -2009,7 +2009,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         // If the object is a non-Object type, keys at offset 16 may contain garbage.
         if !keys.is_null() {
             let keys_ptr = keys as usize;
-            if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+            if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
                 // Invalid keys_array pointer — silently ignore to avoid crash
                 return;
             }
@@ -2674,7 +2674,7 @@ pub unsafe extern "C" fn js_native_call_method(
             let keys = (*obj).keys_array;
             if !keys.is_null() {
                 let keys_ptr = keys as usize;
-                if keys_ptr >> 48 == 0 && keys_ptr >= 0x10000 {
+                if (keys_ptr as u64) >> 48 == 0 && keys_ptr >= 0x10000 {
                     let key_count = crate::array::js_array_length(keys) as usize;
                     if key_count <= 65536 {
                         let method_key = crate::string::js_string_from_bytes(
@@ -2823,7 +2823,7 @@ pub unsafe extern "C" fn js_native_call_method(
             let keys = (*obj).keys_array;
             if !keys.is_null() {
                 let keys_ptr = keys as usize;
-                if keys_ptr >> 48 == 0 && keys_ptr >= 0x10000 {
+                if (keys_ptr as u64) >> 48 == 0 && keys_ptr >= 0x10000 {
                     let key_count = crate::array::js_array_length(keys) as usize;
                     if key_count <= 65536 {
                         let method_key = crate::string::js_string_from_bytes(
@@ -2969,7 +2969,7 @@ pub unsafe extern "C" fn js_native_call_method(
         if !keys.is_null() {
             // Validate keys_array pointer before dereferencing
             let keys_ptr = keys as usize;
-            if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+            if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
                 let null_obj_ptr = &NULL_OBJECT_BYTES as *const NullObjectBytes as *mut u8;
                 return f64::from_bits(JSValue::pointer(null_obj_ptr).bits());
             }
@@ -4075,7 +4075,7 @@ unsafe fn ensure_key_in_keys_array(obj: *mut ObjectHeader, key: *const crate::St
     }
     // Validate keys array pointer
     let keys_ptr = keys as usize;
-    if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+    if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
         return;
     }
     // Check if key already exists
@@ -4211,7 +4211,7 @@ unsafe fn own_key_present(obj: *mut ObjectHeader, key: *const crate::StringHeade
         return false;
     }
     let keys_ptr = keys as usize;
-    if keys_ptr >> 48 != 0 || keys_ptr < 0x10000 {
+    if (keys_ptr as u64) >> 48 != 0 || keys_ptr < 0x10000 {
         return false;
     }
     // Validate keys_array GC header

@@ -242,7 +242,7 @@ pub extern "C" fn js_set_alloc(capacity: u32) -> *mut SetHeader {
 /// Clean a set pointer that might have NaN-box tag bits
 #[inline(always)]
 fn clean_set_ptr(set: *const SetHeader) -> *const SetHeader {
-    let bits = set as usize;
+    let bits = set as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {

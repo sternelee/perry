@@ -419,7 +419,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     let obj_ptr = ptr as *const crate::object::ObjectHeader;
                     let keys_array = (*obj_ptr).keys_array;
 
-                    if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
+                    if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as u64) >> 48) == 0 {
                         format_object_as_json(obj_ptr, depth)
                     } else {
                         "[object Object]".to_string()
@@ -691,7 +691,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                         }
                         let obj_ptr = ptr as *const crate::object::ObjectHeader;
                         let keys_array = (*obj_ptr).keys_array;
-                        if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as usize) >> 48) == 0 {
+                        if !keys_array.is_null() && (keys_array as usize) > 0x10000 && ((keys_array as u64) >> 48) == 0 {
                             format_object_as_json(obj_ptr, depth)
                         } else {
                             "[object Object]".to_string()

@@ -10,7 +10,7 @@ Since watchOS does not support UIKit views, Perry uses a **data-driven SwiftUI r
 - Xcode (full install) for watchOS SDK and Simulator
 - Rust watchOS targets:
   ```bash
-  rustup target add aarch64-apple-watchos aarch64-apple-watchos-sim
+  rustup target add arm64_32-apple-watchos aarch64-apple-watchos-sim
   ```
 
 ## Building for Simulator
@@ -27,7 +27,7 @@ This produces an ARM64 binary linked with `swiftc` against the watchOS Simulator
 perry compile app.ts -o app --target watchos
 ```
 
-This produces an ARM64 binary for physical Apple Watch hardware.
+This produces an arm64_32 (ILP32) binary for physical Apple Watch hardware. Apple Watch uses 32-bit pointers on 64-bit ARM.
 
 ## Running with `perry run`
 

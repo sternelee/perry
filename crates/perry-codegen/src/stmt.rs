@@ -143,6 +143,77 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                 ctx.local_closure_func_ids.insert(*id, *cfid);
             }
 
+            // Scalar replacement: if this Let binds a non-escaping New,
+            // skip the heap allocation entirely. Create a stack alloca
+            // per field and inline the constructor stores into those allocas.
+            if let Some(perry_hir::Expr::New { class_name, args, .. }) = init.as_ref() {
+                if ctx.non_escaping_news.contains_key(id) {
+                    // Extract all class data we need (field names + ctor) before
+                    // taking mutable borrows on ctx. Clone out of the shared
+                    // `classes` map so we release the immutable borrow early.
+                    let scalar_data = collect_scalar_class_data(ctx, class_name);
+
+                    if let Some((all_fields, ctor)) = scalar_data {
+                        // Create per-field allocas
+                        let mut field_slots: std::collections::HashMap<String, String> =
+                            std::collections::HashMap::new();
+                        for fname in &all_fields {
+                            let slot = ctx.func.alloca_entry(DOUBLE);
+                            let undef = crate::nanbox::double_literal(f64::from_bits(
+                                crate::nanbox::TAG_UNDEFINED,
+                            ));
+                            ctx.func.entry_allocas_push_store(DOUBLE, &undef, &slot);
+                            field_slots.insert(fname.clone(), slot);
+                        }
+
+                        ctx.scalar_replaced.insert(*id, field_slots);
+
+                        // Register type + dummy slot so LocalGet doesn't fail
+                        ctx.local_types.insert(*id, refined_ty);
+                        let dummy_slot = ctx.func.alloca_entry(DOUBLE);
+                        ctx.locals.insert(*id, dummy_slot);
+
+                        // Lower args first
+                        let mut lowered_args: Vec<String> = Vec::new();
+                        for a in args {
+                            lowered_args.push(lower_expr(ctx, a)?);
+                        }
+
+                        // Push scalar ctor target so PropertySet on `this` routes to allocas
+                        ctx.scalar_ctor_target.push(*id);
+                        ctx.class_stack.push(class_name.clone());
+                        // A dummy this_stack entry — the ctor body references Expr::This
+                        // but scalar-replaced PropertySet intercepts it before loading
+                        let dummy_this = ctx.func.alloca_entry(DOUBLE);
+                        ctx.this_stack.push(dummy_this);
+
+                        // Apply field initializers
+                        crate::lower_call::apply_field_initializers_recursive_pub(ctx, class_name)?;
+
+                        // Inline constructor body if present
+                        if let Some(ctor) = &ctor {
+                            let saved_locals = ctx.locals.clone();
+                            let saved_local_types = ctx.local_types.clone();
+                            for (param, arg_val) in ctor.params.iter().zip(lowered_args.iter()) {
+                                let slot = ctx.func.alloca_entry(DOUBLE);
+                                ctx.block().store(DOUBLE, arg_val, &slot);
+                                ctx.locals.insert(param.id, slot);
+                                ctx.local_types.insert(param.id, param.ty.clone());
+                            }
+                            crate::stmt::lower_stmts(ctx, &ctor.body)?;
+                            ctx.locals = saved_locals;
+                            ctx.local_types = saved_local_types;
+                        }
+
+                        ctx.this_stack.pop();
+                        ctx.class_stack.pop();
+                        ctx.scalar_ctor_target.pop();
+
+                        return Ok(());
+                    }
+                }
+            }
+
             // CRITICAL: register the local's storage BEFORE lowering
             // the init expression. Self-recursive closures (`let f = (n)
             // => f(n-1) ...`) reference the let-bound name from inside
@@ -1348,4 +1419,40 @@ fn stmt_variant_name(s: &Stmt) -> &'static str {
 #[allow(dead_code)]
 fn _keep_anyhow_in_scope() -> anyhow::Error {
     anyhow!("")
+}
+
+/// Extract all field names (parent chain + own) and the constructor for
+/// a class, cloning everything out of `ctx.classes` so the immutable
+/// borrow is released before the caller mutates `ctx`.
+///
+/// Returns `None` if the class is not found in `ctx.classes`.
+fn collect_scalar_class_data(
+    ctx: &FnCtx<'_>,
+    class_name: &str,
+) -> Option<(Vec<String>, Option<perry_hir::Function>)> {
+    let class = ctx.classes.get(class_name)?;
+    let mut all_fields: Vec<String> = Vec::new();
+    let mut chain: Vec<String> = Vec::new();
+    let mut p = class.extends_name.clone();
+    while let Some(pname) = p {
+        chain.push(pname.clone());
+        if let Some(pc) = ctx.classes.get(pname.as_str()) {
+            p = pc.extends_name.clone();
+        } else {
+            break;
+        }
+    }
+    chain.reverse();
+    for pname in &chain {
+        if let Some(pc) = ctx.classes.get(pname.as_str()) {
+            for f in &pc.fields {
+                all_fields.push(f.name.clone());
+            }
+        }
+    }
+    for f in &class.fields {
+        all_fields.push(f.name.clone());
+    }
+    let ctor = class.constructor.clone();
+    Some((all_fields, ctor))
 }

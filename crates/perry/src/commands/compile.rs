@@ -253,7 +253,7 @@ fn rust_target_triple(target: Option<&str>) -> Option<&'static str> {
         Some("ios-simulator") | Some("ios-widget-simulator") => Some("aarch64-apple-ios-sim"),
         Some("ios") | Some("ios-widget") => Some("aarch64-apple-ios"),
         Some("watchos-simulator") => Some("aarch64-apple-watchos-sim"),
-        Some("watchos") => Some("aarch64-apple-watchos"),
+        Some("watchos") => Some("arm64_32-apple-watchos"),
         Some("tvos-simulator") => Some("aarch64-apple-tvos-sim"),
         Some("tvos") => Some("aarch64-apple-tvos"),
         Some("android") => Some("aarch64-linux-android"),
@@ -5035,7 +5035,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
         let triple = if target.as_deref() == Some("watchos-simulator") {
             "arm64-apple-watchos10.0-simulator"
         } else {
-            "arm64-apple-watchos10.0"
+            "arm64_32-apple-watchos10.0"
         };
 
         let swift_runtime = find_watchos_swift_runtime()
@@ -5289,6 +5289,22 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
     } else {
         Command::new("cc")
     };
+
+    // When ios-game-loop is enabled, rename _main to _perry_user_main in the
+    // entry object file so the perry runtime's main() (from ios_game_loop.rs)
+    // becomes the process entry point. It spawns _perry_user_main on a game thread.
+    if (is_ios || is_tvos) && compiled_features.iter().any(|f| f == "ios-game-loop") {
+        if let Some(entry_obj) = obj_paths.iter().find(|f| f.to_string_lossy().contains("main_ts")) {
+            let objcopy = std::env::var("HOME").ok()
+                .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy"))
+                .filter(|p| p.exists())
+                .unwrap_or_else(|| PathBuf::from("llvm-objcopy"));
+            let _ = Command::new(&objcopy)
+                .args(["--redefine-sym", "_main=__perry_user_main"])
+                .arg(entry_obj)
+                .status();
+        }
+    }
 
     for obj_path in &obj_paths {
         cmd.arg(obj_path);
@@ -5680,7 +5696,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, _verbose: u
             }
         } else {
             let (lib_name, build_cmd) = if is_watchos {
-                ("libperry_ui_watchos.a", "cargo build --release -p perry-ui-watchos --target aarch64-apple-watchos")
+                ("libperry_ui_watchos.a", "cargo build --release -p perry-ui-watchos --target arm64_32-apple-watchos")
             } else if is_tvos {
                 ("libperry_ui_tvos.a", "cargo build --release -p perry-ui-tvos --target aarch64-apple-tvos")
             } else if is_ios {

@@ -30,7 +30,7 @@ pub fn is_registered_map(addr: usize) -> bool {
 /// Returns null for undefined/null NaN-boxing tags.
 #[inline(always)]
 fn clean_map_ptr(map: *const MapHeader) -> *const MapHeader {
-    let bits = map as usize;
+    let bits = map as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {

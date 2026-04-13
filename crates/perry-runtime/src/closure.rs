@@ -139,7 +139,7 @@ unsafe fn dispatch_bound_method(closure: *const ClosureHeader, args: &[f64]) -> 
 /// Returns null pointer if invalid (address out of range, wrong CLOSURE_MAGIC, bad func_ptr).
 #[inline(always)]
 fn get_valid_func_ptr(closure: *const ClosureHeader) -> *const u8 {
-    let addr = closure as usize;
+    let addr = closure as u64;
     if addr < 0x1000 || addr >= 0x0001_0000_0000_0000 {
         return std::ptr::null();
     }

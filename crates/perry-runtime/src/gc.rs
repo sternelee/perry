@@ -553,10 +553,11 @@ fn try_mark_value_or_raw(word: u64, valid_ptrs: &ValidPointerSet) -> bool {
     // Validate against the known-heap-pointer set to avoid false positives from return addresses
     // and plain integers. Valid heap pointers are in the lower 48-bit address space and
     // won't have NaN-boxing tags in upper bits (already rejected above).
-    let raw_ptr = word as usize;
-    if raw_ptr < 0x1000 || raw_ptr > 0x0000_FFFF_FFFF_FFFF {
+    let raw_ptr_u64 = word as u64;
+    if raw_ptr_u64 < 0x1000 || raw_ptr_u64 > 0x0000_FFFF_FFFF_FFFF {
         return false; // Too small (null/invalid) or has upper bits set (NaN tag or non-address)
     }
+    let raw_ptr = raw_ptr_u64 as usize;
     if !valid_ptrs.contains(&raw_ptr) {
         return false;
     }
@@ -773,8 +774,7 @@ fn extract_ptr_from_bits(bits: u64) -> usize {
         }
         _ => {
             // Raw pointer (no NaN-boxing tag)
-            let raw = bits as usize;
-            if raw >= 0x1000 && raw <= 0x0000_FFFF_FFFF_FFFF { raw } else { 0 }
+            if bits >= 0x1000 && bits <= 0x0000_FFFF_FFFF_FFFF { bits as usize } else { 0 }
         }
     }
 }

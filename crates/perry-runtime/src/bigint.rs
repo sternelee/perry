@@ -35,14 +35,14 @@ fn bigint_alloc() -> *mut BigIntHeader {
 fn is_valid_bigint_ptr(p: *const BigIntHeader) -> bool {
     let bits = p as usize;
     // Valid heap pointers: non-null, >= 0x10000, upper 16 bits must be 0 (48-bit address space)
-    bits >= 0x10000 && bits >> 48 == 0
+    bits >= 0x10000 && (bits as u64) >> 48 == 0
 }
 
 /// Strip NaN-boxing tags from a BigInt pointer (defensive guard).
 /// Returns null if the value is not a valid bigint pointer.
 #[inline(always)]
 pub fn clean_bigint_ptr(p: *const BigIntHeader) -> *const BigIntHeader {
-    let bits = p as usize;
+    let bits = p as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         // NaN-boxed value — extract lower 48 bits
@@ -923,7 +923,7 @@ fn limbs_to_radix_string(limbs: &[u64; BIGINT_LIMBS], radix: u32) -> String {
 #[no_mangle]
 pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::string::StringHeader {
     unsafe {
-        if a.is_null() || (a as usize) < 0x10000 || (a as usize) >> 48 != 0 {
+        if a.is_null() || (a as usize) < 0x10000 || (a as u64) >> 48 != 0 {
             return std::ptr::null_mut();
         }
         let s = limbs_to_decimal_string(&(*a).limbs);
@@ -935,7 +935,7 @@ pub extern "C" fn js_bigint_to_string(a: *const BigIntHeader) -> *mut crate::str
 #[no_mangle]
 pub extern "C" fn js_bigint_to_string_radix(a: *const BigIntHeader, radix: i32) -> *mut crate::string::StringHeader {
     unsafe {
-        if a.is_null() || (a as usize) < 0x10000 || (a as usize) >> 48 != 0 {
+        if a.is_null() || (a as usize) < 0x10000 || (a as u64) >> 48 != 0 {
             return std::ptr::null_mut();
         }
         let s = limbs_to_radix_string(&(*a).limbs, radix as u32);

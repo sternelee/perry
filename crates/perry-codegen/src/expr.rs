@@ -427,6 +427,24 @@ pub(crate) struct FnCtx<'a> {
     /// may reference extern FFI functions that don't exist on the current
     /// target (e.g., iOS-only `hone_get_documents_dir` on macOS).
     pub compile_time_constants: &'a std::collections::HashMap<u32, f64>,
+
+    /// Scalar-replaced non-escaping objects. When `let p = new Point(x, y)`
+    /// and `p` never escapes, instead of heap-allocating, each field gets a
+    /// stack alloca. Map: local_id → (field_name → alloca_slot).
+    /// PropertyGet/PropertySet on these locals load/store from the allocas.
+    pub scalar_replaced: std::collections::HashMap<u32, std::collections::HashMap<String, String>>,
+
+    /// Stack for tracking which local is the target of a scalar-replaced
+    /// constructor being inlined. Pushed when entering a scalar-replaced
+    /// ctor body, popped on exit. PropertySet on `this` inside the ctor
+    /// routes to the alloca in `scalar_replaced[top]`.
+    pub scalar_ctor_target: Vec<u32>,
+
+    /// Non-escaping `new` locals identified by escape analysis. Maps
+    /// local_id → class_name for `let p = new Point(...)` where `p`
+    /// is only used in PropertyGet/PropertySet. The Stmt::Let lowering
+    /// intercepts these to emit scalar-replaced field allocas.
+    pub non_escaping_news: std::collections::HashMap<u32, String>,
 }
 
 /// Per-module i18n table snapshot used by the LLVM codegen to resolve
@@ -1856,6 +1874,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         // `obj.field = v` — generic object field write.
         Expr::PropertySet { object, property, value } => {
+            // Scalar replacement fast path: store to the field's alloca.
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(slot) = ctx.scalar_replaced.get(id).and_then(|fs| fs.get(property.as_str())).cloned() {
+                    let val_double = lower_expr(ctx, value)?;
+                    ctx.block().store(DOUBLE, &val_double, &slot);
+                    return Ok(val_double);
+                }
+            }
+            // Handle `this` during scalar-replaced constructor inlining:
+            if let Expr::This = object.as_ref() {
+                if let Some(slot) = ctx.scalar_ctor_target.last().and_then(|tid| ctx.scalar_replaced.get(tid)).and_then(|fs| fs.get(property.as_str())).cloned() {
+                    let val_double = lower_expr(ctx, value)?;
+                    ctx.block().store(DOUBLE, &val_double, &slot);
+                    return Ok(val_double);
+                }
+            }
             // Setter dispatch: if the receiver is a known class and the
             // property is registered as a setter, call the synthesized
             // __set_<property> method instead of doing a raw field
@@ -1932,6 +1966,19 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // (which IS the NaN-boxed value for non-number fields — same bit
         // pattern, runtime callers re-interpret based on context).
         Expr::PropertyGet { object, property } => {
+            // Scalar replacement fast path: if the receiver is a scalar-replaced
+            // local, load directly from the field's alloca — no heap access.
+            if let Expr::LocalGet(id) = object.as_ref() {
+                if let Some(slot) = ctx.scalar_replaced.get(id).and_then(|fs| fs.get(property.as_str())).cloned() {
+                    return Ok(ctx.block().load(DOUBLE, &slot));
+                }
+            }
+            // Also handle `this` during scalar-replaced ctor inlining
+            if let Expr::This = object.as_ref() {
+                if let Some(slot) = ctx.scalar_ctor_target.last().and_then(|tid| ctx.scalar_replaced.get(tid)).and_then(|fs| fs.get(property.as_str())).cloned() {
+                    return Ok(ctx.block().load(DOUBLE, &slot));
+                }
+            }
             // GlobalGet receivers (`console.X`, `Math.PI`, `JSON.parse`,
             // `process.env`, …) used as expression VALUES (not in a
             // call) — there's no real value to materialize. Return a

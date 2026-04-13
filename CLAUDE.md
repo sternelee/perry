@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.15
+**Current Version:** 0.5.16
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.16 (llvm-backend) — watchOS device target: arm64_32 instead of arm64
+- **fix**: `--target watchos` emitted `aarch64-apple-watchos` (regular 64-bit ARM) objects, but Apple Watch hardware requires `arm64_32` (ILP32 — 32-bit pointers on 64-bit ARM). Changed LLVM triple to `arm64_32-apple-watchos`, Rust target to `arm64_32-apple-watchos`, and link triple to `arm64_32-apple-watchos10.0`. The simulator target (`watchos-simulator`) is unchanged — it correctly uses host-native aarch64. This fixes the ABI incompatibility that prevented device builds from linking with the LLVM-based runtime.
 
 ### v0.5.15 (llvm-backend) — perry/ui State dispatch + check-deps fix (closes #24, #25)
 - **fix**: `State(0)` constructor and `.value`/`.set()` instance methods were missing from the LLVM codegen dispatch tables, producing "not in dispatch table" warnings and silently returning `undefined`. Added `State` → `perry_ui_state_create` to `PERRY_UI_TABLE` and `value` → `perry_ui_state_get` / `set` → `perry_ui_state_set` to `PERRY_UI_INSTANCE_TABLE`.

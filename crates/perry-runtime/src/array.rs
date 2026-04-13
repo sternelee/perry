@@ -11,7 +11,7 @@ use crate::arena::arena_alloc_gc;
 /// Strip NaN-boxing tags from an array pointer and guard against invalid values.
 #[inline(always)]
 fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
-    let bits = arr as usize;
+    let bits = arr as u64;
     let top16 = bits >> 48;
     if top16 >= 0x7FF8 {
         if top16 == 0x7FFC || (bits & 0x0000_FFFF_FFFF_FFFF) == 0 {

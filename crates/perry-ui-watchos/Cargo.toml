@@ -14,3 +14,7 @@ geisterhand = []
 [dependencies]
 perry-ui = { path = "../perry-ui" }
 perry-runtime = { path = "../perry-runtime", default-features = false }
+block2 = "0.6"
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString"] }
