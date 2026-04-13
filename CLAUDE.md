@@ -177,8 +177,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
 
-### v0.5.18 — TypeScript type stubs for built-in modules (closes #27, #24)
-- **feat**: `.d.ts` type declarations for all 4 built-in modules (`perry/ui`, `perry/thread`, `perry/i18n`, `perry/system`). `perry init` now generates a `tsconfig.json` with `paths` mapping and writes stubs to `.perry/types/`, so `tsc --noEmit` and IDE autocomplete work out of the box. New `perry types` command regenerates stubs for existing projects. Canonical sources in `types/perry/`, embedded via `include_str!()`.
+### v0.5.18 — native axios, fetch segfault fix, type stubs (closes #24, #25, #26, #27)
+- **feat**: native `axios` dispatch — `axios.get/post/put/delete/patch` and `response.status/.data/.statusText` now compile natively without `--enable-js-runtime` or npm install. Added to `NATIVE_MODULES`, HIR native instance tracking, codegen dispatch, and `http-client` feature mapping.
+- **fix**: `await fetch(url)` segfaulted because `body` (undefined for GET) NaN-unboxed to `0x1`, dereferenced as a valid pointer. Fixed `string_from_header` to treat pointers below page size as invalid.
+- **fix**: await loop never drained stdlib async queue — added `js_run_stdlib_pump()` call so tokio-based fetch/DB results actually resolve.
+- **fix**: `llvm-ar not found` warning downgraded from `ERROR` to soft skip with install instructions (non-fatal, strip-dedup is optional).
+- **feat**: `.d.ts` type stubs for `perry/ui`, `perry/thread`, `perry/i18n`, `perry/system`. `perry init` generates `tsconfig.json` with paths; new `perry types` command for existing projects.
 
 ### v0.5.17 (llvm-backend) — scalar replacement of non-escaping objects + Static Hermes benchmarks
 - **perf**: escape analysis identifies `let p = new Point(x, y)` where `p` never escapes (only PropertyGet/PropertySet uses); fields are decomposed into stack allocas that LLVM promotes to registers — zero heap allocation. `object_create` 10ms→4ms (2.5x), `binary_trees` 9ms→3ms (3x), peak RSS 97MB→5MB. Perry now beats Node.js on all 15 benchmarks.
