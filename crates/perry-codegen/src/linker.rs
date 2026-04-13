@@ -37,7 +37,12 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         f.write_all(ll_text.as_bytes())?;
     }
 
-    let clang = find_clang().context("No clang found in PATH (required for --backend llvm)")?;
+    let clang = find_clang().context(if cfg!(windows) {
+        "clang not found. Install LLVM from https://github.com/llvm/llvm-project/releases \
+         or set PERRY_LLVM_CLANG to the path of clang.exe"
+    } else {
+        "No clang found in PATH. Install LLVM/clang or set PERRY_LLVM_CLANG"
+    })?;
 
     let mut cmd = Command::new(&clang);
     cmd.arg("-c")
@@ -113,9 +118,60 @@ fn find_clang() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    // Otherwise trust PATH.
+    // Check PATH (with .exe extension handling on Windows).
     if which("clang") {
         return Some(PathBuf::from("clang"));
+    }
+    // Check well-known install locations.
+    #[cfg(windows)]
+    {
+        // Standalone LLVM installer (llvm.org)
+        let standalone = PathBuf::from(r"C:\Program Files\LLVM\bin\clang.exe");
+        if standalone.exists() {
+            return Some(standalone);
+        }
+        // MSVC Build Tools bundled clang (via "C++ Clang Compiler" component)
+        if let Some(path) = find_msvc_bundled_clang() {
+            return Some(path);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        for prefix in &["/opt/homebrew/opt/llvm/bin", "/usr/local/opt/llvm/bin"] {
+            let candidate = PathBuf::from(prefix).join("clang");
+            if candidate.exists() && is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Search for clang.exe bundled with Visual Studio Build Tools / Community.
+/// The "C++ Clang Compiler for Windows" workload component installs it at:
+///   <VS install>/VC/Tools/Llvm/x64/bin/clang.exe
+#[cfg(windows)]
+fn find_msvc_bundled_clang() -> Option<PathBuf> {
+    let vswhere_paths = [
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+        PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+    ];
+    for vswhere in &vswhere_paths {
+        if !vswhere.exists() { continue; }
+        let output = std::process::Command::new(vswhere)
+            .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+            .output()
+            .ok()?;
+        let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if install_path.is_empty() { continue; }
+        // Check x64 first, then ARM64
+        for arch in &["x64", "ARM64"] {
+            let candidate = PathBuf::from(&install_path)
+                .join("VC").join("Tools").join("Llvm").join(arch).join("bin").join("clang.exe");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
     }
     None
 }
@@ -129,6 +185,14 @@ fn which(name: &str) -> bool {
         let candidate = dir.join(name);
         if candidate.exists() && is_executable(&candidate) {
             return true;
+        }
+        // On Windows, executables have .exe extension
+        #[cfg(windows)]
+        {
+            let with_exe = dir.join(format!("{}.exe", name));
+            if with_exe.exists() && is_executable(&with_exe) {
+                return true;
+            }
         }
     }
     false
