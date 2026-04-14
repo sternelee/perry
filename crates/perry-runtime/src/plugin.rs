@@ -170,7 +170,7 @@ unsafe fn extract_string(nanboxed: f64) -> String {
         return String::new();
     }
     let header = ptr as *const crate::string::StringHeader;
-    let len = (*header).length as usize;
+    let len = (*header).byte_len as usize;
     let data = (header as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
     let slice = std::slice::from_raw_parts(data, len);
     String::from_utf8_lossy(slice).into_owned()

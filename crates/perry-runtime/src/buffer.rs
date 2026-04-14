@@ -97,7 +97,7 @@ pub extern "C" fn js_buffer_from_string(str_ptr: *const StringHeader, encoding: 
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let str_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -146,7 +146,7 @@ pub extern "C" fn js_encoding_tag_from_value(value: f64) -> i32 {
         return 0;
     }
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         // Cap at a reasonable upper bound to avoid pathological reads on garbage inputs.
         if len == 0 || len > 32 {
             return 0;
@@ -410,7 +410,7 @@ pub extern "C" fn js_buffer_byte_length(str_ptr: *const StringHeader) -> i32 {
         return 0;
     }
     unsafe {
-        (*str_ptr).length as i32
+        (*str_ptr).byte_len as i32
     }
 }
 
@@ -680,7 +680,7 @@ pub extern "C" fn js_buffer_write(
         let buf_len = (*buf_ptr).length as i32;
         let offset = offset.max(0).min(buf_len);
 
-        let str_len = (*str_ptr).length as usize;
+        let str_len = (*str_ptr).byte_len as usize;
         let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let str_bytes = std::slice::from_raw_parts(str_data, str_len);
 
@@ -822,7 +822,7 @@ pub extern "C" fn js_buffer_index_of(buf_ptr: f64, needle: f64, start: i32) -> i
         let str_ptr = (needle_bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
         if !str_ptr.is_null() {
             unsafe {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data_ptr, len);
                 return buffer_index_of_bytes(buf, bytes, start);

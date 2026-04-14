@@ -838,7 +838,7 @@ pub extern "C" fn js_array_sort_default(arr: *mut ArrayHeader) -> *mut ArrayHead
             } else {
                 let header = &*(str_ptr as *const StringHeader);
                 let bytes_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
-                let slice = std::slice::from_raw_parts(bytes_ptr, header.length as usize);
+                let slice = std::slice::from_raw_parts(bytes_ptr, header.byte_len as usize);
                 std::str::from_utf8(slice).unwrap_or("").to_string()
             };
             pairs.push((s, val));
@@ -1514,7 +1514,7 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
         let sep_str = if separator.is_null() {
             ","
         } else {
-            let sep_len = (*separator).length as usize;
+            let sep_len = (*separator).byte_len as usize;
             let sep_data = (separator as *const u8).add(std::mem::size_of::<StringHeader>());
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(sep_data, sep_len))
         };
@@ -1531,7 +1531,7 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
             // Convert element to string based on its type
             if jsvalue.is_string() {
                 let str_ptr = jsvalue.as_pointer() as *const StringHeader;
-                let str_len = (*str_ptr).length as usize;
+                let str_len = (*str_ptr).byte_len as usize;
                 let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
                 result.push_str(s);
@@ -1539,7 +1539,7 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
                 // POINTER_TAG — may be a string stored with the wrong tag (cross-module)
                 let ptr = (element_bits & 0x0000_FFFF_FFFF_FFFF) as *const StringHeader;
                 if !ptr.is_null() && (ptr as usize) >= 0x1000 {
-                    let str_len = (*ptr).length as usize;
+                    let str_len = (*ptr).byte_len as usize;
                     let str_data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));
                     result.push_str(s);
@@ -1568,7 +1568,7 @@ pub extern "C" fn js_array_join(arr: *const ArrayHeader, separator: *const crate
             } else if element_bits > 0x1000 && element_bits < 0x0001_0000_0000_0000 && (element_bits & 0x3) == 0 {
                 // Raw pointer fallback — string stored without NaN-box tag
                 let str_ptr = element_bits as *const StringHeader;
-                let str_len = (*str_ptr).length as usize;
+                let str_len = (*str_ptr).byte_len as usize;
                 if str_len < 10_000_000 {
                     let str_data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(str_data, str_len));

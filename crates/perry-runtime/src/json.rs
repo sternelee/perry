@@ -24,7 +24,7 @@ unsafe fn str_from_header<'a>(ptr: *const StringHeader) -> Option<&'a str> {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(std::str::from_utf8_unchecked(bytes))
@@ -309,7 +309,7 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         let err_val = JSValue::string_ptr(msg_ptr);
         crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
-    let len = (*text_ptr).length as usize;
+    let len = (*text_ptr).byte_len as usize;
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -800,7 +800,7 @@ pub unsafe extern "C" fn js_json_is_valid(text_ptr: *const StringHeader) -> f64 
     if text_ptr.is_null() {
         return f64::from_bits(TAG_FALSE);
     }
-    let len = (*text_ptr).length as usize;
+    let len = (*text_ptr).byte_len as usize;
     let data_ptr = (text_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     if serde_json::from_slice::<serde_json::Value>(bytes).is_ok() {

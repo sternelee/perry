@@ -65,7 +65,7 @@ pub extern "C" fn js_worker_threads_post_message(data: f64) -> f64 {
         let _ = writeln!(io::stdout(), "undefined");
     } else {
         let content = unsafe {
-            let len = (*str_ptr).length as usize;
+            let len = (*str_ptr).byte_len as usize;
             let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -87,7 +87,7 @@ pub extern "C" fn js_worker_threads_on(event_ptr: i64, callback: i64) -> f64 {
         } else {
             let str_ptr = raw_ptr as *const StringHeader;
             unsafe {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let slice = std::slice::from_raw_parts(data_ptr, len);
                 String::from_utf8_lossy(slice).into_owned()

@@ -119,7 +119,7 @@ pub extern "C" fn js_bigint_from_f64(value: f64) -> *mut BigIntHeader {
         let ptr = jsval.as_string_ptr();
         if !ptr.is_null() {
             unsafe {
-                let len = (*ptr).length as u32;
+                let len = (*ptr).byte_len as u32;
                 let data = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                 let result = js_bigint_from_string(data, len);
                 return result;

@@ -48,7 +48,7 @@ pub extern "C" fn js_text_encoder_encode_llvm(value: f64) -> i64 {
     } else {
         let str_ptr = str_ptr_i as *const StringHeader;
         unsafe {
-            let l = (*str_ptr).length as usize;
+            let l = (*str_ptr).byte_len as usize;
             let d = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             (d, l)
         }

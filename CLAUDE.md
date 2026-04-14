@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.19
+**Current Version:** 0.5.20
 
 ## TypeScript Parity Status
 
@@ -29,7 +29,7 @@ Tracked via the gap test suite (`test-files/test_gap_*.ts`, 22 tests). Each test
 | 🟡 close | `regexp_advanced` | 2 (lookbehind only) |
 | 🟡 close | `generators` | 3 |
 | 🟡 close | `number_math` | 4 |
-| 🟡 close | `string_methods` | 8 (UTF-16 length) |
+| 🟡 close | `string_methods` | 2 (lone surrogates only) |
 | 🟡 mid | `class_advanced` | 18 |
 | 🟡 mid | `proxy_reflect` | 27 (segfault) |
 | 🟡 mid | `object_methods` | 28 |
@@ -41,7 +41,7 @@ Tracked via the gap test suite (`test-files/test_gap_*.ts`, 22 tests). Each test
 | 🔴 work | `array_methods` | 45 |
 | 🔴 work | `node_crypto_buffer` | 46 |
 
-**Known categorical gaps**: lookbehind regex (Rust `regex` crate limitation), `String.length` returns byte count instead of UTF-16 code units, `Proxy`/`Reflect` not implemented, `Symbol(...)` returns garbage, `Object.getPrototypeOf` returns wrong sentinel, `console.dir` formatting differs from Node, `console.group*` doesn't indent, `console.table` works for the standard shapes.
+**Known categorical gaps**: lookbehind regex (Rust `regex` crate limitation), `Proxy`/`Reflect` not implemented, `Symbol(...)` returns garbage, `Object.getPrototypeOf` returns wrong sentinel, `console.dir` formatting differs from Node, `console.group*` doesn't indent, `console.table` works for the standard shapes, lone surrogate handling (`isWellFormed`/`toWellFormed` — needs WTF-8 support).
 
 **Next-impact targets** (biggest single-commit wins): `console.dir` formatting + `console.group` indent (~15 lines), `Promise.withResolvers` + segfault fix (~35 lines), `URL`/`Blob`/`AbortController` extensions (~15 lines), `Proxy` identity stub (~10 lines), `Symbol` sentinel stub (~10 lines).
 
@@ -176,6 +176,9 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.20 — String.length returns UTF-16 code units (closes #18 partially)
+- **fix**: `String.length` now returns UTF-16 code unit count instead of UTF-8 byte count, matching JavaScript semantics. `"café".length` → 4 (was 5), `"日本語".length` → 3 (was 9), `"😀".length` → 2 (was 4). `StringHeader` gains `utf16_len` at offset 0 (codegen inline `.length` unchanged) + `byte_len` for internal ops. All position-based APIs (`charAt`, `slice`, `substring`, `indexOf`, `lastIndexOf`, `padStart`, `padEnd`, `toCharArray`) converted to UTF-16 indexing with ASCII fast path. `test_gap_string_methods` DIFF (4) → DIFF (2, lone surrogates only). Fixes NFC/NFD `.normalize().length` parity.
 
 ### v0.5.19 — fix Fastify/MySQL segfault on Linux, restore native module dispatch, fix gc() (closes #28)
 - **fix**: `gc()` calls emitted bare `gc` symbol instead of `js_gc_collect` — caused `undefined reference to 'gc'` linker error (macOS) or segfault at runtime (Linux with `--warn-unresolved-symbols`). Added explicit dispatch in `lower_call.rs` ExternFuncRef handler.

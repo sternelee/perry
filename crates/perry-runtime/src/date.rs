@@ -114,7 +114,7 @@ pub extern "C" fn js_date_new_from_value(value: f64) -> f64 {
             return f64::NAN;
         }
         unsafe {
-            let len = (*ptr).length as usize;
+            let len = (*ptr).byte_len as usize;
             let data = (ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             if let Ok(s) = std::str::from_utf8(bytes) {
@@ -245,23 +245,7 @@ pub extern "C" fn js_date_to_iso_string(timestamp: f64) -> *mut crate::StringHea
         year, month, day, hour, minute, second, millis
     );
 
-    let bytes = iso_string.as_bytes();
-    let len = bytes.len();
-
-    unsafe {
-        let layout = Layout::from_size_align(
-            std::mem::size_of::<crate::StringHeader>() + len,
-            std::mem::align_of::<crate::StringHeader>()
-        ).unwrap();
-
-        let ptr = alloc(layout) as *mut crate::StringHeader;
-        (*ptr).length = len as u32;
-
-        let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<crate::StringHeader>());
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, len);
-
-        ptr
-    }
+    crate::string::js_string_from_bytes(iso_string.as_ptr(), iso_string.len() as u32)
 }
 
 /// Get the full year (date.getFullYear()) in LOCAL time.
@@ -362,20 +346,8 @@ fn weekday_from_timestamp(secs: i64) -> u32 {
 
 /// Allocate a StringHeader pointer holding `s`.
 fn alloc_runtime_string(s: &str) -> *mut crate::StringHeader {
-    use std::alloc::{alloc, Layout};
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    unsafe {
-        let layout = Layout::from_size_align(
-            std::mem::size_of::<crate::StringHeader>() + len.max(1),
-            std::mem::align_of::<crate::StringHeader>()
-        ).unwrap();
-        let ptr = alloc(layout) as *mut crate::StringHeader;
-        (*ptr).length = len as u32;
-        let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<crate::StringHeader>());
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), data_ptr, len);
-        ptr
-    }
+    // Use the standard string allocator which sets both utf16_len and byte_len
+    crate::string::js_string_from_bytes(s.as_ptr(), s.len() as u32)
 }
 
 /// Date.parse(isoString) — parse an ISO 8601 string and return ms since epoch.
@@ -386,7 +358,7 @@ pub extern "C" fn js_date_parse(str_ptr: *const crate::StringHeader) -> f64 {
         return f64::NAN;
     }
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
         match std::str::from_utf8(bytes) {

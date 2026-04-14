@@ -15,7 +15,7 @@ pub extern "C" fn js_ethers_get_address(str_ptr: *const StringHeader) -> *mut St
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
 
@@ -302,7 +302,7 @@ pub extern "C" fn js_ethers_parse_units(str_ptr: *const StringHeader, decimals: 
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
 

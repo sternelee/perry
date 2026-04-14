@@ -35,7 +35,7 @@ unsafe fn extract_string_from_nanboxed(val: f64) -> Option<String> {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())
@@ -227,7 +227,7 @@ pub extern "C" fn js_child_process_exec_sync(
     }
 
     unsafe {
-        let len = (*cmd_ptr).length as usize;
+        let len = (*cmd_ptr).byte_len as usize;
         let data_ptr = (cmd_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let cmd_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -274,7 +274,7 @@ pub extern "C" fn js_child_process_spawn_sync(
 
     unsafe {
         // Get command string
-        let cmd_len = (*cmd_ptr).length as usize;
+        let cmd_len = (*cmd_ptr).byte_len as usize;
         let cmd_data = (cmd_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let cmd_bytes = std::slice::from_raw_parts(cmd_data, cmd_len);
 
@@ -378,7 +378,7 @@ mod tests {
 
         assert!(!result.is_null());
         unsafe {
-            assert!((*result).length > 0);
+            assert!((*result).byte_len > 0);
         }
     }
 }

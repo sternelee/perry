@@ -64,7 +64,7 @@ unsafe fn alloc_error(kind: u32, name_bytes: &[u8], message: *mut StringHeader) 
     let msg_str = if message.is_null() {
         ""
     } else {
-        let len = (*message).length as usize;
+        let len = (*message).byte_len as usize;
         let data = (message as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
         std::str::from_utf8(bytes).unwrap_or("")

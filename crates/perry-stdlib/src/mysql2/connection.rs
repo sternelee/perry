@@ -120,7 +120,7 @@ pub unsafe extern "C" fn js_mysql2_connection_query(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()

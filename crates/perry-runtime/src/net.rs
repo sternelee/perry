@@ -58,7 +58,7 @@ pub extern "C" fn js_net_server_listen(
         "0.0.0.0".to_string()
     } else {
         unsafe {
-            let len = (*host_ptr).length as usize;
+            let len = (*host_ptr).byte_len as usize;
             let data = (host_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             String::from_utf8_lossy(bytes).to_string()
@@ -152,7 +152,7 @@ pub extern "C" fn js_net_create_connection(
         "127.0.0.1".to_string()
     } else {
         unsafe {
-            let len = (*host_ptr).length as usize;
+            let len = (*host_ptr).byte_len as usize;
             let data = (host_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             String::from_utf8_lossy(bytes).to_string()

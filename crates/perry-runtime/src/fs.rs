@@ -28,7 +28,7 @@ pub extern "C" fn js_fs_read_file_sync(path_value: f64) -> *mut StringHeader {
             return js_string_from_bytes(b"".as_ptr(), 0);
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -93,7 +93,7 @@ pub extern "C" fn js_fs_write_file_sync(
         }
 
         // Get path string
-        let path_len = (*path_ptr).length as usize;
+        let path_len = (*path_ptr).byte_len as usize;
         let path_data = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(path_data, path_len);
         let path_str = match std::str::from_utf8(path_bytes) {
@@ -102,7 +102,7 @@ pub extern "C" fn js_fs_write_file_sync(
         };
 
         // Get content string
-        let content_len = (*content_ptr).length as usize;
+        let content_len = (*content_ptr).byte_len as usize;
         let content_data = (content_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let content_bytes = std::slice::from_raw_parts(content_data, content_len);
 
@@ -132,7 +132,7 @@ pub extern "C" fn js_fs_append_file_sync(
         }
 
         // Get path string
-        let path_len = (*path_ptr).length as usize;
+        let path_len = (*path_ptr).byte_len as usize;
         let path_data = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(path_data, path_len);
         let path_str = match std::str::from_utf8(path_bytes) {
@@ -141,7 +141,7 @@ pub extern "C" fn js_fs_append_file_sync(
         };
 
         // Get content string
-        let content_len = (*content_ptr).length as usize;
+        let content_len = (*content_ptr).byte_len as usize;
         let content_data = (content_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let content_bytes = std::slice::from_raw_parts(content_data, content_len);
 
@@ -169,7 +169,7 @@ pub extern "C" fn js_fs_exists_sync(path_value: f64) -> i32 {
             return 0;
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -193,7 +193,7 @@ pub extern "C" fn js_fs_mkdir_sync(path_value: f64) -> i32 {
             return 0;
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -225,7 +225,7 @@ pub extern "C" fn js_fs_readdir_sync(path_value: f64) -> f64 {
             return std::mem::transmute::<i64, f64>(arr as i64);
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -277,7 +277,7 @@ pub extern "C" fn js_fs_is_directory(path_value: f64) -> i32 {
             return 0;
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -301,7 +301,7 @@ pub extern "C" fn js_fs_unlink_sync(path_value: f64) -> i32 {
             return 0;
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -328,7 +328,7 @@ pub extern "C" fn js_fs_read_file_binary(path_value: f64) -> *mut crate::buffer:
             return std::ptr::null_mut();
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -365,7 +365,7 @@ pub extern "C" fn js_fs_rm_recursive(path_value: f64) -> i32 {
             return 0;
         }
 
-        let len = (*path_ptr).length as usize;
+        let len = (*path_ptr).byte_len as usize;
         let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let path_bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -395,7 +395,7 @@ unsafe fn decode_path_value<'a>(path_value: f64) -> Option<&'a str> {
     if path_ptr.is_null() {
         return None;
     }
-    let len = (*path_ptr).length as usize;
+    let len = (*path_ptr).byte_len as usize;
     let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let path_bytes = std::slice::from_raw_parts(data_ptr, len);
     std::str::from_utf8(path_bytes).ok()
@@ -712,7 +712,7 @@ fn path_from_value(v: f64) -> String {
         if ptr.is_null() {
             return String::new();
         }
-        let len = (*ptr).length as usize;
+        let len = (*ptr).byte_len as usize;
         let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
         std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -726,7 +726,7 @@ fn bytes_from_value(v: f64) -> Vec<u8> {
         if ptr.is_null() {
             return Vec::new();
         }
-        let len = (*ptr).length as usize;
+        let len = (*ptr).byte_len as usize;
         let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         std::slice::from_raw_parts(data, len).to_vec()
     }

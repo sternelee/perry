@@ -120,7 +120,7 @@ unsafe fn mark_all_keys(obj: *mut ObjectHeader, drop_writable: bool, _drop_enume
             continue;
         }
         let name_ptr = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-        let name_len = (*stored_key).length as usize;
+        let name_len = (*stored_key).byte_len as usize;
         let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
         let key_str = match std::str::from_utf8(name_bytes) {
             Ok(s) => s.to_string(),
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn js_object_to_string(value: f64) -> f64 {
                     let str_ptr =
                         (rbits & POINTER_MASK) as *const crate::string::StringHeader;
                     if !str_ptr.is_null() {
-                        let len = (*str_ptr).length as usize;
+                        let len = (*str_ptr).byte_len as usize;
                         let data = (str_ptr as *const u8)
                             .add(std::mem::size_of::<crate::string::StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
@@ -1324,7 +1324,7 @@ pub extern "C" fn js_object_set_field_by_index(obj: *mut ObjectHeader, key: *con
         // Per-key writable / accessor check when the key string is provided.
         if !key.is_null() {
             let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            let name_len = (*key).length as usize;
+            let name_len = (*key).byte_len as usize;
             let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
             if let Ok(name) = std::str::from_utf8(name_bytes) {
                 if ACCESSORS_IN_USE.with(|c| c.get()) {
@@ -1387,7 +1387,7 @@ pub extern "C" fn js_object_keys(obj: *const ObjectHeader) -> *mut ArrayHeader {
             let stored_key = key_val.as_string_ptr();
             if stored_key.is_null() { continue; }
             let name_ptr = (stored_key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            let name_len = (*stored_key).length as usize;
+            let name_len = (*stored_key).byte_len as usize;
             let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
             let key_str = match std::str::from_utf8(name_bytes) {
                 Ok(s) => s,
@@ -1549,7 +1549,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if crate::buffer::is_registered_buffer(obj as usize) {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 if key_bytes == b"length" || key_bytes == b"byteLength" {
                     let b = obj as *const crate::buffer::BufferHeader;
@@ -1567,7 +1567,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if crate::set::is_registered_set(obj as usize) {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 if key_bytes == b"size" {
                     let s = obj as *const crate::set::SetHeader;
@@ -1582,7 +1582,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if crate::symbol::is_registered_symbol(obj as usize) {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 let sym_f64 = f64::from_bits(
                     0x7FFD_0000_0000_0000u64 | (obj as u64 & 0x0000_FFFF_FFFF_FFFF),
@@ -1613,7 +1613,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if gc_type == crate::gc::GC_TYPE_ERROR {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 let err_ptr = obj as *mut crate::error::ErrorHeader;
                 match key_bytes {
@@ -1659,7 +1659,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if gc_type == crate::gc::GC_TYPE_ARRAY {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 if key_bytes == b"length" {
                     let arr = obj as *const crate::array::ArrayHeader;
@@ -1674,11 +1674,11 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if gc_type == crate::gc::GC_TYPE_STRING {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 if key_bytes == b"length" {
                     let s = obj as *const crate::StringHeader;
-                    return JSValue::number((*s).length as f64);
+                    return JSValue::number((*s).byte_len as f64);
                 }
             }
             return JSValue::undefined();
@@ -1689,7 +1689,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if gc_type == crate::gc::GC_TYPE_MAP {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 if key_bytes == b"size" {
                     let m = obj as *const crate::map::MapHeader;
@@ -1707,7 +1707,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         if gc_type == crate::gc::GC_TYPE_OBJECT && crate::regex::is_regex_pointer(obj as *const u8) {
             if !key.is_null() {
                 let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let key_len = (*key).length as usize;
+                let key_len = (*key).byte_len as usize;
                 let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
                 let re = obj as *const crate::regex::RegExpHeader;
                 match key_bytes {
@@ -1804,7 +1804,7 @@ pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *co
         // Objects with the same shape share the same keys_array, so we cache per-shape lookups.
         let key_bytes = std::slice::from_raw_parts(
             (key as *const u8).add(std::mem::size_of::<crate::StringHeader>()),
-            (*key).length as usize,
+            (*key).byte_len as usize,
         );
         let key_hash = {
             let mut h: u32 = 0x811c9dc5;
@@ -1935,7 +1935,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
                     if let Some(dispatch) = HANDLE_PROPERTY_SET_DISPATCH {
                         if !key.is_null() {
                             let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                            let name_len = (*key).length as usize;
+                            let name_len = (*key).byte_len as usize;
                             dispatch(raw as i64, name_ptr, name_len, value);
                         }
                     }
@@ -1954,7 +1954,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
                 if let Some(dispatch) = HANDLE_PROPERTY_SET_DISPATCH {
                     if !key.is_null() {
                         let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                        let name_len = (*key).length as usize;
+                        let name_len = (*key).byte_len as usize;
                         dispatch(obj as i64, name_ptr, name_len, value);
                     }
                 }
@@ -1989,7 +1989,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         if type_tag_at_12 == crate::closure::CLOSURE_MAGIC {
             if !key.is_null() {
                 let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-                let name_len = (*key).length as usize;
+                let name_len = (*key).byte_len as usize;
                 let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
                 if let Ok(name_str) = std::str::from_utf8(name_bytes) {
                     crate::closure::closure_set_dynamic_prop(obj as usize, name_str, value);
@@ -2039,7 +2039,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         // Extract the incoming key as a Rust string for descriptor lookup.
         let incoming_key_str: Option<String> = if !key.is_null() {
             let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            let name_len = (*key).length as usize;
+            let name_len = (*key).byte_len as usize;
             let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
             std::str::from_utf8(name_bytes).ok().map(|s| s.to_string())
         } else { None };
@@ -3233,7 +3233,7 @@ unsafe fn dispatch_native_module_method(
     let module_field = js_object_get_field(obj as *mut _, 0);
     let module_name = if module_field.is_string() {
         let str_ptr = module_field.as_string_ptr();
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
         std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")
     } else {
@@ -3404,7 +3404,7 @@ unsafe fn get_module_name_from_namespace(namespace_obj: f64) -> &'static str {
     let module_field = js_object_get_field(obj as *mut _, 0);
     if module_field.is_string() {
         let str_ptr = module_field.as_string_ptr();
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::StringHeader>());
         std::str::from_utf8(std::slice::from_raw_parts(data, len)).unwrap_or("")
     } else {
@@ -3830,7 +3830,7 @@ pub extern "C" fn js_object_group_by(
             let key_string = if key_ptr.is_null() {
                 "undefined".to_string()
             } else {
-                let len = (*key_ptr).length as usize;
+                let len = (*key_ptr).byte_len as usize;
                 let data = (key_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -3981,7 +3981,7 @@ pub extern "C" fn js_object_define_property(obj_value: f64, key_value: f64, desc
         // Extract the key as a Rust string for the descriptor side-table lookup.
         let key_rust: Option<String> = {
             let name_ptr = (key_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            let name_len = (*key_str).length as usize;
+            let name_len = (*key_str).byte_len as usize;
             let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
             std::str::from_utf8(name_bytes).ok().map(|s| s.to_string())
         };
@@ -4133,7 +4133,7 @@ pub extern "C" fn js_object_get_own_property_descriptor(obj_value: f64, key_valu
         // Extract key as a Rust string for descriptor lookup.
         let key_rust: Option<String> = {
             let name_ptr = (key_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
-            let name_len = (*key_str).length as usize;
+            let name_len = (*key_str).byte_len as usize;
             let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
             std::str::from_utf8(name_bytes).ok().map(|s| s.to_string())
         };

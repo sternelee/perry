@@ -25,7 +25,7 @@ fn get_string_content(ptr_f64: f64) -> String {
         return String::new();
     }
     unsafe {
-        let len = (*ptr).length as usize;
+        let len = (*ptr).byte_len as usize;
         let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let slice = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(slice).into_owned()
@@ -240,7 +240,7 @@ pub extern "C" fn js_url_new(url_str: *mut crate::StringHeader) -> *mut ObjectHe
         String::new()
     } else {
         unsafe {
-            let len = (*url_str).length as usize;
+            let len = (*url_str).byte_len as usize;
             let data_ptr = (url_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -260,7 +260,7 @@ pub extern "C" fn js_url_new_with_base(
         String::new()
     } else {
         unsafe {
-            let len = (*url_str).length as usize;
+            let len = (*url_str).byte_len as usize;
             let data_ptr = (url_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -271,7 +271,7 @@ pub extern "C" fn js_url_new_with_base(
         String::new()
     } else {
         unsafe {
-            let len = (*base_str).length as usize;
+            let len = (*base_str).byte_len as usize;
             let data_ptr = (base_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -516,7 +516,7 @@ pub extern "C" fn js_url_search_params_new(init_str: *mut crate::StringHeader) -
         String::new()
     } else {
         unsafe {
-            let len = (*init_str).length as usize;
+            let len = (*init_str).byte_len as usize;
             let data_ptr = (init_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -542,7 +542,7 @@ pub extern "C" fn js_url_search_params_get(params: *mut ObjectHeader, name_str: 
         String::new()
     } else {
         unsafe {
-            let len = (*name_str).length as usize;
+            let len = (*name_str).byte_len as usize;
             let data_ptr = (name_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -569,7 +569,7 @@ pub extern "C" fn js_url_search_params_has(params: *mut ObjectHeader, name_str: 
         String::new()
     } else {
         unsafe {
-            let len = (*name_str).length as usize;
+            let len = (*name_str).byte_len as usize;
             let data_ptr = (name_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -593,7 +593,7 @@ pub extern "C" fn js_url_search_params_set(
         String::new()
     } else {
         unsafe {
-            let len = (*name_str).length as usize;
+            let len = (*name_str).byte_len as usize;
             let data_ptr = (name_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -604,7 +604,7 @@ pub extern "C" fn js_url_search_params_set(
         String::new()
     } else {
         unsafe {
-            let len = (*value_str).length as usize;
+            let len = (*value_str).byte_len as usize;
             let data_ptr = (value_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -644,7 +644,7 @@ pub extern "C" fn js_url_search_params_append(
         String::new()
     } else {
         unsafe {
-            let len = (*name_str).length as usize;
+            let len = (*name_str).byte_len as usize;
             let data_ptr = (name_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -655,7 +655,7 @@ pub extern "C" fn js_url_search_params_append(
         String::new()
     } else {
         unsafe {
-            let len = (*value_str).length as usize;
+            let len = (*value_str).byte_len as usize;
             let data_ptr = (value_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -691,7 +691,7 @@ pub extern "C" fn js_url_search_params_delete(
         String::new()
     } else {
         unsafe {
-            let len = (*name_str).length as usize;
+            let len = (*name_str).byte_len as usize;
             let data_ptr = (name_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()
@@ -744,7 +744,7 @@ pub extern "C" fn js_url_search_params_get_all(params: *mut ObjectHeader, name_s
         String::new()
     } else {
         unsafe {
-            let len = (*name_str).length as usize;
+            let len = (*name_str).byte_len as usize;
             let data_ptr = (name_str as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let slice = std::slice::from_raw_parts(data_ptr, len);
             String::from_utf8_lossy(slice).into_owned()

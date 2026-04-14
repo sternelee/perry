@@ -40,7 +40,7 @@ pub extern "C" fn js_getenv(name_ptr: *const StringHeader) -> *mut StringHeader 
             return std::ptr::null_mut();
         }
 
-        let len = (*name_ptr).length as usize;
+        let len = (*name_ptr).byte_len as usize;
         let data_ptr = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
 
         // Convert to Rust string

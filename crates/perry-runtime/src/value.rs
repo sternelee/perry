@@ -989,7 +989,7 @@ pub extern "C" fn js_ensure_string_ptr(value: f64) -> i64 {
         if ptr != 0 {
             let str_header = ptr as *const crate::string::StringHeader;
             unsafe {
-                let length = (*str_header).length;
+                let length = (*str_header).byte_len;
                 // Make a copy of the string to ensure we have a Perry-allocated string
                 let data_ptr = (str_header as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                 let copy = crate::string::js_string_from_bytes(data_ptr, length);
@@ -1125,7 +1125,7 @@ pub extern "C" fn js_jsvalue_loose_equals(a: f64, b: f64) -> i32 {
             let header = unsafe { &*ptr };
             let s = unsafe {
                 let data = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
-                std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, header.length as usize))
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, header.byte_len as usize))
             };
             let trimmed = s.trim();
             if trimmed.is_empty() {
@@ -1220,8 +1220,8 @@ pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
         let b_ptr = b_val.as_string_ptr();
         if !a_ptr.is_null() && !b_ptr.is_null() {
             unsafe {
-                let a_len = (*a_ptr).length as usize;
-                let b_len = (*b_ptr).length as usize;
+                let a_len = (*a_ptr).byte_len as usize;
+                let b_len = (*b_ptr).byte_len as usize;
                 let a_data = (a_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                 let b_data = (b_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                 let a_bytes = std::slice::from_raw_parts(a_data, a_len);

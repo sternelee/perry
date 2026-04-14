@@ -201,7 +201,7 @@ fn jsvalue_to_f64(v: f64) -> f64 {
         let str_ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::string::StringHeader;
         if !str_ptr.is_null() && (str_ptr as usize) >= 0x1000 {
             unsafe {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data = (str_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
                 if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(data, len)) {
                     if let Ok(n) = s.trim().parse::<f64>() {

@@ -272,16 +272,17 @@ unsafe fn native_string_to_rust(ptr: *const u8) -> String {
         return String::new();
     }
 
-    // StringHeader layout: { length: u32, capacity: u32, refcount: u32, data: [u8] }
+    // StringHeader layout: { utf16_len: u32, byte_len: u32, capacity: u32, refcount: u32, data: [u8] }
     #[repr(C)]
     struct StringHeader {
-        length: u32,
+        _utf16_len: u32,
+        byte_len: u32,
         _capacity: u32,
         _refcount: u32,
     }
 
     let header = ptr as *const StringHeader;
-    let length = (*header).length as usize;
+    let length = (*header).byte_len as usize;
     let data_ptr = ptr.add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, length);
 
@@ -382,7 +383,7 @@ fn native_object_to_v8<'s>(scope: &mut v8::HandleScope<'s>, ptr: *const u8) -> v
     // This handles the case where a string pointer accidentally gets POINTER_TAG instead of STRING_TAG.
     {
         let str_header = ptr as *const perry_runtime::string::StringHeader;
-        let str_len = unsafe { (*str_header).length } as usize;
+        let str_len = unsafe { (*str_header).byte_len } as usize;
         let str_cap = unsafe { (*str_header).capacity } as usize;
         if str_len > 0 && str_len <= 100_000 && str_cap >= str_len && str_cap <= str_len + 64 {
             // Capacity is close to length — looks like a string, not an array

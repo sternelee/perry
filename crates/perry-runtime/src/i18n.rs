@@ -320,7 +320,7 @@ pub extern "C" fn perry_i18n_interpolate(
 
     // Get the raw bytes of the template
     let template_bytes = unsafe {
-        let len = (*template_ptr).length as usize;
+        let len = (*template_ptr).byte_len as usize;
         let data_ptr = template_ptr.add(1) as *const u8;
         std::slice::from_raw_parts(data_ptr, len)
     };
@@ -334,11 +334,11 @@ pub extern "C" fn perry_i18n_interpolate(
             if name_ptr.is_null() || value_ptr.is_null() {
                 continue;
             }
-            let name_len = (*name_ptr).length as usize;
+            let name_len = (*name_ptr).byte_len as usize;
             let name_data = name_ptr.add(1) as *const u8;
             let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_data, name_len));
 
-            let value_len = (*value_ptr).length as usize;
+            let value_len = (*value_ptr).byte_len as usize;
             let value_data = value_ptr.add(1) as *const u8;
             let value_bytes = std::slice::from_raw_parts(value_data, value_len);
 

@@ -49,7 +49,7 @@ unsafe fn jsvalue_to_string(value: JSValue) -> Option<String> {
     if value.is_pointer() {
         let ptr = value.as_pointer() as *const StringHeader;
         if !ptr.is_null() {
-            let len = (*ptr).length as usize;
+            let len = (*ptr).byte_len as usize;
             let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data_ptr, len);
             return Some(String::from_utf8_lossy(bytes).to_string());

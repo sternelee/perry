@@ -63,7 +63,7 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
             println!("{}null", p);
         } else {
             unsafe {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -146,7 +146,7 @@ pub extern "C" fn js_console_error_dynamic(value: f64) {
             eprintln!("null");
         } else {
             unsafe {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -212,7 +212,7 @@ pub extern "C" fn js_console_warn_dynamic(value: f64) {
             eprintln!("null");
         } else {
             unsafe {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -290,7 +290,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
             if ptr.is_null() {
                 "null".to_string()
             } else {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string()
@@ -305,7 +305,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                 if str_ptr.is_null() {
                     "0n".to_string()
                 } else {
-                    let len = (*str_ptr).length as usize;
+                    let len = (*str_ptr).byte_len as usize;
                     let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let bytes = std::slice::from_raw_parts(data, len);
                     let num_str = std::str::from_utf8(bytes).unwrap_or("0");
@@ -323,7 +323,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                 if s_ptr.is_null() {
                     "Symbol()".to_string()
                 } else {
-                    let len = (*s_ptr).length as usize;
+                    let len = (*s_ptr).byte_len as usize;
                     let data = (s_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let bytes = std::slice::from_raw_parts(data, len);
                     std::str::from_utf8(bytes).unwrap_or("Symbol()").to_string()
@@ -355,7 +355,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     let name_str = if name_ptr.is_null() {
                         "Error".to_string()
                     } else {
-                        let len = (*name_ptr).length as usize;
+                        let len = (*name_ptr).byte_len as usize;
                         let data = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("Error").to_string()
@@ -364,7 +364,7 @@ fn format_jsvalue(value: f64, depth: usize) -> String {
                     let message_str = if message_ptr.is_null() {
                         "".to_string()
                     } else {
-                        let len = (*message_ptr).length as usize;
+                        let len = (*message_ptr).byte_len as usize;
                         let data = (message_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -548,7 +548,7 @@ unsafe fn format_object_as_json(obj_ptr: *const crate::object::ObjectHeader, dep
             if key_ptr.is_null() {
                 continue;
             }
-            let len = (*key_ptr).length as usize;
+            let len = (*key_ptr).byte_len as usize;
             let data = (key_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -592,7 +592,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
             if ptr.is_null() {
                 "null".to_string()
             } else {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 let s = std::str::from_utf8(bytes).unwrap_or("[invalid utf8]");
@@ -608,7 +608,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                 if str_ptr.is_null() {
                     "0n".to_string()
                 } else {
-                    let len = (*str_ptr).length as usize;
+                    let len = (*str_ptr).byte_len as usize;
                     let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                     let bytes = std::slice::from_raw_parts(data, len);
                     let num_str = std::str::from_utf8(bytes).unwrap_or("0");
@@ -631,7 +631,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                     let name_str = if name_ptr.is_null() {
                         "Error".to_string()
                     } else {
-                        let len = (*name_ptr).length as usize;
+                        let len = (*name_ptr).byte_len as usize;
                         let data = (name_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("Error").to_string()
@@ -640,7 +640,7 @@ fn format_jsvalue_for_json(value: f64, depth: usize) -> String {
                     let message_str = if message_ptr.is_null() {
                         "".to_string()
                     } else {
-                        let len = (*message_ptr).length as usize;
+                        let len = (*message_ptr).byte_len as usize;
                         let data = (message_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                         let bytes = std::slice::from_raw_parts(data, len);
                         std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -1013,7 +1013,7 @@ pub extern "C" fn js_parse_int(str_ptr: *const StringHeader, radix: f64) -> f64 
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
 
@@ -1078,7 +1078,7 @@ pub extern "C" fn js_parse_float(str_ptr: *const StringHeader) -> f64 {
     }
 
     unsafe {
-        let len = (*str_ptr).length as usize;
+        let len = (*str_ptr).byte_len as usize;
         let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
 
@@ -1140,7 +1140,7 @@ pub extern "C" fn js_number_coerce(value: f64) -> f64 {
             return f64::NAN;
         }
         unsafe {
-            let len = (*ptr).length as usize;
+            let len = (*ptr).byte_len as usize;
             let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             if let Ok(s) = std::str::from_utf8(bytes) {
@@ -1261,7 +1261,7 @@ pub extern "C" fn js_is_nan(value: f64) -> f64 {
             f64::NAN
         } else {
             unsafe {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -1313,7 +1313,7 @@ pub extern "C" fn js_is_finite(value: f64) -> f64 {
             f64::NAN
         } else {
             unsafe {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -1443,7 +1443,7 @@ unsafe fn label_from_str_ptr(ptr: *const StringHeader) -> String {
     if ptr.is_null() || (ptr as usize) < 0x1000 {
         return "default".to_string();
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data, len);
     std::str::from_utf8(bytes).unwrap_or("default").to_string()
@@ -1573,7 +1573,7 @@ pub extern "C" fn js_console_assert(cond: f64, msg_ptr: *const StringHeader) {
         if msg_ptr.is_null() || (msg_ptr as usize) < 0x1000 {
             String::new()
         } else {
-            let len = (*msg_ptr).length as usize;
+            let len = (*msg_ptr).byte_len as usize;
             let data = (msg_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
             let bytes = std::slice::from_raw_parts(data, len);
             std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -1659,7 +1659,7 @@ fn format_table_cell(value: f64) -> String {
             if ptr.is_null() {
                 "''".to_string()
             } else {
-                let len = (*ptr).length as usize;
+                let len = (*ptr).byte_len as usize;
                 let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let bytes = std::slice::from_raw_parts(data, len);
                 let s = std::str::from_utf8(bytes).unwrap_or("[invalid utf8]");
@@ -1700,7 +1700,7 @@ unsafe fn read_string_from_jsvalue(jsval: JSValue) -> Option<String> {
     if ptr.is_null() {
         return Some(String::new());
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data, len);
     Some(std::str::from_utf8(bytes).unwrap_or("[invalid utf8]").to_string())
@@ -2081,7 +2081,7 @@ fn extract_str_from_nanbox(value: f64) -> String {
     }
     unsafe {
         let header = str_ptr as *const StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data = (header as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
         std::str::from_utf8(bytes).unwrap_or("").to_string()
@@ -2155,7 +2155,7 @@ pub extern "C" fn js_structured_clone(value: f64) -> f64 {
                 return value;
             }
             unsafe {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
                 let new_str = js_string_from_bytes(data, len as u32);
                 let new_bits = 0x7FFF_0000_0000_0000u64 | (new_str as u64 & 0x0000_FFFF_FFFF_FFFF);

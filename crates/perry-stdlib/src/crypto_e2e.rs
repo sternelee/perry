@@ -19,7 +19,7 @@ unsafe fn str_from_header(ptr: *const StringHeader) -> Option<Vec<u8>> {
     if ptr.is_null() {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(bytes.to_vec())

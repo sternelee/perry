@@ -18,7 +18,7 @@ thread_local! {
 
 /// Helper: read a StringHeader pointer as a Rust &str
 unsafe fn string_as_str<'a>(s: *const StringHeader) -> &'a str {
-    let len = (*s).length as usize;
+    let len = (*s).byte_len as usize;
     let data = (s as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data, len);
     std::str::from_utf8_unchecked(bytes)

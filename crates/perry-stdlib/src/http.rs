@@ -77,7 +77,7 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    let len = (*ptr).length as usize;
+    let len = (*ptr).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     std::str::from_utf8(bytes).ok().map(|s| s.to_string())

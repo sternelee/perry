@@ -126,7 +126,7 @@ pub unsafe extern "C" fn js_mysql2_pool_query(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()
@@ -203,7 +203,7 @@ pub unsafe extern "C" fn js_mysql2_pool_execute(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()
@@ -324,7 +324,7 @@ unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
             // Extract string value
             let str_ptr = element.as_string_ptr();
             if !str_ptr.is_null() {
-                let len = (*str_ptr).length as usize;
+                let len = (*str_ptr).byte_len as usize;
                 let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<perry_runtime::StringHeader>());
                 let bytes = std::slice::from_raw_parts(data_ptr, len);
                 ParamValue::String(String::from_utf8_lossy(bytes).to_string())
@@ -337,7 +337,7 @@ unsafe fn extract_params_from_jsvalue(params: JSValue) -> Vec<ParamValue> {
             if !bigint_ptr.is_null() {
                 let str_ptr = perry_runtime::bigint::js_bigint_to_string(bigint_ptr);
                 if !str_ptr.is_null() {
-                    let len = (*str_ptr).length as usize;
+                    let len = (*str_ptr).byte_len as usize;
                     let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<perry_runtime::StringHeader>());
                     let bytes = std::slice::from_raw_parts(data_ptr, len);
                     ParamValue::String(String::from_utf8_lossy(bytes).to_string())
@@ -449,7 +449,7 @@ pub unsafe extern "C" fn js_mysql2_pool_connection_query(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()
@@ -526,7 +526,7 @@ pub unsafe extern "C" fn js_mysql2_pool_connection_execute(
         String::new()
     } else {
         let header = sql_ptr as *const perry_runtime::StringHeader;
-        let len = (*header).length as usize;
+        let len = (*header).byte_len as usize;
         let data_ptr = sql_ptr.add(std::mem::size_of::<perry_runtime::StringHeader>());
         let bytes = std::slice::from_raw_parts(data_ptr, len);
         String::from_utf8_lossy(bytes).to_string()

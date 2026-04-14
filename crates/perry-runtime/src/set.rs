@@ -28,7 +28,7 @@ impl Hash for JSValueKey {
             // String value: hash by content so that identical strings
             // with different pointers/tags produce the same hash.
             unsafe {
-                let len = (*ptr).length;
+                let len = (*ptr).byte_len;
                 // Use a distinct domain tag so string hashes don't collide
                 // with non-string bit patterns.
                 0xFFFF_FFFFu32.hash(state);
@@ -117,8 +117,8 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     if std::ptr::eq(a, b) {
         return true;
     }
-    let len_a = (*a).length;
-    let len_b = (*b).length;
+    let len_a = (*a).byte_len;
+    let len_b = (*b).byte_len;
     if len_a != len_b {
         return false;
     }

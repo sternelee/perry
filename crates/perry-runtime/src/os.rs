@@ -442,7 +442,7 @@ pub extern "C" fn js_process_chdir(dir_ptr: *const StringHeader) {
         if dir_ptr.is_null() {
             return;
         }
-        let len = (*dir_ptr).length as usize;
+        let len = (*dir_ptr).byte_len as usize;
         let data = (dir_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
         let bytes = std::slice::from_raw_parts(data, len);
         if let Ok(s) = std::str::from_utf8(bytes) {

@@ -270,7 +270,7 @@ unsafe fn extract_jsvalue_string(value: f64) -> Option<String> {
     if ptr == 0 {
         return None;
     }
-    let len = (*(ptr as *const StringHeader)).length as usize;
+    let len = (*(ptr as *const StringHeader)).byte_len as usize;
     let data_ptr = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
     Some(String::from_utf8_lossy(bytes).to_string())

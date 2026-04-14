@@ -99,8 +99,8 @@ unsafe fn strings_equal(a: *const StringHeader, b: *const StringHeader) -> bool 
     if a.is_null() || b.is_null() || (a as usize) < 0x1000 || (b as usize) < 0x1000 {
         return a == b;
     }
-    let len_a = (*a).length;
-    let len_b = (*b).length;
+    let len_a = (*a).byte_len;
+    let len_b = (*b).byte_len;
     if len_a != len_b {
         return false;
     }

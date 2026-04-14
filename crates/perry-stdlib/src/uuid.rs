@@ -45,7 +45,7 @@ pub unsafe extern "C" fn js_uuid_validate(str_ptr: *const StringHeader) -> f64 {
         return 0.0; // false
     }
 
-    let len = (*str_ptr).length as usize;
+    let len = (*str_ptr).byte_len as usize;
     let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
 
@@ -69,7 +69,7 @@ pub unsafe extern "C" fn js_uuid_version(str_ptr: *const StringHeader) -> f64 {
         return f64::NAN;
     }
 
-    let len = (*str_ptr).length as usize;
+    let len = (*str_ptr).byte_len as usize;
     let data_ptr = (str_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
     let bytes = std::slice::from_raw_parts(data_ptr, len);
 
