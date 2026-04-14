@@ -5831,8 +5831,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // a PropertyGet on a class instance (`this.items`) or a LocalGet.
         // We chain a get + push + set so reallocations are reflected
         // back in the source.
-        Expr::NativeMethodCall { module, method, object, args, .. } => {
-            lower_native_method_call(ctx, module, method, object.as_deref(), args)
+        Expr::NativeMethodCall { module, class_name, method, object, args, .. } => {
+            lower_native_method_call(ctx, module, class_name.as_deref(), method, object.as_deref(), args)
         }
 
         // Phase H crypto: collapse `crypto.createHash(alg).update(data).digest(enc)`

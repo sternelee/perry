@@ -173,11 +173,6 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
     // direct LLVM call to its scoped name and the system linker
     // resolves the symbol when the .o files are linked together.
     if let Expr::ExternFuncRef { name, return_type: ext_return_type, .. } = callee {
-        // Map JS global names (setTimeout, queueMicrotask, etc.) to the
-        // right runtime C functions. These aren't `js_*` prefixed in the
-        // HIR but need to call specific runtime entrypoints with the
-        // right signature. Handle them explicitly before the generic
-        // `js_*` pass-through and the import-map fallback.
         match name.as_str() {
             "setTimeout" if args.len() == 2 => {
                 let cb_box = lower_expr(ctx, &args[0])?;
@@ -270,30 +265,20 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             // like width/height/color).
             let mut lowered: Vec<String> = Vec::with_capacity(args.len());
             let mut arg_types: Vec<crate::types::LlvmType> = Vec::with_capacity(args.len());
-            // Determine if this function takes a handle as its first arg.
-            // Most extern C functions follow the pattern: first arg is a
-            // pointer/handle (i64), remaining args are floats (f64) or strings.
-            // Exceptions: _create functions often take all-float args.
-            let first_arg_is_handle = args.len() > 0
-                && is_integer_handle_arg(&args[0])
-                && !name.contains("_create");
-            for (i, a) in args.iter().enumerate() {
+            // Native library functions (Bloom, etc.) use an all-double
+            // ABI: every arg is f64, passed in d-registers on ARM64.
+            // Handles/pointers are encoded as f64 bit patterns (NaN-boxed
+            // or raw integer-to-double). String args are the exception:
+            // they need to be unboxed to raw *const u8 pointers.
+            for a in args.iter() {
                 let val = lower_expr(ctx, a)?;
                 if is_string_expr(ctx, a) {
-                    // Unbox NaN-boxed string to raw C string pointer.
                     let blk = ctx.block();
                     let raw_ptr = blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &val)]);
                     let ptr_val = blk.inttoptr(I64, &raw_ptr);
                     lowered.push(ptr_val);
                     arg_types.push(PTR);
-                } else if i == 0 && first_arg_is_handle {
-                    // First arg is a handle/pointer → i64 for x0.
-                    let blk = ctx.block();
-                    let i64_val = blk.fptosi(DOUBLE, &val, I64);
-                    lowered.push(i64_val);
-                    arg_types.push(I64);
                 } else {
-                    // Float arg or subsequent args → double for d-register.
                     lowered.push(val);
                     arg_types.push(DOUBLE);
                 }
@@ -2123,6 +2108,7 @@ fn apply_field_initializers_recursive(
 pub(crate) fn lower_native_method_call(
     ctx: &mut FnCtx<'_>,
     module: &str,
+    class_name: Option<&str>,
     method: &str,
     object: Option<&Expr>,
     args: &[Expr],
@@ -2435,7 +2421,7 @@ pub(crate) fn lower_native_method_call(
     // old Cranelift codegen's dispatch table but lost in the v0.5.0
     // LLVM cutover.
     if object.is_none() {
-        if let Some(sig) = native_module_lookup(module, false, method) {
+        if let Some(sig) = native_module_lookup(module, false, method, class_name) {
             return lower_native_module_dispatch(ctx, sig, None, args);
         }
     }
@@ -2612,7 +2598,7 @@ pub(crate) fn lower_native_method_call(
     // Generic native module dispatch (with receiver): fastify instance
     // methods (app.get, app.listen, conn.query, etc.), mysql2, ws, pg,
     // ioredis, mongodb, better-sqlite3, etc.
-    if let Some(sig) = native_module_lookup(module, true, method) {
+    if let Some(sig) = native_module_lookup(module, true, method, class_name) {
         let recv_val = lower_expr(ctx, recv)?;
         let blk = ctx.block();
         let handle = unbox_to_i64(blk, &recv_val);
@@ -2859,6 +2845,24 @@ pub(crate) fn lower_builtin_new(
             // `controller.aborted`) works via js_object_get_field_by_name_f64.
             let boxed = nanbox_pointer_inline(ctx.block(), &handle);
             Ok(Some(boxed))
+        }
+
+        // new WebSocketServer({ port: N }) → js_ws_server_new(opts_f64)
+        "WebSocketServer" => {
+            // Lower the options object (first arg) as a NaN-boxed f64.
+            let opts = if !args.is_empty() {
+                lower_expr(ctx, &args[0])?
+            } else {
+                double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
+            };
+            ctx.pending_declares.push((
+                "js_ws_server_new".to_string(),
+                I64,
+                vec![DOUBLE],
+            ));
+            let blk = ctx.block();
+            let handle = blk.call(I64, "js_ws_server_new", &[(DOUBLE, &opts)]);
+            Ok(Some(nanbox_pointer_inline(blk, &handle)))
         }
 
         _ => Ok(None),
@@ -3925,6 +3929,10 @@ struct NativeModSig {
     module: &'static str,
     has_receiver: bool,
     method: &'static str,
+    /// Optional class_name filter. When Some, only matches if the HIR's
+    /// class_name equals this value (e.g. "Pool" vs "Connection" for mysql2).
+    /// When None, matches regardless of class_name.
+    class_filter: Option<&'static str>,
     runtime: &'static str,
     args: &'static [NativeArgKind],
     ret: NativeRetKind,
@@ -3949,303 +3957,475 @@ const NR_VOID: NativeRetKind = NativeRetKind::Void;
 const NATIVE_MODULE_TABLE: &[NativeModSig] = &[
     // ========== Fastify HTTP Framework ==========
     NativeModSig { module: "fastify", has_receiver: false, method: "default",
+        class_filter: None,
         runtime: "js_fastify_create_with_opts", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "get",
+        class_filter: None,
         runtime: "js_fastify_get", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "post",
+        class_filter: None,
         runtime: "js_fastify_post", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "put",
+        class_filter: None,
         runtime: "js_fastify_put", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "delete",
+        class_filter: None,
         runtime: "js_fastify_delete", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "patch",
+        class_filter: None,
         runtime: "js_fastify_patch", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "head",
+        class_filter: None,
         runtime: "js_fastify_head", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "options",
+        class_filter: None,
         runtime: "js_fastify_options", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "all",
+        class_filter: None,
         runtime: "js_fastify_all", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "route",
+        class_filter: None,
         runtime: "js_fastify_route", args: &[NA_STR, NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "addHook",
+        class_filter: None,
         runtime: "js_fastify_add_hook", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "setErrorHandler",
+        class_filter: None,
         runtime: "js_fastify_set_error_handler", args: &[NA_PTR], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "register",
+        class_filter: None,
         runtime: "js_fastify_register", args: &[NA_PTR, NA_F64], ret: NR_I32 },
     NativeModSig { module: "fastify", has_receiver: true, method: "listen",
+        class_filter: None,
         runtime: "js_fastify_listen", args: &[NA_F64, NA_PTR], ret: NR_VOID },
     // Fastify request methods
     NativeModSig { module: "fastify", has_receiver: true, method: "method",
+        class_filter: None,
         runtime: "js_fastify_req_method", args: &[], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "url",
+        class_filter: None,
         runtime: "js_fastify_req_url", args: &[], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "params",
+        class_filter: None,
         runtime: "js_fastify_req_params", args: &[], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "param",
+        class_filter: None,
         runtime: "js_fastify_req_param", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "query",
+        class_filter: None,
         runtime: "js_fastify_req_query_object", args: &[], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "rawBody",
+        class_filter: None,
         runtime: "js_fastify_req_body", args: &[], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "headers",
+        class_filter: None,
         runtime: "js_fastify_req_headers", args: &[], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "header",
+        class_filter: None,
         runtime: "js_fastify_req_header", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "user",
+        class_filter: None,
         runtime: "js_fastify_req_get_user_data", args: &[], ret: NR_F64 },
     // Fastify reply methods
     NativeModSig { module: "fastify", has_receiver: true, method: "status",
+        class_filter: None,
         runtime: "js_fastify_reply_status", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "fastify", has_receiver: true, method: "send",
+        class_filter: None,
         runtime: "js_fastify_reply_send", args: &[NA_F64], ret: NR_I32 },
     // Fastify context methods (Hono-style)
     NativeModSig { module: "fastify", has_receiver: true, method: "text",
+        class_filter: None,
         runtime: "js_fastify_ctx_text", args: &[NA_STR, NA_F64], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "html",
+        class_filter: None,
         runtime: "js_fastify_ctx_html", args: &[NA_STR, NA_F64], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "redirect",
+        class_filter: None,
         runtime: "js_fastify_ctx_redirect", args: &[NA_STR, NA_F64], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "json",
+        class_filter: None,
         runtime: "js_fastify_ctx_json", args: &[NA_F64, NA_F64], ret: NR_F64 },
     NativeModSig { module: "fastify", has_receiver: true, method: "body",
+        class_filter: None,
         runtime: "js_fastify_req_json", args: &[], ret: NR_F64 },
 
     // ========== MySQL2 ==========
     NativeModSig { module: "mysql2", has_receiver: false, method: "createConnection",
+        class_filter: None,
         runtime: "js_mysql2_create_connection", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mysql2", has_receiver: false, method: "createPool",
+        class_filter: None,
         runtime: "js_mysql2_create_pool", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: false, method: "createConnection",
+        class_filter: None,
         runtime: "js_mysql2_create_connection", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: false, method: "createPool",
+        class_filter: None,
         runtime: "js_mysql2_create_pool", args: &[NA_F64], ret: NR_PTR },
-    // mysql2 instance methods — query/execute take (sql_str_ptr, params_jsvalue)
+    // mysql2 Pool-specific methods (class_filter: Some("Pool"))
     NativeModSig { module: "mysql2", has_receiver: true, method: "query",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "execute",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "end",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_end", args: &[], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "query",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "execute",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "end",
+        class_filter: Some("Pool"),
+        runtime: "js_mysql2_pool_end", args: &[], ret: NR_PTR },
+    // mysql2 PoolConnection-specific methods
+    NativeModSig { module: "mysql2", has_receiver: true, method: "query",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2", has_receiver: true, method: "execute",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "query",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    NativeModSig { module: "mysql2/promise", has_receiver: true, method: "execute",
+        class_filter: Some("PoolConnection"),
+        runtime: "js_mysql2_pool_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
+    // mysql2 generic instance methods (Connection fallback, class_filter: None)
+    NativeModSig { module: "mysql2", has_receiver: true, method: "query",
+        class_filter: None,
         runtime: "js_mysql2_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
     NativeModSig { module: "mysql2", has_receiver: true, method: "execute",
+        class_filter: None,
         runtime: "js_mysql2_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
     NativeModSig { module: "mysql2", has_receiver: true, method: "end",
+        class_filter: None,
         runtime: "js_mysql2_connection_end", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2", has_receiver: true, method: "getConnection",
+        class_filter: None,
         runtime: "js_mysql2_pool_get_connection", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2", has_receiver: true, method: "release",
-        runtime: "js_mysql2_pool_connection_release", args: &[], ret: NR_PTR },
+        class_filter: None,
+        runtime: "js_mysql2_pool_connection_release", args: &[], ret: NR_VOID },
     NativeModSig { module: "mysql2", has_receiver: true, method: "beginTransaction",
+        class_filter: None,
         runtime: "js_mysql2_connection_begin_transaction", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2", has_receiver: true, method: "commit",
+        class_filter: None,
         runtime: "js_mysql2_connection_commit", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2", has_receiver: true, method: "rollback",
+        class_filter: None,
         runtime: "js_mysql2_connection_rollback", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "query",
+        class_filter: None,
         runtime: "js_mysql2_connection_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "execute",
+        class_filter: None,
         runtime: "js_mysql2_connection_execute", args: &[NA_STR, NA_PTR], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "end",
+        class_filter: None,
         runtime: "js_mysql2_connection_end", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "getConnection",
+        class_filter: None,
         runtime: "js_mysql2_pool_get_connection", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "release",
-        runtime: "js_mysql2_pool_connection_release", args: &[], ret: NR_PTR },
+        class_filter: None,
+        runtime: "js_mysql2_pool_connection_release", args: &[], ret: NR_VOID },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "beginTransaction",
+        class_filter: None,
         runtime: "js_mysql2_connection_begin_transaction", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "commit",
+        class_filter: None,
         runtime: "js_mysql2_connection_commit", args: &[], ret: NR_PTR },
     NativeModSig { module: "mysql2/promise", has_receiver: true, method: "rollback",
+        class_filter: None,
         runtime: "js_mysql2_connection_rollback", args: &[], ret: NR_PTR },
 
     // ========== PostgreSQL (pg) ==========
     NativeModSig { module: "pg", has_receiver: false, method: "connect",
+        class_filter: None,
         runtime: "js_pg_connect", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "pg", has_receiver: false, method: "Pool",
+        class_filter: None,
         runtime: "js_pg_create_pool", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "pg", has_receiver: true, method: "query",
+        class_filter: None,
         runtime: "js_pg_client_query", args: &[NA_STR, NA_PTR], ret: NR_PTR },
     NativeModSig { module: "pg", has_receiver: true, method: "end",
+        class_filter: None,
         runtime: "js_pg_client_end", args: &[], ret: NR_PTR },
 
     // ========== ioredis ==========
     NativeModSig { module: "ioredis", has_receiver: false, method: "createClient",
+        class_filter: None,
         runtime: "js_redis_create_client", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "set",
+        class_filter: None,
         runtime: "js_redis_set", args: &[NA_STR, NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "get",
+        class_filter: None,
         runtime: "js_redis_get", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "del",
+        class_filter: None,
         runtime: "js_redis_del", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "exists",
+        class_filter: None,
         runtime: "js_redis_exists", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "incr",
+        class_filter: None,
         runtime: "js_redis_incr", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "decr",
+        class_filter: None,
         runtime: "js_redis_decr", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "expire",
+        class_filter: None,
         runtime: "js_redis_expire", args: &[NA_STR, NA_F64], ret: NR_PTR },
     NativeModSig { module: "ioredis", has_receiver: true, method: "quit",
+        class_filter: None,
         runtime: "js_redis_quit", args: &[], ret: NR_PTR },
 
     // ========== MongoDB ==========
     NativeModSig { module: "mongodb", has_receiver: false, method: "connect",
+        class_filter: None,
         runtime: "js_mongodb_connect", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "db",
+        class_filter: None,
         runtime: "js_mongodb_db", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "collection",
+        class_filter: None,
         runtime: "js_mongodb_collection", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "insertOne",
+        class_filter: None,
         runtime: "js_mongodb_insert_one", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "insertMany",
+        class_filter: None,
         runtime: "js_mongodb_insert_many", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "find",
+        class_filter: None,
         runtime: "js_mongodb_find", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "findOne",
+        class_filter: None,
         runtime: "js_mongodb_find_one", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "updateOne",
+        class_filter: None,
         runtime: "js_mongodb_update_one", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "updateMany",
+        class_filter: None,
         runtime: "js_mongodb_update_many", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "deleteOne",
+        class_filter: None,
         runtime: "js_mongodb_delete_one", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "deleteMany",
+        class_filter: None,
         runtime: "js_mongodb_delete_many", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "countDocuments",
+        class_filter: None,
         runtime: "js_mongodb_count_documents", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "aggregate",
+        class_filter: None,
         runtime: "js_mongodb_aggregate", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "createIndex",
+        class_filter: None,
         runtime: "js_mongodb_create_index", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "close",
+        class_filter: None,
         runtime: "js_mongodb_close", args: &[], ret: NR_PTR },
     NativeModSig { module: "mongodb", has_receiver: true, method: "toArray",
+        class_filter: None,
         runtime: "js_mongodb_to_array", args: &[], ret: NR_PTR },
 
     // ========== better-sqlite3 ==========
     NativeModSig { module: "better-sqlite3", has_receiver: false, method: "default",
+        class_filter: None,
         runtime: "js_sqlite_open", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "better-sqlite3", has_receiver: true, method: "prepare",
+        class_filter: None,
         runtime: "js_sqlite_prepare", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "better-sqlite3", has_receiver: true, method: "run",
+        class_filter: None,
         runtime: "js_sqlite_stmt_run", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "better-sqlite3", has_receiver: true, method: "get",
+        class_filter: None,
         runtime: "js_sqlite_stmt_get", args: &[NA_F64], ret: NR_F64 },
     NativeModSig { module: "better-sqlite3", has_receiver: true, method: "all",
+        class_filter: None,
         runtime: "js_sqlite_stmt_all", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "better-sqlite3", has_receiver: true, method: "exec",
+        class_filter: None,
         runtime: "js_sqlite_exec", args: &[NA_STR], ret: NR_VOID },
     NativeModSig { module: "better-sqlite3", has_receiver: true, method: "close",
+        class_filter: None,
         runtime: "js_sqlite_close", args: &[], ret: NR_VOID },
 
     // ========== WebSocket (ws) ==========
     NativeModSig { module: "ws", has_receiver: false, method: "Server",
-        runtime: "js_ws_server_create", args: &[NA_F64], ret: NR_PTR },
+        class_filter: None,
+        runtime: "js_ws_server_new", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "ws", has_receiver: false, method: "WebSocket",
-        runtime: "js_ws_client_connect", args: &[NA_STR], ret: NR_PTR },
+        class_filter: None,
+        runtime: "js_ws_connect", args: &[NA_STR], ret: NR_PTR },
     NativeModSig { module: "ws", has_receiver: true, method: "on",
+        class_filter: None,
         runtime: "js_ws_on", args: &[NA_STR, NA_PTR], ret: NR_I32 },
     NativeModSig { module: "ws", has_receiver: true, method: "send",
-        runtime: "js_ws_send", args: &[NA_F64], ret: NR_I32 },
+        class_filter: None,
+        runtime: "js_ws_send", args: &[NA_STR], ret: NR_VOID },
     NativeModSig { module: "ws", has_receiver: true, method: "close",
+        class_filter: None,
         runtime: "js_ws_close", args: &[], ret: NR_VOID },
 
     // ========== Events ==========
     NativeModSig { module: "events", has_receiver: false, method: "EventEmitter",
+        class_filter: None,
         runtime: "js_event_emitter_new", args: &[], ret: NR_PTR },
     NativeModSig { module: "events", has_receiver: true, method: "on",
+        class_filter: None,
         runtime: "js_event_emitter_on", args: &[NA_STR, NA_PTR], ret: NR_PTR },
     NativeModSig { module: "events", has_receiver: true, method: "emit",
+        class_filter: None,
         runtime: "js_event_emitter_emit", args: &[NA_STR, NA_F64], ret: NR_F64 },
     NativeModSig { module: "events", has_receiver: true, method: "removeListener",
+        class_filter: None,
         runtime: "js_event_emitter_remove_listener", args: &[NA_STR, NA_PTR], ret: NR_PTR },
     NativeModSig { module: "events", has_receiver: true, method: "removeAllListeners",
+        class_filter: None,
         runtime: "js_event_emitter_remove_all_listeners", args: &[NA_STR], ret: NR_PTR },
 
     // ========== LRU Cache ==========
     NativeModSig { module: "lru-cache", has_receiver: false, method: "default",
+        class_filter: None,
         runtime: "js_lru_cache_new", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "lru-cache", has_receiver: true, method: "get",
+        class_filter: None,
         runtime: "js_lru_cache_get", args: &[NA_F64], ret: NR_F64 },
     NativeModSig { module: "lru-cache", has_receiver: true, method: "set",
+        class_filter: None,
         runtime: "js_lru_cache_set", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "lru-cache", has_receiver: true, method: "has",
+        class_filter: None,
         runtime: "js_lru_cache_has", args: &[NA_F64], ret: NR_F64 },
     NativeModSig { module: "lru-cache", has_receiver: true, method: "delete",
+        class_filter: None,
         runtime: "js_lru_cache_delete", args: &[NA_F64], ret: NR_F64 },
     NativeModSig { module: "lru-cache", has_receiver: true, method: "clear",
+        class_filter: None,
         runtime: "js_lru_cache_clear", args: &[], ret: NR_VOID },
     NativeModSig { module: "lru-cache", has_receiver: true, method: "size",
+        class_filter: None,
         runtime: "js_lru_cache_size", args: &[], ret: NR_F64 },
 
     // ========== uuid ==========
     NativeModSig { module: "uuid", has_receiver: false, method: "v4",
+        class_filter: None,
         runtime: "js_uuid_v4", args: &[], ret: NR_PTR },
     NativeModSig { module: "uuid", has_receiver: false, method: "v1",
+        class_filter: None,
         runtime: "js_uuid_v1", args: &[], ret: NR_PTR },
     NativeModSig { module: "uuid", has_receiver: false, method: "v7",
+        class_filter: None,
         runtime: "js_uuid_v7", args: &[], ret: NR_PTR },
     NativeModSig { module: "uuid", has_receiver: false, method: "validate",
+        class_filter: None,
         runtime: "js_uuid_validate", args: &[NA_F64], ret: NR_F64 },
 
     // ========== jsonwebtoken ==========
     NativeModSig { module: "jsonwebtoken", has_receiver: false, method: "sign",
+        class_filter: None,
         runtime: "js_jwt_sign", args: &[NA_F64, NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "jsonwebtoken", has_receiver: false, method: "verify",
+        class_filter: None,
         runtime: "js_jwt_verify", args: &[NA_F64, NA_F64], ret: NR_F64 },
     NativeModSig { module: "jsonwebtoken", has_receiver: false, method: "decode",
+        class_filter: None,
         runtime: "js_jwt_decode", args: &[NA_F64], ret: NR_F64 },
 
     // ========== nodemailer ==========
     NativeModSig { module: "nodemailer", has_receiver: false, method: "createTransport",
+        class_filter: None,
         runtime: "js_nodemailer_create_transport", args: &[NA_PTR], ret: NR_F64 },
     NativeModSig { module: "nodemailer", has_receiver: true, method: "sendMail",
+        class_filter: None,
         runtime: "js_nodemailer_send_mail", args: &[NA_PTR], ret: NR_PTR },
     NativeModSig { module: "nodemailer", has_receiver: true, method: "verify",
+        class_filter: None,
         runtime: "js_nodemailer_verify", args: &[], ret: NR_PTR },
 
     // ========== dotenv ==========
     NativeModSig { module: "dotenv", has_receiver: false, method: "config",
+        class_filter: None,
         runtime: "js_dotenv_config", args: &[], ret: NR_F64 },
 
     // ========== nanoid ==========
     NativeModSig { module: "nanoid", has_receiver: false, method: "nanoid",
+        class_filter: None,
         runtime: "js_nanoid", args: &[], ret: NR_PTR },
 
     // ========== slugify ==========
     NativeModSig { module: "slugify", has_receiver: false, method: "slugify",
+        class_filter: None,
         runtime: "js_slugify", args: &[NA_STR], ret: NR_PTR },
 
     // ========== validator ==========
     NativeModSig { module: "validator", has_receiver: false, method: "isEmail",
+        class_filter: None,
         runtime: "js_validator_is_email", args: &[NA_STR], ret: NR_F64 },
     NativeModSig { module: "validator", has_receiver: false, method: "isURL",
+        class_filter: None,
         runtime: "js_validator_is_url", args: &[NA_STR], ret: NR_F64 },
     NativeModSig { module: "validator", has_receiver: false, method: "isUUID",
+        class_filter: None,
         runtime: "js_validator_is_uuid", args: &[NA_STR], ret: NR_F64 },
     NativeModSig { module: "validator", has_receiver: false, method: "isJSON",
+        class_filter: None,
         runtime: "js_validator_is_json", args: &[NA_STR], ret: NR_F64 },
     NativeModSig { module: "validator", has_receiver: false, method: "isEmpty",
+        class_filter: None,
         runtime: "js_validator_is_empty", args: &[NA_STR], ret: NR_F64 },
 
     // ========== exponential-backoff ==========
     NativeModSig { module: "exponential-backoff", has_receiver: false, method: "backOff",
+        class_filter: None,
         runtime: "backOff", args: &[NA_PTR, NA_F64], ret: NR_PTR },
 
     // ========== argon2 ==========
     NativeModSig { module: "argon2", has_receiver: false, method: "hash",
+        class_filter: None,
         runtime: "js_argon2_hash", args: &[NA_F64], ret: NR_PTR },
     NativeModSig { module: "argon2", has_receiver: false, method: "verify",
+        class_filter: None,
         runtime: "js_argon2_verify", args: &[NA_F64, NA_F64], ret: NR_PTR },
 
     // ========== bcrypt ==========
     NativeModSig { module: "bcrypt", has_receiver: false, method: "hash",
+        class_filter: None,
         runtime: "js_bcrypt_hash", args: &[NA_F64, NA_F64], ret: NR_PTR },
     NativeModSig { module: "bcrypt", has_receiver: false, method: "compare",
+        class_filter: None,
         runtime: "js_bcrypt_compare", args: &[NA_F64, NA_F64], ret: NR_PTR },
 ];
 
 /// Look up a native module method in the static dispatch table.
-fn native_module_lookup(module: &str, has_receiver: bool, method: &str) -> Option<&'static NativeModSig> {
+/// Entries with `class_filter: Some("Pool")` only match when
+/// `class_name == Some("Pool")`; entries with `class_filter: None`
+/// match any class_name. More-specific entries (with class_filter)
+/// are checked first.
+fn native_module_lookup(module: &str, has_receiver: bool, method: &str, class_name: Option<&str>) -> Option<&'static NativeModSig> {
+    // First pass: look for an exact class_filter match.
+    let exact = NATIVE_MODULE_TABLE.iter().find(|sig| {
+        sig.module == module && sig.has_receiver == has_receiver && sig.method == method
+            && sig.class_filter.is_some() && sig.class_filter == class_name
+    });
+    if exact.is_some() {
+        return exact;
+    }
+    // Second pass: generic (class_filter == None) entries.
     NATIVE_MODULE_TABLE.iter().find(|sig| {
         sig.module == module && sig.has_receiver == has_receiver && sig.method == method
+            && sig.class_filter.is_none()
     })
 }
 
