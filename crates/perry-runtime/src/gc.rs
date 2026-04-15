@@ -442,6 +442,12 @@ fn gc_collect_inner() {
     // 4. Trace from marked roots (iterative worklist)
     trace_marked_objects(&valid_ptrs);
 
+    // 5. Block-persistence pass: arena blocks survive whole or not at all, so
+    //    arena objects sharing a block with a root-reachable object persist
+    //    even when not themselves reachable. Their malloc children must stay
+    //    alive too (issues #43 / #44).
+    mark_block_persisting_arena_objects(&valid_ptrs);
+
     // === SWEEP PHASE ===
     // sweep() now clears mark bits on surviving objects inline,
     // eliminating 2 redundant heap walks (arena + malloc).
@@ -748,6 +754,30 @@ fn mark_registered_roots(valid_ptrs: &ValidPointerSet) {
     }
 }
 
+/// Process a worklist of already-marked headers: follow references iteratively,
+/// marking newly-reached objects and pushing them onto the worklist.
+fn drain_trace_worklist(worklist: &mut Vec<*mut GcHeader>, valid_ptrs: &ValidPointerSet) {
+    let mut i = 0;
+    while i < worklist.len() {
+        let header = worklist[i];
+        i += 1;
+
+        unsafe {
+            let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
+            match (*header).obj_type {
+                GC_TYPE_ARRAY => trace_array(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_OBJECT => trace_object(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_CLOSURE => trace_closure(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_PROMISE => trace_promise(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_ERROR => trace_error(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_MAP => trace_map(user_ptr, valid_ptrs, worklist),
+                GC_TYPE_STRING | GC_TYPE_BIGINT => {}
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Trace from marked objects: follow references iteratively using a worklist.
 fn trace_marked_objects(valid_ptrs: &ValidPointerSet) {
     // Collect all currently-marked objects into a worklist
@@ -775,39 +805,69 @@ fn trace_marked_objects(valid_ptrs: &ValidPointerSet) {
         }
     });
 
-    // Process worklist
-    let mut i = 0;
-    while i < worklist.len() {
-        let header = worklist[i];
-        i += 1;
+    drain_trace_worklist(&mut worklist, valid_ptrs);
+}
 
-        unsafe {
-            let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
-            match (*header).obj_type {
-                GC_TYPE_ARRAY => {
-                    trace_array(user_ptr, valid_ptrs, &mut worklist);
+/// Block-persistence pass: arena block reset is all-or-nothing, so any arena
+/// object in a block that has at least one reachable object will persist in
+/// memory whether or not the object itself was reached from a root. Any
+/// malloc children referenced by those persisting arena objects must therefore
+/// be kept alive — otherwise they get freed by sweep and the persisting arena
+/// object holds dangling pointers.
+///
+/// Why this matters: during `arr.push(new_obj)`, the new object is in a
+/// caller-saved register between its allocation and the write into `arr`.
+/// If array growth triggers GC in that window, conservative stack scanning
+/// (setjmp only captures callee-saved regs) doesn't see the new object as a
+/// root. The arena block containing the new object still survives (other
+/// objects in that block are reachable from `arr`), so the new object's
+/// memory is intact. But its malloc-allocated string fields ("Record X",
+/// email, etc.) get swept, and JSON.stringify later reads freed memory.
+/// Repro: issues #43 / #44.
+///
+/// Iterates until fixed point because marking an arena object may trace a
+/// child in a previously-dead block, making it live in the next round.
+fn mark_block_persisting_arena_objects(valid_ptrs: &ValidPointerSet) {
+    let mut worklist: Vec<*mut GcHeader> = Vec::new();
+    loop {
+        let n_blocks = crate::arena::arena_block_count();
+        let mut block_has_live: Vec<bool> = vec![false; n_blocks];
+
+        // Pass 1: compute which blocks have any reachable (marked/pinned) object.
+        crate::arena::arena_walk_objects_with_block_index(|header_ptr, block_idx| {
+            let header = header_ptr as *mut GcHeader;
+            unsafe {
+                if (*header).gc_flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) != 0 {
+                    if block_idx < block_has_live.len() {
+                        block_has_live[block_idx] = true;
+                    }
                 }
-                GC_TYPE_OBJECT => {
-                    trace_object(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_CLOSURE => {
-                    trace_closure(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_PROMISE => {
-                    trace_promise(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_ERROR => {
-                    trace_error(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_MAP => {
-                    trace_map(user_ptr, valid_ptrs, &mut worklist);
-                }
-                GC_TYPE_STRING | GC_TYPE_BIGINT => {
-                    // Leaf nodes - no children to trace
-                }
-                _ => {}
             }
+        });
+
+        // Pass 2: mark any unmarked arena object in a live block and enqueue.
+        let mut newly_marked = 0usize;
+        crate::arena::arena_walk_objects_with_block_index(|header_ptr, block_idx| {
+            if block_idx >= block_has_live.len() || !block_has_live[block_idx] {
+                return;
+            }
+            let header = header_ptr as *mut GcHeader;
+            unsafe {
+                if (*header).gc_flags & (GC_FLAG_MARKED | GC_FLAG_PINNED) == 0 {
+                    (*header).gc_flags |= GC_FLAG_MARKED;
+                    worklist.push(header);
+                    newly_marked += 1;
+                }
+            }
+        });
+
+        if newly_marked == 0 {
+            break;
         }
+
+        // Trace newly marked; may mark children in previously-dead blocks,
+        // requiring another round to pick them up.
+        drain_trace_worklist(&mut worklist, valid_ptrs);
     }
 }
 
@@ -874,8 +934,10 @@ unsafe fn trace_array(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet, worklist:
     let length = (*arr).length;
     let capacity = (*arr).capacity;
 
-    // Sanity checks: reject corrupt length/capacity to avoid scanning wild memory
-    if length > capacity || length > 65536 {
+    // Sanity check: reject corrupt length/capacity to avoid scanning wild memory.
+    // The 16M cap is a garbage-recognition guard (no realistic array exceeds it);
+    // real programs routinely push >65k items into arrays (issue #44 repro hits 100k).
+    if length > capacity || length > 16_000_000 {
         return;
     }
 
@@ -904,8 +966,8 @@ unsafe fn trace_object(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet, worklist
     let field_count = (*obj).field_count;
 
     // Sanity check: reject corrupt field_count to avoid scanning wild memory.
-    // Object fields start after ObjectHeader (24 bytes). Max reasonable: ~64K fields.
-    if field_count > 65536 {
+    // 1M is a garbage-recognition guard — legitimate objects never have that many fields.
+    if field_count > 1_000_000 {
         return;
     }
 

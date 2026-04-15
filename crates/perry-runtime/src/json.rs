@@ -374,6 +374,18 @@ unsafe fn extract_pointer(bits: u64) -> Option<*const u8> {
     }
 }
 
+/// Read the GC header's object type tag for a user-space heap pointer.
+/// The GcHeader sits 8 bytes before `ptr`; its first byte is `obj_type`.
+/// Returns 0 when `ptr` is null or in the low-memory guard range.
+#[inline]
+unsafe fn gc_obj_type(ptr: *const u8) -> u8 {
+    if ptr.is_null() || (ptr as usize) < 0x1000 {
+        return 0;
+    }
+    // GcHeader.obj_type is at offset 0 (see crate::gc::GcHeader layout).
+    *(ptr.sub(crate::gc::GC_HEADER_SIZE))
+}
+
 #[inline]
 unsafe fn is_object_pointer(ptr: *const u8) -> bool {
     let obj = ptr as *const crate::ObjectHeader;
@@ -552,23 +564,52 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
             return;
         }
 
-        if is_object_pointer(ptr) {
-            stringify_object(ptr, buf);
-        } else {
-            let arr = ptr as *const crate::ArrayHeader;
-            if !arr.is_null() {
-                let len = (*arr).length;
-                let cap = (*arr).capacity;
-                if len <= cap && cap > 0 && cap < 10000 {
-                    stringify_array(ptr, buf);
-                    return;
+        // Prefer the GC header's obj_type tag for dispatch — the old
+        // capacity heuristic (`cap < 10000`) misidentified legitimate
+        // arrays that had grown past 10k as strings, panicking on
+        // `JSON.stringify(arr)` where `arr.length >= 10000` (issue #43).
+        match gc_obj_type(ptr) {
+            crate::gc::GC_TYPE_ARRAY => stringify_array(ptr, buf),
+            crate::gc::GC_TYPE_OBJECT => {
+                if is_object_pointer(ptr) {
+                    stringify_object(ptr, buf);
+                } else {
+                    buf.push_str("null");
                 }
             }
-            let str_ptr = ptr as *const StringHeader;
-            if let Some(s) = str_from_header(str_ptr) {
-                write_escaped_string(buf, s);
-            } else {
-                buf.push_str("null");
+            crate::gc::GC_TYPE_STRING => {
+                let str_ptr = ptr as *const StringHeader;
+                if let Some(s) = str_from_header(str_ptr) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
+            }
+            _ => {
+                // Unknown/untagged pointer: fall back to the structural
+                // heuristics for safety (e.g. pointers to non-GC-tracked
+                // memory). Arrays up to 10k cap are dispatched here;
+                // above that we defensively emit "null" rather than
+                // trying to treat them as strings.
+                if is_object_pointer(ptr) {
+                    stringify_object(ptr, buf);
+                } else {
+                    let arr = ptr as *const crate::ArrayHeader;
+                    if !arr.is_null() {
+                        let len = (*arr).length;
+                        let cap = (*arr).capacity;
+                        if len <= cap && cap > 0 && cap < 10000 {
+                            stringify_array(ptr, buf);
+                            return;
+                        }
+                    }
+                    let str_ptr = ptr as *const StringHeader;
+                    if let Some(s) = str_from_header(str_ptr) {
+                        write_escaped_string(buf, s);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
             }
         }
         return;
@@ -695,20 +736,40 @@ unsafe fn stringify_array(ptr: *const u8, buf: &mut String) {
             } else {
                 elem_bits as *const u8
             };
-            if is_object_pointer(elem_ptr) {
-                stringify_object(elem_ptr, buf);
-            } else {
-                let arr_elem = elem_ptr as *const crate::ArrayHeader;
-                let arr_len = (*arr_elem).length;
-                let arr_cap = (*arr_elem).capacity;
-                if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
-                    stringify_array(elem_ptr, buf);
-                } else {
+            match gc_obj_type(elem_ptr) {
+                crate::gc::GC_TYPE_ARRAY => stringify_array(elem_ptr, buf),
+                crate::gc::GC_TYPE_OBJECT => {
+                    if is_object_pointer(elem_ptr) {
+                        stringify_object(elem_ptr, buf);
+                    } else {
+                        buf.push_str("null");
+                    }
+                }
+                crate::gc::GC_TYPE_STRING => {
                     let str_ptr = elem_ptr as *const StringHeader;
                     if let Some(s) = str_from_header(str_ptr) {
                         write_escaped_string(buf, s);
                     } else {
                         buf.push_str("null");
+                    }
+                }
+                _ => {
+                    if is_object_pointer(elem_ptr) {
+                        stringify_object(elem_ptr, buf);
+                    } else {
+                        let arr_elem = elem_ptr as *const crate::ArrayHeader;
+                        let arr_len = (*arr_elem).length;
+                        let arr_cap = (*arr_elem).capacity;
+                        if arr_len <= arr_cap && arr_cap > 0 && arr_cap < 10000 {
+                            stringify_array(elem_ptr, buf);
+                        } else {
+                            let str_ptr = elem_ptr as *const StringHeader;
+                            if let Some(s) = str_from_header(str_ptr) {
+                                write_escaped_string(buf, s);
+                            } else {
+                                buf.push_str("null");
+                            }
+                        }
                     }
                 }
             }
