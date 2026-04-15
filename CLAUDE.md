@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.24
+**Current Version:** 0.5.25
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,11 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.25 — GC from `gc_malloc` + adaptive malloc-count trigger (closes #34)
+- **fix**: malloc-heavy workloads never triggered GC. `gc_check_trigger()` was only called from the arena slow path (when a block fills), but code that produces many short-lived malloc-tracked objects without pushing arena blocks — e.g. `@perry/postgres`'s `parseBigIntDecimal` (`n = n * 10n + digit` creates 2 new bigints per digit via `gc_malloc`) — accumulates indefinitely in `MALLOC_OBJECTS` until the process OOMs or heap corruption trips a malloc-allocator abort. The reported symptom was exit 139 on the second 1000-row × 20-column query or the first 10000-row query. New `gc_check_trigger()` call at the *entry* of `gc_malloc` — critically NOT at the end: running it after the header is pushed into `MALLOC_OBJECTS` would have the sweep free the about-to-be-returned pointer, since the fresh `user_ptr` lives only in a caller-saved register that setjmp's callee-saved-only conservative stack scan can't see. Running before means the allocation simply doesn't exist during any GC cycle this call triggers.
+- **fix**: the malloc-count threshold was a hardcoded 10,000 in `gc_check_trigger`. Before this commit that was tolerable because the trigger rarely fired; now that `gc_malloc` calls it every allocation, a program with >10k legitimate live malloc objects (e.g. any backend holding a decent-sized cache) would GC-thrash — every single new alloc would re-trip the threshold. Replaced with a per-thread `GC_NEXT_MALLOC_TRIGGER: Cell<usize>` that's rebaselined after each collection to `survivor_count + GC_MALLOC_COUNT_STEP` (10k). Same update happens on the arena-triggered GC path so both triggers stay in sync.
+- Repro synthetic: `parseBigIntDecimal('' + i)` 2M times — before: **8.45 GB peak RSS**; after: **36 MB** (233× reduction; even beats Node's 73 MB since Perry's BigInt is 1024-bit fixed-width vs Node's heap-allocated variable-width).
 
 ### v0.5.24 — bigint arithmetic + `BigInt()` coercion (closes #33)
 - **fix**: bigint literals were NaN-boxed with `POINTER_TAG` (`0x7FFD`) instead of `BIGINT_TAG` (`0x7FFA`), so `typeof 5n` returned `"object"` and the runtime's `JSValue::is_bigint()` check (used by `js_dynamic_add/sub/mul/div/mod`) said no — arithmetic on bigints fell through to `fadd/fsub/...` on the NaN-tagged bits and produced `NaN`. New `nanbox_bigint_inline` + `BIGINT_TAG_I64` constant; `Expr::BigInt` now uses the bigint tag.

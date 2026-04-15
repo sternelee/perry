@@ -131,18 +131,28 @@ thread_local! {
     /// `post_total + step`.
     static GC_STEP_BYTES: std::cell::Cell<usize> =
         std::cell::Cell::new(GC_THRESHOLD_INITIAL_BYTES);
+
+    /// Lower bound for the next malloc-count-based GC trigger. After each
+    /// collection, this is reset to `survivor_count + GC_MALLOC_COUNT_STEP`
+    /// so that programs with large legitimate live sets (>10k tracked
+    /// malloc objects) don't GC-thrash on every subsequent allocation.
+    /// See `gc_check_trigger` for the update rule.
+    static GC_NEXT_MALLOC_TRIGGER: std::cell::Cell<usize> =
+        std::cell::Cell::new(GC_MALLOC_COUNT_STEP);
 }
 
-/// Threshold: run GC when tracked malloc objects exceed this count.
-/// Prevents unbounded growth of cycle-scoped allocations (strings, closures) in
-/// long-running services where arena usage stays flat (free list hits) but
-/// malloc tracking accumulates. Previously GC was only triggered on arena block
-/// allocation — services that never grew the arena never collected.
+/// Step for the malloc-count-based GC trigger. The next trigger is always
+/// set to `survivor_count + GC_MALLOC_COUNT_STEP` after each collection,
+/// so each cycle gets at least this many fresh allocations before the
+/// next GC regardless of live-set size.
 ///
-/// Tuned for backend services doing ~100-1000 RPC calls/cycle: triggers GC
-/// every few cycles so memory stays bounded and glibc malloc_trim returns
-/// pages to the OS promptly.
-const GC_MALLOC_COUNT_THRESHOLD: usize = 10_000;
+/// Originally a single hardcoded threshold (`GC_MALLOC_COUNT_THRESHOLD`);
+/// issue #34 showed that triggering GC from `gc_malloc` (needed for
+/// malloc-heavy workloads that don't push arena blocks — e.g.
+/// @perry/postgres's `parseBigIntDecimal` bigint chain) combined with a
+/// hardcoded threshold would thrash for any program whose live set
+/// exceeded the threshold. Making it a per-cycle step fixes that.
+const GC_MALLOC_COUNT_STEP: usize = 10_000;
 
 /// Allocate memory via malloc with GcHeader prepended.
 /// Returns pointer to usable memory AFTER the header.
@@ -150,6 +160,20 @@ const GC_MALLOC_COUNT_THRESHOLD: usize = 10_000;
 pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
     let total = GC_HEADER_SIZE + size;
     let layout = Layout::from_size_align(total, 8).unwrap();
+
+    // Issue #34: malloc-heavy workloads that don't push arena blocks
+    // (e.g. the `n = n * 10n + digit` bigint accumulator inside
+    // @perry/postgres's `parseBigIntDecimal`, or a decode loop producing
+    // many short-lived strings) never trigger GC via the arena slow path.
+    // Without this call MALLOC_OBJECTS grows unboundedly.
+    //
+    // We run the check BEFORE `alloc` so the sweep can't free the about-
+    // to-be-returned pointer — after `alloc` the fresh user pointer lives
+    // only in a caller-saved register and the conservative stack scan
+    // (`setjmp` only captures callee-saved regs) can't see it as a root.
+    // Running before means the fresh allocation simply doesn't exist yet
+    // during the GC cycle.
+    gc_check_trigger();
 
     unsafe {
         let raw = alloc(layout);
@@ -310,14 +334,25 @@ pub fn gc_check_trigger() {
         }
         let new_total = arena_total_bytes();
         GC_NEXT_TRIGGER_BYTES.with(|c| c.set(new_total + step));
+        // Rebaseline malloc trigger too — the just-completed collection
+        // swept malloc objects, so the next malloc-count trigger should
+        // be relative to the new survivor count.
+        let survivors = MALLOC_OBJECTS.with(|list| list.borrow().len());
+        GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(survivors + GC_MALLOC_COUNT_STEP));
         return;
     }
     // Also trigger on malloc object count to bound memory growth for
     // services that stay within a single arena block but produce many
-    // short-lived strings/closures per iteration.
+    // short-lived strings/closures/bigints per iteration. Since
+    // gc_malloc now calls this (issue #34), the threshold is adaptive
+    // — it's always `survivor_count + GC_MALLOC_COUNT_STEP` after each
+    // cycle, so programs with large legitimate live sets don't thrash.
     let malloc_count = MALLOC_OBJECTS.with(|list| list.borrow().len());
-    if malloc_count >= GC_MALLOC_COUNT_THRESHOLD {
+    let next_malloc_trigger = GC_NEXT_MALLOC_TRIGGER.with(|c| c.get());
+    if malloc_count >= next_malloc_trigger {
         gc_collect_inner();
+        let survivors = MALLOC_OBJECTS.with(|list| list.borrow().len());
+        GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(survivors + GC_MALLOC_COUNT_STEP));
     }
 }
 
