@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.30
+**Current Version:** 0.5.36
 
 ## TypeScript Parity Status
 
@@ -177,6 +177,12 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 
 Keep entries here to 1-2 lines max. Detailed write-ups live in CHANGELOG.md.
 
+- **v0.5.36** — Buffer param `src[i]` reads/writes bytes (closes #42). HIR lowering of computed-member access on locals now treats `Type::Named("Buffer")` as a synonym for `Uint8Array`, routing to `Uint8ArrayGet`/`Set` instead of the generic `IndexGet` that returned NaN-boxed pointer bits as a denormal f64.
+- **v0.5.35** — `process.argv.slice(N)` returns a real array (closes #41). `Expr::ProcessArgv` added to the HIR `.slice()` array-receiver allow-list so it lowers to `ArraySlice` instead of falling through to String.slice semantics.
+- **v0.5.34** — `Math.imul(a, b)` lowers in the LLVM backend (closes #40). `fptosi→trunc i32→mul→sitofp` inline sequence — matches Node for every 32-bit-wrap case. Unblocks FNV-1a-32 / MurmurHash3 / xxhash32 / CRC32 / PCG in user TS.
+- **v0.5.33** — JSON.stringify/parse on large arrays (closes #43, #44). GC now transitively marks arena-block-persisting objects (fixes malloc children freed under `arr.push` when new object lives only in caller-saved regs); `trace_array` length cap raised 65k → 16M; `stringify_value` dispatches on GC `obj_type` tag instead of capacity heuristic that misread length-≥10k arrays as strings.
+- **v0.5.32** — BigInt bitwise ops (`&`, `|`, `^`, `<<`, `>>`) dispatch through the runtime's bigint helpers (closes #39). Previously these fell through to the i32 ToInt32 path, which `fptosi`'d NaN-boxed bigint bits and returned garbage — XOR gave small signed ints, AND-masking collapsed to 0.
+- **v0.5.31** — `new Uint8Array(n)` with non-literal `n` allocates correctly (closes #38). Runtime dispatch `js_uint8array_new(val)` inspects the NaN-box tag and routes numeric lengths to `js_uint8array_alloc` instead of misreading them as `ArrayHeader*`.
 - **v0.5.30** — Dynamic property write at Node parity (closes #37). Shape-transition cache `(prev_keys, key_ptr) → (next_keys, slot_idx)` skips linear scan; `Vec<u64>` overflow replaces nested HashMap; last-accessed Vec cache skips outer HashMap lookup; inlined fast-path field write; single `ANY_DESCRIPTORS_IN_USE` gate. 10k×20 build: 43.3→6.4ms (-85%). cols≥20: parity/edge vs Node v25 (cols=80: 22.4 vs 22.6ms).
 - **v0.5.29** — Row-object alloc perf (-14% on @perry/postgres 10k-row bulk decode): skip needless keys_array clones via `GC_FLAG_SHAPE_SHARED`, defer descriptor-lookup String alloc, i64 bigint fast path.
 - **v0.5.28** — Register module-level `let`/`const` globals as GC roots (closes #36). Stops sweep of `const X = new Map(...)` when only the stack-less global holds the ref.
