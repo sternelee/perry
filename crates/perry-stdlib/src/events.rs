@@ -6,7 +6,7 @@
 use perry_runtime::{js_string_from_bytes, StringHeader, ClosureHeader, js_closure_call0, js_closure_call1};
 use std::collections::HashMap;
 
-use crate::common::{get_handle_mut, register_handle, Handle};
+use crate::common::{for_each_handle_of, get_handle_mut, register_handle, Handle};
 
 /// EventEmitter handle storing event listeners
 /// We store closure pointers as i64 to satisfy Send + Sync requirements
@@ -14,6 +14,35 @@ use crate::common::{get_handle_mut, register_handle, Handle};
 pub struct EventEmitterHandle {
     /// Event name -> list of closure pointers (stored as i64 for Send + Sync)
     listeners: HashMap<String, Vec<i64>>,
+}
+
+static EVENTS_GC_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+/// Register the EventEmitter GC root scanner exactly once. User closures
+/// passed to `emitter.on(event, cb)` are stored inside EventEmitterHandle
+/// values in the handle registry; without this scanner, a malloc-triggered
+/// GC between `.on(...)` and the next `.emit(...)` would sweep the
+/// closure — same root cause as issue #35 for net.Socket listeners.
+fn ensure_gc_scanner_registered() {
+    EVENTS_GC_REGISTERED.call_once(|| {
+        perry_runtime::gc::gc_register_root_scanner(scan_events_roots);
+    });
+}
+
+/// GC root scanner for EventEmitter listener closures.
+fn scan_events_roots(mark: &mut dyn FnMut(f64)) {
+    for_each_handle_of::<EventEmitterHandle, _>(|emitter| {
+        for cb_vec in emitter.listeners.values() {
+            for &cb in cb_vec.iter() {
+                if cb != 0 {
+                    let boxed = f64::from_bits(
+                        0x7FFD_0000_0000_0000 | (cb as u64 & 0x0000_FFFF_FFFF_FFFF),
+                    );
+                    mark(boxed);
+                }
+            }
+        }
+    });
 }
 
 impl EventEmitterHandle {
@@ -39,6 +68,7 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 /// Returns a handle (i64) to the emitter
 #[no_mangle]
 pub extern "C" fn js_event_emitter_new() -> Handle {
+    ensure_gc_scanner_registered();
     register_handle(EventEmitterHandle::new())
 }
 
@@ -51,6 +81,7 @@ pub unsafe extern "C" fn js_event_emitter_on(
     event_name_ptr: *const StringHeader,
     callback_ptr: i64, // Closure pointer passed as i64
 ) -> Handle {
+    ensure_gc_scanner_registered();
     let event_name = match string_from_header(event_name_ptr) {
         Some(name) => name,
         None => return handle,

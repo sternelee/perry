@@ -36,6 +36,63 @@ pub use server::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::common::for_each_handle_of;
+
+static FASTIFY_GC_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+/// Register the Fastify GC root scanner exactly once. User closures
+/// passed to `app.get/post/put/...`, `app.addHook`, and
+/// `app.setErrorHandler` are stored inside the FastifyApp values in
+/// the handle registry. Without this scanner, a malloc-triggered GC
+/// between route/hook registration and an incoming request would
+/// sweep the handler closures — same root cause as issue #35 for
+/// net.Socket listeners. Also covers any Arc-clones of the app that
+/// tokio worker tasks hold for dispatch: those Arcs point to the same
+/// heap allocation as the registry entry, so marking via the registry
+/// covers the tokio copies too (routes/hooks are Clone and closures
+/// are stored by i64 value — the tokio copy references the same GC
+/// tracked ClosureHeader).
+pub(crate) fn ensure_gc_scanner_registered() {
+    FASTIFY_GC_REGISTERED.call_once(|| {
+        perry_runtime::gc::gc_register_root_scanner(scan_fastify_roots);
+    });
+}
+
+/// GC root scanner for Fastify handler / hook / error-handler closures.
+fn scan_fastify_roots(mark: &mut dyn FnMut(f64)) {
+    let mark_cb = |cb: ClosurePtr, mark: &mut dyn FnMut(f64)| {
+        if cb != 0 {
+            let boxed = f64::from_bits(
+                0x7FFD_0000_0000_0000 | (cb as u64 & 0x0000_FFFF_FFFF_FFFF),
+            );
+            mark(boxed);
+        }
+    };
+
+    for_each_handle_of::<FastifyApp, _>(|app| {
+        for route in app.routes.iter() {
+            mark_cb(route.handler, mark);
+        }
+        for cb in app.hooks.on_request.iter()
+            .chain(app.hooks.pre_parsing.iter())
+            .chain(app.hooks.pre_validation.iter())
+            .chain(app.hooks.pre_handler.iter())
+            .chain(app.hooks.pre_serialization.iter())
+            .chain(app.hooks.on_send.iter())
+            .chain(app.hooks.on_response.iter())
+            .chain(app.hooks.on_error.iter())
+        {
+            mark_cb(*cb, mark);
+        }
+        if let Some(eh) = app.error_handler {
+            mark_cb(eh, mark);
+        }
+        for plugin in app.plugins.iter() {
+            mark_cb(plugin.handler, mark);
+        }
+    });
+}
+
 /// Closure pointer type (matches perry-runtime)
 pub type ClosurePtr = i64;
 

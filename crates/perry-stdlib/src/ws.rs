@@ -15,7 +15,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[cfg(not(target_os = "ios"))]
 use crate::common::async_bridge::{queue_promise_resolution, spawn};
-use crate::common::{register_handle, get_handle_mut, Handle};
+use crate::common::{register_handle, get_handle_mut, for_each_handle_of, Handle};
 
 fn ws_file_log(msg: &str) {
     use std::io::Write;
@@ -49,6 +49,58 @@ lazy_static::lazy_static! {
     static ref WS_CLIENT_LISTENERS: Mutex<HashMap<usize, WsClientListeners>> = Mutex::new(HashMap::new());
     /// Pending WebSocket events to be processed on the main thread
     static ref WS_PENDING_EVENTS: Mutex<Vec<PendingWsEvent>> = Mutex::new(Vec::new());
+}
+
+#[cfg(not(target_os = "ios"))]
+static WS_GC_REGISTERED: std::sync::Once = std::sync::Once::new();
+
+/// Register the ws GC root scanner exactly once. Safe to call from any
+/// ws FFI entry point on the main thread. Mirrors `net::ensure_gc_scanner_registered`
+/// (issue #35) — user closures passed to `.on(event, cb)` are stored in
+/// WS_CLIENT_LISTENERS (for client sockets) or inside a WsServerHandle
+/// (for servers); neither is visible to the GC mark phase without this
+/// scanner, so a malloc-triggered sweep between registration and
+/// dispatch would free the closure and the next event would call freed
+/// memory.
+#[cfg(not(target_os = "ios"))]
+fn ensure_gc_scanner_registered() {
+    WS_GC_REGISTERED.call_once(|| {
+        perry_runtime::gc::gc_register_root_scanner(scan_ws_roots);
+    });
+}
+
+/// GC root scanner for WebSocket event listener closures. Covers both
+/// the global `WS_CLIENT_LISTENERS` map (for `WebSocket` clients) and
+/// every `WsServerHandle` currently in the handle registry (for
+/// `WebSocketServer` instances).
+#[cfg(not(target_os = "ios"))]
+fn scan_ws_roots(mark: &mut dyn FnMut(f64)) {
+    let mark_cb = |cb: i64, mark: &mut dyn FnMut(f64)| {
+        if cb != 0 {
+            let boxed = f64::from_bits(
+                0x7FFD_0000_0000_0000 | (cb as u64 & 0x0000_FFFF_FFFF_FFFF),
+            );
+            mark(boxed);
+        }
+    };
+
+    if let Ok(per_client) = WS_CLIENT_LISTENERS.lock() {
+        for client in per_client.values() {
+            for cb_vec in client.listeners.values() {
+                for &cb in cb_vec.iter() {
+                    mark_cb(cb, mark);
+                }
+            }
+        }
+    }
+
+    for_each_handle_of::<WsServerHandle, _>(|server| {
+        for cb_vec in server.listeners.values() {
+            for &cb in cb_vec.iter() {
+                mark_cb(cb, mark);
+            }
+        }
+    });
 }
 
 /// Number of active WS servers — keeps the event loop alive.
@@ -117,6 +169,7 @@ unsafe fn string_from_header(ptr: *const StringHeader) -> Option<String> {
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut perry_runtime::Promise {
+    ensure_gc_scanner_registered();
     #[cfg(target_os = "android")]
     {
         extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
@@ -290,6 +343,7 @@ pub unsafe extern "C" fn js_ws_connect(url_ptr: *const StringHeader) -> *mut per
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_connect_start(url_nanboxed: f64) -> f64 {
+    ensure_gc_scanner_registered();
     #[cfg(target_os = "android")]
     {
         extern "C" { fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32; }
@@ -658,6 +712,7 @@ pub unsafe extern "C" fn js_ws_on(
     event_name_ptr: *const StringHeader,
     callback_ptr: i64,
 ) -> i64 {
+    ensure_gc_scanner_registered();
     let event_name = match string_from_header(event_name_ptr) {
         Some(name) => name,
         None => {
@@ -700,6 +755,7 @@ pub unsafe extern "C" fn js_ws_on(
 #[cfg(not(target_os = "ios"))]
 #[no_mangle]
 pub unsafe extern "C" fn js_ws_server_new(opts_f64: f64) -> Handle {
+    ensure_gc_scanner_registered();
     // Extract port from options object
     let port = {
         let opts_bits = opts_f64.to_bits();

@@ -3,7 +3,7 @@
 use perry_runtime::{js_string_from_bytes, StringHeader, JSValue};
 
 use crate::common::{get_handle_mut, register_handle, Handle};
-use super::{FastifyApp, FastifyConfig};
+use super::{FastifyApp, FastifyConfig, ensure_gc_scanner_registered};
 use super::context::string_from_nanboxed;
 
 // ============================================================================
@@ -13,6 +13,7 @@ use super::context::string_from_nanboxed;
 /// Create a new Fastify application
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_create() -> Handle {
+    ensure_gc_scanner_registered();
     register_handle(FastifyApp::new())
 }
 
@@ -23,6 +24,7 @@ pub unsafe extern "C" fn js_fastify_create() -> Handle {
 /// - bodyLimit: number
 #[no_mangle]
 pub unsafe extern "C" fn js_fastify_create_with_opts(opts: f64) -> Handle {
+    ensure_gc_scanner_registered();
     let mut config = FastifyConfig::default();
 
     // Parse options if it's an object

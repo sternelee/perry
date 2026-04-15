@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.26
+**Current Version:** 0.5.27
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,15 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.27 — GC root scanners for `ws` / `http` / `events` / `fastify` closures (refs #35)
+- **fix**: follow-up sweep to v0.5.26 — the net.Socket scanner pattern extended to every other stdlib module that stores user closures in Rust-side registries not visible to the GC mark phase. Same latent bug in each: user closure passed across the FFI, stored as `i64` inside a `Mutex<HashMap>` (ws's `WS_CLIENT_LISTENERS`) or inside a struct held by the handle registry (`WsServerHandle.listeners`, `ClientRequestHandle.response_callback` + `.listeners`, `IncomingMessageHandle.listeners`, `EventEmitterHandle.listeners`, `FastifyApp.routes[].handler` + `.hooks.*` + `.error_handler` + `.plugins[].handler`) — any malloc-triggered GC between registration and dispatch would sweep the closure and the next invocation would hit freed memory.
+- New helper `common::for_each_handle_of::<T, _>(|t| ...)` walks the `DashMap`-backed handle registry, downcast_ref'ing each entry to `T`. Each stdlib module adds its own `scan_X_roots(mark)` and a `Once`-guarded `ensure_gc_scanner_registered()` called from the module's create / on / connect entry points, mirroring the cron/net templates.
+- **ws.rs**: scans `WS_CLIENT_LISTENERS` (global) + every `WsServerHandle` in the registry. Registered from `js_ws_on`, `js_ws_connect`, `js_ws_connect_start`, `js_ws_server_new`.
+- **http.rs**: scans every `ClientRequestHandle` (response_callback + 'error' listeners) and `IncomingMessageHandle` ('data' / 'end' / 'error' listeners). Registered from `js_http_request`, `js_https_request`, `js_http_get`, `js_https_get`, `js_http_on`.
+- **events.rs**: scans every `EventEmitterHandle`'s listener map. Registered from `js_event_emitter_new` and `js_event_emitter_on`. (Note: `new EventEmitter()` has a pre-existing HIR gap that routes through the user-class `New` path instead of the factory — unrelated to this fix, still happens in v0.5.26.)
+- **fastify/mod.rs**: scans every `FastifyApp`'s routes, all 8 hook lists (onRequest/preParsing/preValidation/preHandler/preSerialization/onSend/onResponse/onError), `error_handler`, and plugin handlers. Registered from `js_fastify_create` / `js_fastify_create_with_opts`. Tokio dispatch copies the app into an `Arc` but `Route`/`Hooks` are `Clone` with closures stored by `i64` value — the tokio-side copy references the same `ClosureHeader` alloc, so marking via the registry entry covers both paths.
+- **not covered** (intentional, no observed issue): `commander.rs` action callbacks (comment says "not automatically invoked"), `async_local_storage.rs` / `worker_threads.rs` (closures invoked immediately then discarded, never held across a GC boundary).
 
 ### v0.5.26 — GC root scanner for `net.Socket` listener closures (closes #35)
 - **fix**: `sock.on('data', cb)` stored the closure pointer in `NET_LISTENERS: Mutex<HashMap<i64, HashMap<String, Vec<i64>>>>` as a bare `i64`, with no root scanner registered — so GC's mark phase couldn't see it. Before v0.5.25 this was a latent bug: GC only fired on arena block overflow, and event-driven code (like `@perry/postgres`'s data listener) rarely tripped it. Once v0.5.25 made `gc_malloc` trigger GC, any wrapper-heavy synchronous work (row decode, JSON parse, allocation burst between events) would fire a sweep with the listener unmarked — the sweep freed the closure, and the next dispatched `'data'` event called `js_closure_call1` on freed memory. In the pg driver the result was: iter 0 fired echoes fine (no GC yet), iter 1+ called a dead closure, the driver's parse loop stopped advancing, the outer `conn.query(...)` promise never resolved, and main() silently exited 0 when the pump had nothing left to do — exactly the symptom in the ticket.

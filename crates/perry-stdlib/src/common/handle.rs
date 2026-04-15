@@ -86,6 +86,23 @@ pub extern "C" fn js_handle_count() -> i64 {
     HANDLES.len() as i64
 }
 
+/// Walk every registered handle whose value downcasts to `T`, calling
+/// `f(&T)` for each match. Used by stdlib GC root scanners (ws, http,
+/// events, fastify) to mark user closures stored in handle-registered
+/// structs — without this, a malloc-triggered GC between closure
+/// registration and dispatch would sweep them (issue #35 pattern).
+pub fn for_each_handle_of<T, F>(mut f: F)
+where
+    T: 'static + Send + Sync,
+    F: FnMut(&T),
+{
+    for entry in HANDLES.iter() {
+        if let Some(v) = entry.value().downcast_ref::<T>() {
+            f(v);
+        }
+    }
+}
+
 /// Clone a handle's value if it implements Clone
 pub fn clone_handle<T: 'static + Send + Sync + Clone>(handle: Handle) -> Option<Handle> {
     HANDLES.get(&handle).and_then(|entry| {
