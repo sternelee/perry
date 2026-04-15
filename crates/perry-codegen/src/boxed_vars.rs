@@ -510,10 +510,18 @@ fn collect_closure_refs_and_writes_in_expr(
         Expr::Unary { operand, .. } => {
             collect_closure_refs_and_writes_in_expr(operand, refs, writes);
         }
-        Expr::Update { id, .. } => {
-            writes.insert(*id);
-            refs.insert(*id);
-        }
+        // Update at this level is outside any closure body — the walker only
+        // recurses INTO closures via the Closure arm below, so seeing an
+        // Update here means it's a top-level mutation, not a captured one.
+        // The previous implementation inserted unconditionally, which made
+        // every plain `for (let i = ...; ...; i++)` body's `i` look like a
+        // closure-captured-and-mutated var and forced a box allocation. The
+        // box turned the loop counter into a `bl js_box_get` / `bl js_box_set`
+        // pair per iteration even when no closure existed in the function.
+        // Drop the insertion; the captured-inside-closure case is still
+        // handled by `collect_write_ids_in_stmts` triggered from the
+        // Expr::Closure arm above.
+        Expr::Update { .. } => {}
         Expr::Call { callee, args, .. } => {
             collect_closure_refs_and_writes_in_expr(callee, refs, writes);
             for a in args {

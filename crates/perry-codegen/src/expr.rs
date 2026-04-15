@@ -601,6 +601,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             }
             if let Some(slot) = ctx.locals.get(id).cloned() {
+                // Issue #48: prefer the i32 slot for int32-stable locals so
+                // LLVM can promote the alloca to an i32 SSA value and skip the
+                // double round-trip. The double slot is still maintained (for
+                // closures or escape sites) but mem2reg + DSE will eliminate
+                // it when the i32 path covers every read.
+                if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                    let i = ctx.block().load(I32, &i32_slot);
+                    return Ok(ctx.block().sitofp(I32, &i, DOUBLE));
+                }
                 Ok(ctx.block().load(DOUBLE, &slot))
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
                 let g_ref = format!("@{}", global_name);
@@ -642,6 +651,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     }
                 }
             }
+
+            // Issue #49: integer-arithmetic fast path. When the target has an
+            // i32 slot (i.e. it's in `integer_locals`) and every leaf of the
+            // rhs can be sourced in i32, emit the whole rhs as i32 and store
+            // directly to the i32 slot. Skips the `sitofp→...fadd/fmul...→
+            // fptosi` round-trip that the fp path otherwise forces on every
+            // `acc = acc + byte * k` iteration. The double slot is maintained
+            // via one sitofp per write so non-int readers (e.g. `acc / K`)
+            // still see the current value.
+            if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                if !ctx.closure_captures.contains_key(id)
+                    && !(ctx.boxed_vars.contains(id) && !ctx.module_globals.contains_key(id))
+                    && can_lower_expr_as_i32(value, &ctx.i32_counter_slots)
+                {
+                    let v_i32 = lower_expr_as_i32(ctx, value)?;
+                    let blk = ctx.block();
+                    blk.store(I32, &v_i32, &i32_slot);
+                    let v_dbl = blk.sitofp(I32, &v_i32, DOUBLE);
+                    if let Some(slot) = ctx.locals.get(id).cloned() {
+                        ctx.block().store(DOUBLE, &v_dbl, &slot);
+                    } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
+                        let g_ref = format!("@{}", global_name);
+                        ctx.block().store(DOUBLE, &v_dbl, &g_ref);
+                    }
+                    return Ok(v_dbl);
+                }
+            }
+
             let v = lower_expr(ctx, value)?;
             // Closure captures first (write through the runtime), then
             // locals, then module globals.
@@ -684,6 +721,13 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 }
             } else if let Some(slot) = ctx.locals.get(id).cloned() {
                 ctx.block().store(DOUBLE, &v, &slot);
+                // Mirror to the parallel i32 slot allocated for int32-stable
+                // locals (issue #48). Without this, the i32 slot would go
+                // stale on every `sum = (sum + i) | 0` write.
+                if let Some(i32_slot) = ctx.i32_counter_slots.get(id).cloned() {
+                    let v_i32 = ctx.block().fptosi(DOUBLE, &v, I32);
+                    ctx.block().store(I32, &v_i32, &i32_slot);
+                }
             } else if let Some(global_name) = ctx.module_globals.get(id).cloned() {
                 let g_ref = format!("@{}", global_name);
                 ctx.block().store(DOUBLE, &v, &g_ref);
@@ -4179,22 +4223,57 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(blk.sitofp(I32, &len_i32, DOUBLE))
         }
         Expr::Uint8ArrayGet { array, index } => {
+            // Inline `buf[idx]` for statically-typed Buffer / Uint8Array (issue #47).
+            // Replaces `bl js_buffer_get` (9 instrs + call frame + 3 branches) with
+            // a bounds-checked byte load. BufferHeader layout matches ArrayHeader:
+            // length at offset 0, capacity at offset 4, data at offset 8. Unsigned
+            // compare catches both negative indexes and OOB in one branch. Loop-
+            // invariant length load hoists out of tight loops; the byte load
+            // becomes a single `ldrb w, [x_base, w_idx, uxtw]` on ARM64 — unblocks
+            // LLVM autovectorization for pixel / hash loops.
             let a = lower_expr(ctx, array)?;
             let i = lower_expr(ctx, index)?;
             let blk = ctx.block();
             let handle = unbox_to_i64(blk, &a);
             let idx_i32 = blk.fptosi(DOUBLE, &i, I32);
-            let val_i32 = blk.call(I32, "js_buffer_get", &[(I64, &handle), (I32, &idx_i32)]);
-            Ok(blk.sitofp(I32, &val_i32, DOUBLE))
+            let len_i32 = blk.safe_load_i32_from_ptr(&handle);
+            let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+            let ok_idx = ctx.new_block("u8get.ok");
+            let oob_idx = ctx.new_block("u8get.oob");
+            let merge_idx = ctx.new_block("u8get.merge");
+            let ok_label = ctx.block_label(ok_idx);
+            let oob_label = ctx.block_label(oob_idx);
+            let merge_label = ctx.block_label(merge_idx);
+            ctx.block().cond_br(&in_bounds, &ok_label, &oob_label);
+            // In-bounds: load byte at `handle + 8 + idx` and zero-extend.
+            ctx.current_block = ok_idx;
+            let blk = ctx.block();
+            let idx_i64 = blk.zext(I32, &idx_i32, I64);
+            let data_offset = blk.add(I64, &idx_i64, "8");
+            let byte_addr = blk.add(I64, &handle, &data_offset);
+            let byte_ptr = blk.inttoptr(I64, &byte_addr);
+            let byte_val = blk.load(I8, &byte_ptr);
+            let ok_val = blk.zext(I8, &byte_val, I32);
+            let ok_end_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+            // OOB: match js_buffer_get's "return 0" semantics.
+            ctx.current_block = oob_idx;
+            let oob_end_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+            // Merge i32 result, then lift to NaN-boxed double.
+            ctx.current_block = merge_idx;
+            let result_i32 = ctx.block().phi(
+                I32,
+                &[(&ok_val, &ok_end_label), ("0", &oob_end_label)],
+            );
+            Ok(ctx.block().sitofp(I32, &result_i32, DOUBLE))
         }
         Expr::Uint8ArraySet { array, index, value } => {
-            // Write a byte into a Uint8Array / Buffer backing store. Mirrors
-            // Uint8ArrayGet: unbox the pointer, fptosi the index + value, call
-            // the runtime's js_buffer_set(buf, idx, val). Prior stub returned
-            // `lower_expr(value)` verbatim, making `u8[i] = v` a silent no-op —
-            // any idiomatic Perry code that filled a buffer via bracket
-            // assignment (image processing, binary protocol encoders) saw
-            // zero-filled output.
+            // Inline `buf[idx] = v` counterpart to Uint8ArrayGet (issue #47).
+            // Replaces `bl js_buffer_set` with a bounds-checked `strb`. Prior
+            // stub before v0.5.36 returned `lower_expr(value)` verbatim, making
+            // `u8[i] = v` a silent no-op; the runtime-call version fixed that;
+            // this version eliminates the call overhead for tight encoders.
             let a = lower_expr(ctx, array)?;
             let i = lower_expr(ctx, index)?;
             let v = lower_expr(ctx, value)?;
@@ -4202,7 +4281,25 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let handle = unbox_to_i64(blk, &a);
             let idx_i32 = blk.fptosi(DOUBLE, &i, I32);
             let val_i32 = blk.fptosi(DOUBLE, &v, I32);
-            blk.call_void("js_buffer_set", &[(I64, &handle), (I32, &idx_i32), (I32, &val_i32)]);
+            let len_i32 = blk.safe_load_i32_from_ptr(&handle);
+            let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+            let ok_idx = ctx.new_block("u8set.ok");
+            let merge_idx = ctx.new_block("u8set.merge");
+            let ok_label = ctx.block_label(ok_idx);
+            let merge_label = ctx.block_label(merge_idx);
+            ctx.block().cond_br(&in_bounds, &ok_label, &merge_label);
+            // In-bounds: truncate to i8 and store.
+            ctx.current_block = ok_idx;
+            let blk = ctx.block();
+            let idx_i64 = blk.zext(I32, &idx_i32, I64);
+            let data_offset = blk.add(I64, &idx_i64, "8");
+            let byte_addr = blk.add(I64, &handle, &data_offset);
+            let byte_ptr = blk.inttoptr(I64, &byte_addr);
+            let byte_val = blk.trunc(I32, &val_i32, I8);
+            blk.store(I8, &byte_val, &byte_ptr);
+            blk.br(&merge_label);
+            // OOB simply falls through — matches js_buffer_set's silent-drop.
+            ctx.current_block = merge_idx;
             Ok(v)
         }
 
@@ -6979,6 +7076,72 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             "perry-codegen Phase 2: expression {} not yet supported",
             variant_name(other)
         ),
+    }
+}
+
+/// (Issue #49) Return `true` if `e` can be lowered as an i32-native
+/// expression: every leaf is sourced from an i32 slot, a typed-array byte
+/// load, or an integer literal, and the combining operators are
+/// `Add/Sub/Mul`. Used by the `LocalSet` fast path to decide whether the
+/// rhs can bypass the fp round-trip.
+///
+/// The fallback `lower_expr_as_i32` path is fptosi(lower_expr()), which
+/// handles Uint8ArrayGet / BufferIndexGet (their existing lowering already
+/// produces an i32 → sitofp → double chain that LLVM's instcombine
+/// collapses). We only commit to the fast path when every leaf is
+/// recognizably int-sourced so the overall rhs lowers to a short chain of
+/// `add/sub/mul i32` instructions.
+pub(crate) fn can_lower_expr_as_i32(
+    e: &Expr,
+    i32_slots: &std::collections::HashMap<u32, String>,
+) -> bool {
+    match e {
+        Expr::Integer(n) => i32::try_from(*n).is_ok(),
+        Expr::LocalGet(id) => i32_slots.contains_key(id),
+        Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+        {
+            can_lower_expr_as_i32(left, i32_slots) && can_lower_expr_as_i32(right, i32_slots)
+        }
+        _ => false,
+    }
+}
+
+/// (Issue #49) Lower `e` as an i32 SSA value. Must be called only after
+/// `can_lower_expr_as_i32` returned true for the same expression.
+pub(crate) fn lower_expr_as_i32(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String> {
+    match e {
+        Expr::Integer(n) => Ok((*n as i32).to_string()),
+        Expr::LocalGet(id) => {
+            let slot = ctx
+                .i32_counter_slots
+                .get(id)
+                .cloned()
+                .ok_or_else(|| anyhow!("lower_expr_as_i32: LocalGet({}) has no i32 slot", id))?;
+            Ok(ctx.block().load(I32, &slot))
+        }
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+        {
+            let l = lower_expr_as_i32(ctx, left)?;
+            let r = lower_expr_as_i32(ctx, right)?;
+            let blk = ctx.block();
+            Ok(match op {
+                BinaryOp::Add => blk.add(I32, &l, &r),
+                BinaryOp::Sub => blk.sub(I32, &l, &r),
+                BinaryOp::Mul => blk.mul(I32, &l, &r),
+                _ => unreachable!(),
+            })
+        }
+        // Fallback for Uint8ArrayGet / BufferIndexGet: lower via the
+        // existing double path and `fptosi` back to i32. LLVM's instcombine
+        // collapses `fptosi(sitofp(i32))` to the original i32 bit pattern,
+        // so this reduces to the underlying byte load with zext to i32.
+        _ => {
+            let d = lower_expr(ctx, e)?;
+            Ok(ctx.block().fptosi(DOUBLE, &d, I32))
+        }
     }
 }
 

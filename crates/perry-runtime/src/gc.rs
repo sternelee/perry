@@ -1344,6 +1344,13 @@ pub fn overflow_fields_root_scanner(mark: &mut dyn FnMut(f64)) {
     crate::object::scan_overflow_fields_roots(mark);
 }
 
+/// Root scanner for in-progress JSON.parse frames (issue #46).
+/// Without this, GC triggered mid-parse would sweep in-progress arrays/objects
+/// and the fresh string/object values about to be pushed into them.
+pub fn json_parse_root_scanner(mark: &mut dyn FnMut(f64)) {
+    crate::json::scan_parse_roots(mark);
+}
+
 /// Initialize GC root scanners. Called once at runtime startup.
 pub fn gc_init() {
     gc_register_root_scanner(promise_root_scanner);
@@ -1352,6 +1359,7 @@ pub fn gc_init() {
     gc_register_root_scanner(shape_cache_root_scanner);
     gc_register_root_scanner(transition_cache_root_scanner);
     gc_register_root_scanner(overflow_fields_root_scanner);
+    gc_register_root_scanner(json_parse_root_scanner);
 }
 
 /// FFI: initialize GC (called from compiled code startup)

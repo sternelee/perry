@@ -15,6 +15,58 @@ use std::fmt::Write as FmtWrite;
 thread_local! {
     /// Stack of object pointers currently being stringified (for circular detection).
     static STRINGIFY_STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
+
+    /// GC roots for in-progress JSON.parse. Each entry is a JSValue bit pattern
+    /// (stored as f64 so the scanner can hand it to the NaN-boxed mark path).
+    ///
+    /// Why this exists (issue #46): parse_array/parse_object build their result
+    /// incrementally over thousands of iterations. Mid-parse heap allocations
+    /// (`js_string_from_bytes` → gc_malloc → adaptive count trigger, or an arena
+    /// block overflow) run GC while the in-progress array/object lives only on
+    /// the Rust call stack. The conservative stack scan only captures callee-
+    /// saved registers via setjmp; values held in caller-saved regs (or on
+    /// the Rust-heap backing of `Vec<(Vec<u8>, JSValue)>` inside parse_object)
+    /// are invisible and get swept. Symptom was `JSON.parse(big_array)` silently
+    /// truncating at ~1666 records (= when the second adaptive malloc GC fires).
+    static PARSE_ROOTS: RefCell<Vec<f64>> = RefCell::new(Vec::new());
+}
+
+#[inline]
+fn parse_root_push(v: JSValue) -> usize {
+    PARSE_ROOTS.with(|r| {
+        let mut r = r.borrow_mut();
+        let idx = r.len();
+        r.push(f64::from_bits(v.bits()));
+        idx
+    })
+}
+
+#[inline]
+fn parse_root_set(idx: usize, v: JSValue) {
+    PARSE_ROOTS.with(|r| {
+        if let Some(slot) = r.borrow_mut().get_mut(idx) {
+            *slot = f64::from_bits(v.bits());
+        }
+    });
+}
+
+#[inline]
+fn parse_root_save_len() -> usize {
+    PARSE_ROOTS.with(|r| r.borrow().len())
+}
+
+#[inline]
+fn parse_root_restore(len: usize) {
+    PARSE_ROOTS.with(|r| r.borrow_mut().truncate(len));
+}
+
+/// Root scanner called by GC — marks every value in PARSE_ROOTS as live.
+pub fn scan_parse_roots(mark: &mut dyn FnMut(f64)) {
+    PARSE_ROOTS.with(|r| {
+        for &v in r.borrow().iter() {
+            mark(v);
+        }
+    });
 }
 
 // ─── Zero-copy string access ──────────────────────────────────────────────────
@@ -168,6 +220,7 @@ impl<'a> DirectParser<'a> {
         self.advance();
         self.skip_whitespace();
 
+        let saved_roots = parse_root_save_len();
         let mut pairs: Vec<(Vec<u8>, JSValue)> = Vec::new();
 
         if self.peek() == Some(b'}') {
@@ -190,6 +243,9 @@ impl<'a> DirectParser<'a> {
             }
 
             let value = self.parse_value();
+            // Root immediately — `pairs` backing storage is on the Rust heap, so
+            // GC stack scan can't see heap pointers stored inside it.
+            parse_root_push(value);
             pairs.push((key, value));
 
             self.skip_whitespace();
@@ -203,14 +259,23 @@ impl<'a> DirectParser<'a> {
 
         let count = pairs.len();
         let js_obj = js_object_alloc(0, count as u32);
+        let obj_slot = parse_root_push(JSValue::object_ptr(js_obj as *mut u8));
         let keys_arr = js_array_alloc(count as u32);
+        parse_root_push(JSValue::object_ptr(keys_arr as *mut u8));
 
         for (idx, (key, value)) in pairs.into_iter().enumerate() {
             let key_ptr = js_string_from_bytes(key.as_ptr(), key.len() as u32);
+            // Root the fresh key string before the next allocation (js_array_push
+            // may grow → arena alloc → GC).
+            parse_root_push(JSValue::string_ptr(key_ptr));
             js_array_push(keys_arr, JSValue::string_ptr(key_ptr));
             js_object_set_field(js_obj, idx as u32, value);
         }
         js_object_set_keys(js_obj, keys_arr);
+        // Restore roots — js_obj is returned; caller is responsible for rooting it
+        // before triggering any further allocation.
+        parse_root_restore(saved_roots);
+        let _ = obj_slot;
         JSValue::object_ptr(js_obj as *mut u8)
     }
 
@@ -218,16 +283,25 @@ impl<'a> DirectParser<'a> {
         self.advance();
         self.skip_whitespace();
 
+        let saved_roots = parse_root_save_len();
         let mut js_arr = js_array_alloc(16);
+        let arr_slot = parse_root_push(JSValue::object_ptr(js_arr as *mut u8));
 
         if self.peek() == Some(b']') {
             self.advance();
+            parse_root_restore(saved_roots);
             return JSValue::object_ptr(js_arr as *mut u8);
         }
 
         loop {
             let value = self.parse_value();
+            // Root value before push — js_array_push may grow (arena alloc → GC)
+            // and value's heap ptr lives only in a caller-saved register here.
+            parse_root_push(value);
             js_arr = js_array_push(js_arr, value);
+            // js_array_push may have returned a new ArrayHeader* after grow;
+            // update the root slot so GC sees the new pointer, not the stale one.
+            parse_root_set(arr_slot, JSValue::object_ptr(js_arr as *mut u8));
 
             self.skip_whitespace();
             if self.peek() == Some(b',') {
@@ -237,6 +311,7 @@ impl<'a> DirectParser<'a> {
             }
         }
         self.expect(b']');
+        parse_root_restore(saved_roots);
         JSValue::object_ptr(js_arr as *mut u8)
     }
 
@@ -320,8 +395,19 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         crate::exception::js_throw(f64::from_bits(err_val.bits()));
     }
 
+    // Root the input StringHeader for the duration of the parse. The parser
+    // holds `input: &[u8]` pointing INTO the string's data region — a pointer
+    // the conservative stack scan / valid-pointer-set won't match (it only
+    // indexes user pointers at `header + sizeof(GcHeader)`). Without this root
+    // the input string could be swept mid-parse and `bytes` would dangle.
+    let text_root = parse_root_push(JSValue::string_ptr(text_ptr as *mut StringHeader));
+
     let mut parser = DirectParser::new(bytes);
     let result = parser.parse_value();
+    // Also root the final result while we evaluate the error path; a throw
+    // below (which allocates its message via gc_malloc) must not sweep the
+    // just-parsed top-level value.
+    parse_root_push(result);
 
     // If parser didn't consume meaningful input (result is null and input wasn't "null"),
     // the input was invalid JSON — throw SyntaxError
@@ -337,6 +423,7 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
         }
     }
 
+    parse_root_restore(text_root);
     result
 }
 

@@ -986,30 +986,99 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
 /// function. Used by `BinaryOp::Mod` lowering to emit integer modulo
 /// (`fptosi → srem → sitofp`) instead of `frem double`, which lowers to a
 /// libm `fmod()` call on ARM (no hardware instruction) and costs ~15ns per
-/// iteration.
+/// iteration. Also used as the gate for allocating parallel i32 slots that
+/// issue #48 leans on to skip the `fadd → fcvtzs → scvtf` round-trip on
+/// `sum = (sum + i) | 0` style accumulator writes.
 ///
 /// A local qualifies iff:
 ///   1. It's declared with `Let { init: Some(Expr::Integer(_)) }` — i.e. it
 ///      starts as a whole number, not a fraction.
-///   2. It has NO `Expr::LocalSet(id, _)` anywhere in the function body.
-///      The only permitted mutation is `Expr::Update { id, .. }` (++/--),
-///      which by definition preserves the integer invariant.
+///   2. Every `Expr::LocalSet(id, rhs)` has an int32-producing rhs — see
+///      `is_int32_producing_expr`. `Expr::Update { id, .. }` (++/--) is
+///      always permitted since it trivially preserves integer-ness.
 ///
-/// Rule 2 is strict: any `LocalSet` (even one storing an integer literal)
-/// excludes the local, because proving the rhs is also integer-valued would
-/// require a recursive analysis we don't have. Rule 2 naturally covers the
-/// common case — for-loop counters — without any type inference machinery.
-///
-/// Closure captures are handled correctly: writes from inside a closure body
-/// go through `LocalSet` in the HIR, so rule 2 excludes any local that's
-/// captured mutably. Read-only captures are fine and remain qualified.
+/// Closure captures: writes from inside a closure body go through `LocalSet`
+/// with a rhs that's typically not int32-producing, so mutably-captured
+/// locals naturally fall out. Read-only captures remain qualified.
 pub(crate) fn collect_integer_locals(stmts: &[perry_hir::Stmt]) -> HashSet<u32> {
     let mut candidates: HashSet<u32> = HashSet::new();
     collect_integer_let_ids(stmts, &mut candidates);
-    let mut ever_localset: HashSet<u32> = HashSet::new();
-    collect_localset_ids_in_stmts(stmts, &mut ever_localset);
-    candidates.retain(|id| !ever_localset.contains(id));
+
+    // Iterate to a fixed point (issue #49): `is_int32_producing_expr` now
+    // recognizes `LocalGet(id)` as int-producing when `id` is itself
+    // int-stable, and `Add/Sub/Mul` as int-producing when both operands
+    // are. That makes the analysis mutually recursive across locals —
+    // disqualifying one candidate may cascade to other candidates whose
+    // rhs referenced the first via LocalGet. Iterate until the set
+    // stabilizes.
+    loop {
+        let mut disqualified: HashSet<u32> = HashSet::new();
+        collect_non_int_localset_ids_in_stmts(stmts, &mut disqualified, &candidates);
+        let before = candidates.len();
+        candidates.retain(|id| !disqualified.contains(id));
+        if candidates.len() == before {
+            break;
+        }
+    }
     candidates
+}
+
+/// Returns `true` if evaluating `e` yields a value that will already be
+/// integer-valued — so writing it into a local's i32 slot is lossless.
+///
+/// Accepted shapes:
+///   - `Expr::Integer(_)`: trivially integer.
+///   - `(expr) | 0` and `(expr) >>> 0`: the JS ToInt32 / ToUint32 idiom —
+///     always yields a 32-bit integer regardless of the inner expression.
+///   - Pure bitwise ops (`&`, `|`, `^`, `<<`, `>>`, `>>>`): per JS spec
+///     these coerce both operands to int32 and return int32.
+///   - `Expr::Update`: `++` / `--` on an integer-stable local (we don't
+///     verify transitively; if the target isn't qualified, the whole chain
+///     collapses anyway).
+///   - (issue #49) `LocalGet(id)` when `id` is itself in `known_int_locals` —
+///     enables the accumulator pattern `acc = acc + int_expr` without
+///     requiring a `| 0` wrapper on every write.
+///   - (issue #49) `Uint8ArrayGet` / `BufferIndexGet`: typed-array byte
+///     reads return u8 values; always fit in i32.
+///   - (issue #49) `Add` / `Sub` / `Mul` when both operands are
+///     int-producing. The sum/product may overflow i32, but the existing
+///     i32-slot machinery already accepts this risk — the double slot is
+///     maintained in parallel and reads past i32::MAX were already wrong
+///     for `| 0`-written accumulators.
+///
+/// Rejected: everything else (notably `Div`/`Mod` without a `|0` wrapper,
+/// bare floats, calls returning doubles, etc.) because they can produce
+/// non-integer doubles at runtime.
+fn is_int32_producing_expr(e: &perry_hir::Expr, known_int_locals: &HashSet<u32>) -> bool {
+    use perry_hir::{BinaryOp, Expr};
+    match e {
+        Expr::Integer(_) => true,
+        Expr::Update { .. } => true,
+        Expr::Binary { op, right, .. }
+            if matches!(op, BinaryOp::BitOr | BinaryOp::UShr)
+                && matches!(right.as_ref(), Expr::Integer(0)) =>
+        {
+            true
+        }
+        Expr::Binary { op, left, right }
+            if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) =>
+        {
+            is_int32_producing_expr(left, known_int_locals)
+                && is_int32_producing_expr(right, known_int_locals)
+        }
+        Expr::Binary { op, .. } => matches!(
+            op,
+            BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+                | BinaryOp::Shl
+                | BinaryOp::Shr
+                | BinaryOp::UShr
+        ),
+        Expr::LocalGet(id) => known_int_locals.contains(id),
+        Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        _ => false,
+    }
 }
 
 fn collect_integer_let_ids(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
@@ -1062,68 +1131,97 @@ fn collect_integer_let_ids(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
 /// `collect_ref_ids_in_expr`: any new HIR Expr variant must recurse into its
 /// sub-expressions here, or the walker may miss a LocalSet hidden inside it
 /// and wrongly mark its target as integer-valued.
+/// Walks the HIR and records LocalIds that have at least one LocalSet whose
+/// rhs is NOT int32-producing. `collect_integer_locals` uses this to remove
+/// locals that lose their integer invariant somewhere in the function.
+fn collect_non_int_localset_ids_in_stmts(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+    known_int_locals: &HashSet<u32>,
+) {
+    collect_localset_ids_in_stmts_filtered(stmts, out, Some(known_int_locals));
+}
+
 fn collect_localset_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u32>) {
+    collect_localset_ids_in_stmts_filtered(stmts, out, None);
+}
+
+fn collect_localset_ids_in_stmts_filtered(
+    stmts: &[perry_hir::Stmt],
+    out: &mut HashSet<u32>,
+    filter: Option<&HashSet<u32>>,
+) {
     use perry_hir::Stmt;
     for s in stmts {
         match s {
-            Stmt::Expr(e) | Stmt::Throw(e) => collect_localset_ids_in_expr(e, out),
+            Stmt::Expr(e) | Stmt::Throw(e) => {
+                collect_localset_ids_in_expr_filtered(e, out, filter)
+            }
             Stmt::Return(opt) => {
                 if let Some(e) = opt {
-                    collect_localset_ids_in_expr(e, out);
+                    collect_localset_ids_in_expr_filtered(e, out, filter);
                 }
             }
             Stmt::Let { init, .. } => {
                 if let Some(e) = init {
-                    collect_localset_ids_in_expr(e, out);
+                    collect_localset_ids_in_expr_filtered(e, out, filter);
                 }
             }
             Stmt::If { condition, then_branch, else_branch } => {
-                collect_localset_ids_in_expr(condition, out);
-                collect_localset_ids_in_stmts(then_branch, out);
+                collect_localset_ids_in_expr_filtered(condition, out, filter);
+                collect_localset_ids_in_stmts_filtered(then_branch, out, filter);
                 if let Some(eb) = else_branch {
-                    collect_localset_ids_in_stmts(eb, out);
+                    collect_localset_ids_in_stmts_filtered(eb, out, filter);
                 }
             }
             Stmt::While { condition, body } => {
-                collect_localset_ids_in_expr(condition, out);
-                collect_localset_ids_in_stmts(body, out);
+                collect_localset_ids_in_expr_filtered(condition, out, filter);
+                collect_localset_ids_in_stmts_filtered(body, out, filter);
             }
             Stmt::DoWhile { body, condition } => {
-                collect_localset_ids_in_stmts(body, out);
-                collect_localset_ids_in_expr(condition, out);
+                collect_localset_ids_in_stmts_filtered(body, out, filter);
+                collect_localset_ids_in_expr_filtered(condition, out, filter);
             }
             Stmt::For { init, condition, update, body } => {
                 if let Some(init_stmt) = init {
-                    collect_localset_ids_in_stmts(std::slice::from_ref(init_stmt), out);
+                    collect_localset_ids_in_stmts_filtered(
+                        std::slice::from_ref(init_stmt),
+                        out,
+                        filter,
+                    );
                 }
                 if let Some(cond) = condition {
-                    collect_localset_ids_in_expr(cond, out);
+                    collect_localset_ids_in_expr_filtered(cond, out, filter);
                 }
                 if let Some(upd) = update {
-                    collect_localset_ids_in_expr(upd, out);
+                    collect_localset_ids_in_expr_filtered(upd, out, filter);
                 }
-                collect_localset_ids_in_stmts(body, out);
+                collect_localset_ids_in_stmts_filtered(body, out, filter);
             }
             Stmt::Try { body, catch, finally } => {
-                collect_localset_ids_in_stmts(body, out);
+                collect_localset_ids_in_stmts_filtered(body, out, filter);
                 if let Some(c) = catch {
-                    collect_localset_ids_in_stmts(&c.body, out);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter);
                 }
                 if let Some(f) = finally {
-                    collect_localset_ids_in_stmts(f, out);
+                    collect_localset_ids_in_stmts_filtered(f, out, filter);
                 }
             }
             Stmt::Switch { discriminant, cases } => {
-                collect_localset_ids_in_expr(discriminant, out);
+                collect_localset_ids_in_expr_filtered(discriminant, out, filter);
                 for c in cases {
                     if let Some(t) = &c.test {
-                        collect_localset_ids_in_expr(t, out);
+                        collect_localset_ids_in_expr_filtered(t, out, filter);
                     }
-                    collect_localset_ids_in_stmts(&c.body, out);
+                    collect_localset_ids_in_stmts_filtered(&c.body, out, filter);
                 }
             }
             Stmt::Labeled { body, .. } => {
-                collect_localset_ids_in_stmts(std::slice::from_ref(body.as_ref()), out);
+                collect_localset_ids_in_stmts_filtered(
+                    std::slice::from_ref(body.as_ref()),
+                    out,
+                    filter,
+                );
             }
             _ => {}
         }
@@ -1131,13 +1229,29 @@ fn collect_localset_ids_in_stmts(stmts: &[perry_hir::Stmt], out: &mut HashSet<u3
 }
 
 fn collect_localset_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
+    collect_localset_ids_in_expr_filtered(e, out, None);
+}
+
+fn collect_localset_ids_in_expr_filtered(
+    e: &perry_hir::Expr,
+    out: &mut HashSet<u32>,
+    filter: Option<&HashSet<u32>>,
+) {
     use perry_hir::{ArrayElement, CallArg, Expr};
     let mut walk = |sub: &Expr, out: &mut HashSet<u32>| {
-        collect_localset_ids_in_expr(sub, out);
+        collect_localset_ids_in_expr_filtered(sub, out, filter);
     };
     match e {
         Expr::LocalSet(id, value) => {
-            out.insert(*id);
+            // In filter mode we only record LocalSets whose rhs would LOSE
+            // integer-ness — so writes like `sum = (sum + i) | 0` don't
+            // disqualify `sum` from getting an i32 slot.
+            match filter {
+                Some(known) if is_int32_producing_expr(value, known) => {}
+                _ => {
+                    out.insert(*id);
+                }
+            }
             walk(value, out);
         }
         // Intentionally NOT recorded — these preserve integer-ness.
