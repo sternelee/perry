@@ -42,6 +42,14 @@ pub const GC_TYPE_MAP: u8 = 8;
 pub const GC_FLAG_MARKED: u8 = 0x01;
 pub const GC_FLAG_ARENA: u8 = 0x02;
 pub const GC_FLAG_PINNED: u8 = 0x04;
+/// Set on a keys-array that was handed out by `shape_cache_insert`.
+/// `js_object_set_field_by_name` reads this bit to decide whether it
+/// must clone before mutating (shared arrays can't be mutated in
+/// place; fresh arrays allocated in the `keys.is_null()` branch can).
+/// Without the bit the clone fires on every property added to every
+/// fresh object literal — a 20-property row object allocates 19
+/// throwaway keys_array clones per row.
+pub const GC_FLAG_SHAPE_SHARED: u8 = 0x08;
 
 // Object flags stored in GcHeader._reserved (u16) for Object.freeze/seal/preventExtensions
 pub const OBJ_FLAG_FROZEN: u16 = 0x01;

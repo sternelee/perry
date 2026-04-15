@@ -70,6 +70,12 @@ thread_local! {
     /// on this thread, so hot `js_object_get_field_by_name` / `set_field_by_name`
     /// can skip the `ACCESSOR_DESCRIPTORS` HashMap lookup entirely.
     pub(crate) static ACCESSORS_IN_USE: Cell<bool> = const { Cell::new(false) };
+    /// Fast-path gate for `PROPERTY_DESCRIPTORS` — flipped the first time
+    /// `Object.defineProperty` (or freeze/seal via `set_property_attrs`)
+    /// installs a per-property descriptor. Lets the hot object-write path
+    /// skip the `.to_string()` allocation required to look up a descriptor
+    /// that almost never exists.
+    pub(crate) static PROPERTY_ATTRS_IN_USE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Look up the property descriptor for (obj, key). Returns None if no entry exists,
@@ -80,6 +86,7 @@ pub(crate) fn get_property_attrs(obj: usize, key: &str) -> Option<PropertyAttrs>
 
 /// Store a property descriptor for (obj, key).
 pub(crate) fn set_property_attrs(obj: usize, key: String, attrs: PropertyAttrs) {
+    PROPERTY_ATTRS_IN_USE.with(|c| c.set(true));
     PROPERTY_DESCRIPTORS.with(|m| { m.borrow_mut().insert((obj, key), attrs); });
 }
 
@@ -244,6 +251,21 @@ fn shape_cache_get(shape_id: u32) -> *mut ArrayHeader {
 /// (evicting any prior entry there) and also writes to the overflow
 /// map so misses on the inline cache still find the value.
 fn shape_cache_insert(shape_id: u32, keys_array: *mut ArrayHeader) {
+    // Mark the array as shape-shared so `js_object_set_field_by_name`
+    // knows it must clone before mutating. The clone path was firing
+    // every time *any* fresh object literal added a property beyond
+    // the first (because `key_count == field_count` with both
+    // counting up in lockstep); that's ~19 throwaway clones per
+    // 20-property row × 10k rows = 190k clones of growing size on a
+    // standard bulk decode. Gating the clone on this flag turns that
+    // into zero for locally-owned arrays.
+    if !keys_array.is_null() {
+        unsafe {
+            let gc_header = (keys_array as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader;
+            (*gc_header).gc_flags |= crate::gc::GC_FLAG_SHAPE_SHARED;
+        }
+    }
     SHAPE_INLINE_CACHE.with(|cache| {
         let slot = (shape_id as usize) & (SHAPE_INLINE_CACHE_SIZE - 1);
         unsafe {
@@ -2036,8 +2058,19 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             return;
         }
 
-        // Extract the incoming key as a Rust string for descriptor lookup.
-        let incoming_key_str: Option<String> = if !key.is_null() {
+        // Defer the Rust-String allocation for the incoming key: we only
+        // need it if an accessor descriptor or per-property writable
+        // attribute has been installed on this object. Both paths are
+        // guarded by process-wide flags (`ACCESSORS_IN_USE` and
+        // `PROPERTY_ATTRS_IN_USE`) so the common case — plain data
+        // properties on a normal object — avoids the `.to_string()`
+        // entirely. A 20-property row object written at 10k rows saw
+        // 200k of those allocations per query; with this guard the
+        // count drops to zero unless userland actually defined a
+        // descriptor.
+        let needs_descriptor_key = ACCESSORS_IN_USE.with(|c| c.get())
+            || PROPERTY_ATTRS_IN_USE.with(|c| c.get());
+        let incoming_key_str: Option<String> = if needs_descriptor_key && !key.is_null() {
             let name_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
             let name_len = (*key).byte_len as usize;
             let name_bytes = std::slice::from_raw_parts(name_ptr, name_len);
@@ -2074,10 +2107,12 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
                         }
                     }
                     // Per-property writable check (set by Object.defineProperty / freeze).
-                    if let Some(ref k) = incoming_key_str {
-                        if let Some(attrs) = get_property_attrs(obj as usize, k) {
-                            if !attrs.writable() {
-                                return;
+                    if PROPERTY_ATTRS_IN_USE.with(|c| c.get()) {
+                        if let Some(ref k) = incoming_key_str {
+                            if let Some(attrs) = get_property_attrs(obj as usize, k) {
+                                if !attrs.writable() {
+                                    return;
+                                }
                             }
                         }
                     }
@@ -2109,9 +2144,31 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
         // CRITICAL: The keys_array may be SHARED via SHAPE_CACHE (multiple objects with
         // the same shape hash share the same keys array). We must clone it before mutating
         // to avoid corrupting other objects' keys.
-        let owned_keys = if key_count == (*obj).field_count as usize {
-            // Keys array matches the original shape — it's potentially shared.
-            // Clone it to get an independent copy before adding new keys.
+        //
+        // We detect sharing via the `GC_FLAG_SHAPE_SHARED` bit that
+        // `shape_cache_insert` stamps onto the array's GC header —
+        // arrays allocated in the `keys.is_null()` branch above are
+        // exclusively owned and don't have the flag, so we skip the
+        // clone entirely. This saves ~19 clones of growing size per
+        // 20-property plain-object literal.
+        //
+        // Validate the GC header before reading it. `keys_array` has
+        // already been range-checked for user address space but may
+        // still point at something other than a GC-allocated array
+        // in rare cases (static data, buffers re-interpreted as keys
+        // arrays). If the header doesn't identify as GC_TYPE_ARRAY,
+        // assume shared and clone (the previous, always-safe behaviour).
+        let keys_gc_header = (keys as *const u8).sub(crate::gc::GC_HEADER_SIZE)
+            as *const crate::gc::GcHeader;
+        let keys_shared = if (keys as usize) >= crate::gc::GC_HEADER_SIZE
+            && (*keys_gc_header).obj_type == crate::gc::GC_TYPE_ARRAY
+        {
+            (*keys_gc_header).gc_flags & crate::gc::GC_FLAG_SHAPE_SHARED != 0
+        } else {
+            // Unknown provenance — take the safe side.
+            true
+        };
+        let owned_keys = if keys_shared {
             let cloned = crate::array::js_array_alloc(key_count as u32 + 4);
             let src_data = (keys as *const u8).add(8) as *const f64;
             let dst_data = (cloned as *mut u8).add(8) as *mut f64;
@@ -2122,7 +2179,6 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             (*obj).keys_array = cloned;
             cloned
         } else {
-            // Already mutated — keys_array is already our own copy
             keys
         };
 

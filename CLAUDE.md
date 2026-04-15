@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.28
+**Current Version:** 0.5.29
 
 ## TypeScript Parity Status
 
@@ -176,6 +176,13 @@ Projects can list npm packages to compile natively instead of routing to V8. Con
 ## Recent Changes
 
 For older versions (v0.4.144 and earlier), see CHANGELOG.md.
+
+### v0.5.29 — row-object allocation perf (-14% on @perry/postgres bulk decode)
+- **perf**: `js_object_set_field_by_name` was cloning the keys_array on every property add beyond the first on any plain object literal (`{}` + `obj[k] = v`). The clone guard `key_count == field_count` fired even for arrays allocated locally in the null-keys branch because `field_count` is bumped in lockstep with each add. For a 20-property row object built at 10k rows (@perry/postgres bulk decode) that's ~190k throwaway keys_array clones of growing size per iteration — 15 MB of memory churn per bench iteration, all wasted.
+- Added `GC_FLAG_SHAPE_SHARED` (`0x08`) — `shape_cache_insert` stamps it on the keys_array before caching; `js_object_set_field_by_name` reads it to decide whether to clone. Arrays allocated in the `keys.is_null()` branch are exclusively owned and skip the clone entirely. Guarded behind a GC-header validity check so a non-GC-allocated keys_array (rare but possible via static data or buffer reinterpretation) still takes the safe clone path.
+- Also deferred the `Rust String` allocation in `js_object_set_field_by_name` behind a new `PROPERTY_ATTRS_IN_USE` flag (mirrors the existing `ACCESSORS_IN_USE` guard). The to_string() was running on every call just to look up a descriptor that almost never exists — 200k wasted heap allocations per 10k-row bulk decode. Now it only runs when `Object.defineProperty` has ever installed a per-property attr on this thread.
+- Added fast path in `js_bigint_from_string`: decimal inputs that fit `i64` skip the per-digit 16-limb multiply-add loop and call `s.parse::<i64>()` + `js_bigint_from_i64` directly. Postgres `int8` results, `Date.now()` timestamps, and ~every real-world `BigInt("…")` call land here. Falls through to the general path for hex, oversized, or malformed input.
+- Measured (local PG 16, Perry-native, @perry/postgres bench/bench-this.ts, 50 iterations p50): 10k×20 rows 896ms → 774ms (-14%), 1k×20 rows 43ms → 42ms (no-op). Microbench (200k dynamic-key obj writes): 51ms → 40ms (-22%). Node is still ~20× faster on bulk decode — V8's hidden-class ICs don't have an analog in Perry's shape cache yet — but one more layer of per-call garbage is gone.
 
 ### v0.5.28 — module globals registered as GC roots (closes #36)
 - **fix**: module-level user `let`/`const` globals were LLVM `double` globals that held NaN-boxed JSValues but were NOT registered with the GC's root scanner. Only string-handle globals (from the string pool) got `js_gc_register_global_root(&@.str.<idx>.handle)` at startup. The conservative stack scan could still find pointers held by stack variables, so the bug was latent until v0.5.25 made `gc_malloc` trigger GC during long-running decode loops — any program where a `Map` / `Array` / user-class instance lived only in `const X = new Map(...)` (no stack variable holding it at the moment of GC) would have `X` swept mid-cycle. The canonical victim was `@perry/postgres`'s `const CONN_STATES = new Map<number, ConnState>()`: the Map header got freed, the next `CONN_STATES.get(id)` dereferenced a freed pointer, SIGSEGV. Tracked by pg's malloc-count trigger hitting its 10k threshold around the 10-20k row mark — exactly the boundary the ticket reported.

@@ -145,6 +145,22 @@ pub extern "C" fn js_bigint_from_string(data: *const u8, len: u32) -> *mut BigIn
         let bytes = std::slice::from_raw_parts(data, len as usize);
         let s = std::str::from_utf8_unchecked(bytes);
 
+        // Fast path: decimal string that fits in i64. Postgres `int8`
+        // results, Node `Date.now()` timestamps, app IDs — the common
+        // BigInt input in real code is well under 2^63. For those we
+        // skip the per-digit 16-limb multiply (~300 u128 muls for a
+        // 20-char input) and let Rust's native str→i64 handle parsing
+        // in a single pass.
+        //
+        // `i64::from_str` returns Err on overflow / non-digit, and we
+        // fall through to the general path so hex, floats-of-ints, and
+        // arbitrary-precision still work exactly as before.
+        if !s.starts_with("0x") && !s.starts_with("0X") {
+            if let Ok(v) = s.parse::<i64>() {
+                return js_bigint_from_i64(v);
+            }
+        }
+
         // Handle negative prefix
         let (is_negative, s) = if s.starts_with('-') {
             (true, &s[1..])
