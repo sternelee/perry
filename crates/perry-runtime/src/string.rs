@@ -71,6 +71,9 @@ fn compute_utf16_len(data: *const u8, byte_len: u32) -> u32 {
 /// Returns `s.len()` if `utf16_idx` is past the end.
 #[inline]
 fn utf16_offset_to_byte_offset(s: &str, utf16_idx: usize) -> usize {
+    if utf16_idx == 0 {
+        return 0;
+    }
     let mut byte_off = 0;
     let mut u16_count = 0;
     for ch in s.chars() {
@@ -86,6 +89,9 @@ fn utf16_offset_to_byte_offset(s: &str, utf16_idx: usize) -> usize {
 /// Convert a UTF-8 byte offset to a UTF-16 code unit index.
 #[inline]
 fn byte_offset_to_utf16_index(s: &str, byte_off: usize) -> usize {
+    if byte_off == 0 {
+        return 0;
+    }
     s[..byte_off].encode_utf16().count()
 }
 
@@ -585,7 +591,8 @@ pub extern "C" fn js_string_index_of_from(haystack: *const StringHeader, needle:
         let h_blen = (*haystack).byte_len as usize;
         let n_blen = (*needle).byte_len as usize;
 
-        // ASCII fast path: raw byte search, no &str construction
+        // ASCII fast path: byte offset == UTF-16 offset, use Rust's
+        // optimized Two-Way str::find (avoids O(n*m) naive scan).
         if is_ascii_string(haystack) {
             let start = if from_index < 0 { 0usize } else { from_index as usize };
             if n_blen == 0 {
@@ -594,25 +601,16 @@ pub extern "C" fn js_string_index_of_from(haystack: *const StringHeader, needle:
             if start + n_blen > h_blen {
                 return -1;
             }
-            let h_ptr = string_data(haystack);
-            let n_ptr = string_data(needle);
-            let first = *n_ptr;
-            let search_end = h_blen - n_blen + 1;
-            let mut i = start;
-            while i < search_end {
-                if *h_ptr.add(i) == first
-                    && (n_blen == 1
-                        || libc::memcmp(
-                            h_ptr.add(i) as *const libc::c_void,
-                            n_ptr as *const libc::c_void,
-                            n_blen,
-                        ) == 0)
-                {
-                    return i as i32;
-                }
-                i += 1;
-            }
-            return -1;
+            let h = std::str::from_utf8_unchecked(
+                slice::from_raw_parts(string_data(haystack), h_blen),
+            );
+            let n = std::str::from_utf8_unchecked(
+                slice::from_raw_parts(string_data(needle), n_blen),
+            );
+            return match h[start..].find(n) {
+                Some(pos) => (start + pos) as i32,
+                None => -1,
+            };
         }
 
         // Non-ASCII: construct &str, convert UTF-16 from_index to byte offset
@@ -649,29 +647,20 @@ pub extern "C" fn js_string_last_index_of(haystack: *const StringHeader, needle:
             return (*haystack).utf16_len as i32;
         }
 
-        // ASCII fast path: raw byte reverse search
+        // ASCII fast path: byte offset == UTF-16 offset, use rfind
         if is_ascii_string(haystack) {
             let h_blen = (*haystack).byte_len as usize;
             if n_blen > h_blen { return -1; }
-            let h_ptr = string_data(haystack);
-            let n_ptr = string_data(needle);
-            let first = *n_ptr;
-            let mut i = h_blen - n_blen;
-            loop {
-                if *h_ptr.add(i) == first
-                    && (n_blen == 1
-                        || libc::memcmp(
-                            h_ptr.add(i) as *const libc::c_void,
-                            n_ptr as *const libc::c_void,
-                            n_blen,
-                        ) == 0)
-                {
-                    return i as i32;
-                }
-                if i == 0 { break; }
-                i -= 1;
-            }
-            return -1;
+            let h = std::str::from_utf8_unchecked(
+                slice::from_raw_parts(string_data(haystack), h_blen),
+            );
+            let n = std::str::from_utf8_unchecked(
+                slice::from_raw_parts(string_data(needle), n_blen),
+            );
+            return match h.rfind(n) {
+                Some(pos) => pos as i32,
+                None => -1,
+            };
         }
     }
 
@@ -1208,35 +1197,59 @@ pub extern "C" fn js_string_split(s: *const StringHeader, delimiter: *const Stri
         string_as_str(delimiter)
     };
 
-    // Split into string parts
-    let parts: Vec<*mut StringHeader> = if delim.is_empty() {
+    const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
+    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+    let header_size = std::mem::size_of::<StringHeader>();
+
+    if delim.is_empty() {
         // Empty delimiter: split into individual characters (single pass)
-        str_data.chars().map(|c| {
+        let parts: Vec<*mut StringHeader> = str_data.chars().map(|c| {
             let mut buf = [0u8; 4];
             let char_str = c.encode_utf8(&mut buf);
             js_string_from_bytes(char_str.as_ptr(), char_str.len() as u32)
-        }).collect()
-    } else {
-        str_data.split(delim).map(|part| {
-            js_string_from_bytes(part.as_ptr(), part.len() as u32)
-        }).collect()
-    };
+        }).collect();
 
-    // Allocate array to hold string pointers
-    // We store NaN-boxed string pointers (with STRING_TAG) since arrays use f64 storage
-    const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
-    const POINTER_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+        let arr = crate::array::js_array_alloc(parts.len() as u32);
+        unsafe {
+            (*arr).length = parts.len() as u32;
+            let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
+            for (i, p) in parts.iter().enumerate() {
+                let nanboxed = STRING_TAG | (*p as u64 & POINTER_MASK);
+                std::ptr::write(elements_ptr.add(i), f64::from_bits(nanboxed));
+            }
+        }
+        return arr;
+    }
 
-    let arr = crate::array::js_array_alloc(parts.len() as u32);
+    // Non-empty delimiter: arena-allocate parts (bump-pointer, no tracking overhead)
+    let part_slices: Vec<&str> = str_data.split(delim).collect();
+    let n = part_slices.len();
+
+    let src_is_ascii = is_ascii_string(s);
+
+    let arr = crate::array::js_array_alloc(n as u32);
     unsafe {
-        (*arr).length = parts.len() as u32;
+        (*arr).length = n as u32;
         let elements_ptr = (arr as *mut u8).add(std::mem::size_of::<ArrayHeader>()) as *mut f64;
-        for (i, ptr) in parts.iter().enumerate() {
-            // NaN-box the string pointer with STRING_TAG
-            let ptr_as_u64 = *ptr as u64;
-            let nanboxed = STRING_TAG | (ptr_as_u64 & POINTER_MASK);
-            let ptr_as_f64 = f64::from_bits(nanboxed);
-            std::ptr::write(elements_ptr.add(i), ptr_as_f64);
+        for (i, part) in part_slices.iter().enumerate() {
+            let byte_len = part.len() as u32;
+            let alloc_size = header_size + byte_len as usize;
+            let raw = crate::arena::arena_alloc_gc(alloc_size, 8, crate::gc::GC_TYPE_STRING);
+            let sh = raw as *mut StringHeader;
+            (*sh).byte_len = byte_len;
+            (*sh).capacity = byte_len;
+            (*sh).refcount = 0;
+            (*sh).utf16_len = if src_is_ascii {
+                byte_len
+            } else {
+                compute_utf16_len(part.as_ptr(), byte_len)
+            };
+            if byte_len > 0 {
+                let data_ptr = (sh as *mut u8).add(header_size);
+                ptr::copy_nonoverlapping(part.as_ptr(), data_ptr, byte_len as usize);
+            }
+            let nanboxed = STRING_TAG | (raw as u64 & POINTER_MASK);
+            std::ptr::write(elements_ptr.add(i), f64::from_bits(nanboxed));
         }
     }
 

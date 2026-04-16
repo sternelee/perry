@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.53
+**Current Version:** 0.5.54
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.54** — String split/indexOf perf: arena-allocated split parts (closes #61). `utf16_offset_to_byte_offset` / `byte_offset_to_utf16_index` zero-offset fast returns. indexOf/lastIndexOf ASCII path uses Rust Two-Way `str::find`/`rfind` instead of O(n×m) byte scan. Split uses `arena_alloc_gc` bump allocator + `gc_malloc_batch` helper. **split: 145ms→24ms (6× faster, beats Node 27ms), indexOf: 145ms→35ms (4× faster, ~Node 30ms)**.
 - **v0.5.53** — `x | 0` / `x >>> 0` noop for known-finite operands + branchless Uint8ArraySet via `@llvm.assume`. When left operand is known-finite and right is `Integer(0)`, skip toint32 entirely (just fptosi+sitofp identity, no NaN/Inf guard). Uint8ArraySet now uses `@llvm.assume(in_bounds)` like Get, eliminating the branch diamond in input-gen and encoder loops. Blur kernel: **0 `bl` instructions** (fully inlined, zero function calls).
 - **v0.5.52** — Targeted clamp-function i32 inlining: `is_int32_producing_expr`, `collect_integer_let_ids`, and `can_lower_expr_as_i32` now recognize calls to detected clamp functions (3-param clamp + clampU8) as int-producing. `lower_expr_as_i32` emits `@llvm.smax.i32` + `@llvm.smin.i32` directly — zero double conversions. **Blur kernel alone: 284ms vs Zig 246ms (1.15×)**. Full image_conv 0.76s includes input-gen overhead.
 - **v0.5.51** — Content-hash shape-transition cache for dynamic property writes (closes #60). Transition cache keyed on FNV-1a content hash instead of string pointer identity — freshly concatenated keys (`"field_"+j`) now hit the cache across objects. Cache size 4096→16384. 10k×20 benchmark: **1300ms→136ms (9.6× faster)**, gap vs Node 84×→8.5×.

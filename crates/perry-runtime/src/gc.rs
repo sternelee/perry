@@ -210,6 +210,55 @@ pub fn gc_malloc(size: usize, obj_type: u8) -> *mut u8 {
     }
 }
 
+/// Batch-allocate multiple GC-tracked malloc objects in one go.
+/// Amortises overhead: one `gc_check_trigger` call, one `MALLOC_OBJECTS`
+/// extend, one `MALLOC_SET` extend — instead of N of each.
+/// `sizes` contains the *payload* size for each object (excluding GcHeader).
+/// Returns a Vec of user pointers (past the header), one per entry.
+pub fn gc_malloc_batch(sizes: &[usize], obj_type: u8) -> Vec<*mut u8> {
+    gc_check_trigger(); // once, not N times
+
+    let n = sizes.len();
+    let mut results = Vec::with_capacity(n);
+    let mut headers = Vec::with_capacity(n);
+
+    unsafe {
+        GC_IN_ALLOC.with(|f| f.set(true));
+
+        for &size in sizes {
+            let total = GC_HEADER_SIZE + size;
+            let layout = Layout::from_size_align(total, 8).unwrap();
+            let raw = alloc(layout);
+            if raw.is_null() {
+                panic!("gc_malloc_batch: failed to allocate {} bytes", total);
+            }
+            let header = raw as *mut GcHeader;
+            (*header).obj_type = obj_type;
+            (*header).gc_flags = 0;
+            (*header)._reserved = 0;
+            (*header).size = total as u32;
+
+            headers.push(header);
+            results.push(raw.add(GC_HEADER_SIZE));
+        }
+
+        MALLOC_OBJECTS.with(|list| {
+            let mut list = list.borrow_mut();
+            list.extend_from_slice(&headers);
+        });
+        MALLOC_SET.with(|set| {
+            let mut set = set.borrow_mut();
+            for &h in &headers {
+                set.insert(h as usize);
+            }
+        });
+
+        GC_IN_ALLOC.with(|f| f.set(false));
+    }
+
+    results
+}
+
 /// Reallocate a malloc-tracked object, preserving GcHeader.
 /// `old_user_ptr` is the pointer previously returned by gc_malloc.
 /// Returns new user pointer (after header).
