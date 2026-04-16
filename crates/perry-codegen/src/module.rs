@@ -23,6 +23,11 @@ pub struct LlModule {
     globals: Vec<String>,
     string_constants: Vec<String>,
     string_counter: u32,
+    /// Extra numbered metadata nodes emitted after `!0 = !{}`. Used by
+    /// the buffer alias-scope system to declare per-buffer scopes and
+    /// noalias sets so LLVM's LoopVectorizer can prove different buffers
+    /// don't alias.
+    metadata_lines: Vec<String>,
 }
 
 impl LlModule {
@@ -35,7 +40,14 @@ impl LlModule {
             globals: Vec::new(),
             string_constants: Vec::new(),
             string_counter: 0,
+            metadata_lines: Vec::new(),
         }
+    }
+
+    /// Append a raw metadata definition line (e.g. `!1 = distinct !{!1}`).
+    /// Emitted after `!0 = !{}` in the module IR.
+    pub fn add_metadata_line(&mut self, line: String) {
+        self.metadata_lines.push(line);
     }
 
     /// Declare an external function (FFI import). Deduped by name — later
@@ -221,6 +233,10 @@ impl LlModule {
         // reload stays pinned inside every bounds check even when the
         // buffer is loop-invariant.
         ir.push_str("\n!0 = !{}\n");
+        for ml in &self.metadata_lines {
+            ir.push_str(ml);
+            ir.push('\n');
+        }
 
         ir
     }

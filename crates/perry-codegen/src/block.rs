@@ -581,6 +581,25 @@ impl LlBlock {
         r
     }
 
+    /// `getelementptr inbounds` — asserts the result stays within the
+    /// allocation, enabling LLVM's SCEV and alias analysis to reason about
+    /// the pointer provenance. Critical for loop vectorization: the
+    /// LoopVectorizer refuses to auto-vectorize memory accesses through
+    /// bare `inttoptr` because it can't identify the array bounds.
+    pub fn gep_inbounds(&mut self, base_ty: LlvmType, ptr: &str, indices: &[(LlvmType, &str)]) -> String {
+        let r = self.reg();
+        let idx_str = indices
+            .iter()
+            .map(|(t, v)| format!("{} {}", t, v))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.emit(format!(
+            "{} = getelementptr inbounds {}, ptr {}, {}",
+            r, base_ty, ptr, idx_str
+        ));
+        r
+    }
+
     pub fn phi(&mut self, ty: LlvmType, incoming: &[(&str, &str)]) -> String {
         let r = self.reg();
         let pairs = incoming

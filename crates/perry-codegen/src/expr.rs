@@ -485,6 +485,22 @@ pub(crate) struct FnCtx<'a> {
     /// access and emits the same fast path as the inline `X[i][j]`
     /// shape.
     pub array_row_aliases: std::collections::HashMap<u32, (u32, Box<perry_hir::Expr>)>,
+
+    /// Pre-computed `ptr`-typed data-base-pointer slots for Buffer/Uint8Array
+    /// locals. When a `Stmt::Let` initializes a non-mutable local from
+    /// `Expr::BufferAlloc`, the lowering computes the data pointer
+    /// (handle + 8, past the BufferHeader) once and stores it in a
+    /// `ptr`-typed alloca. `Uint8ArrayGet/Set` then emits
+    /// `getelementptr inbounds i8, ptr %base, i32 %idx` instead of the
+    /// `inttoptr(handle + offset)` chain — giving LLVM proper pointer
+    /// provenance so the LoopVectorizer can identify array bounds and
+    /// auto-vectorize.
+    ///
+    /// Value: `(ptr_alloca, alias_scope_idx)` — the scope index is used
+    /// to attach `!alias.scope` / `!noalias` metadata that proves
+    /// different buffers don't alias (fixes the vectorizer's "unsafe
+    /// dependent memory operations" remark).
+    pub buffer_data_slots: std::collections::HashMap<u32, (String, u32)>,
 }
 
 /// (Issue #50) Info about a flat-folded const 2D int array.
@@ -4366,7 +4382,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // declared length never faults; the result is just garbage (same as
             // the branch-based path's "return 0" semantics are rarely observed
             // in practice).
-            let a = lower_expr(ctx, array)?;
+            //
+            // Fast path: when `array` is a `LocalGet` whose LocalId has a
+            // pre-computed `ptr`-typed data-base slot (populated by the
+            // `Stmt::Let` lowering for `BufferAlloc` inits), use
+            // `getelementptr inbounds i8, ptr %base, i32 %idx` instead of the
+            // `inttoptr(handle + offset)` chain — LLVM's LoopVectorizer needs
+            // proper pointer provenance to identify array bounds, and per-
+            // buffer alias scope metadata so it can prove src reads don't
+            // alias dst writes.
+            let buffer_slot_info = if let Expr::LocalGet(id) = array.as_ref() {
+                ctx.buffer_data_slots.get(id).cloned()
+            } else {
+                None
+            };
             // Check upfront whether index is i32-lowerable (no clones —
             // borrows released before lower_expr_as_i32 borrows mutably).
             let idx_is_i32 = can_lower_expr_as_i32(index, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
@@ -4376,6 +4405,23 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let i = lower_expr(ctx, index)?;
                 ctx.block().fptosi(DOUBLE, &i, I32)
             };
+            if let Some((ptr_slot, scope_idx)) = buffer_slot_info {
+                let blk = ctx.block();
+                let data_ptr = blk.load(PTR, &ptr_slot);
+                // Length lives 8 bytes before the data start (BufferHeader).
+                // Loaded with !invariant.load so LICM hoists it out of loops.
+                let header_ptr = blk.gep(I8, &data_ptr, &[(I32, "-8")]);
+                let len_i32 = blk.load_invariant(I32, &header_ptr);
+                let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+                blk.emit_raw(format!("call void @llvm.assume(i1 {})", in_bounds));
+                let byte_ptr = blk.gep_inbounds(I8, &data_ptr, &[(I32, &idx_i32)]);
+                let byte_val = blk.fresh_reg();
+                let meta = buffer_alias_metadata_suffix(scope_idx);
+                blk.emit_raw(format!("{} = load i8, ptr {}{}", byte_val, byte_ptr, meta));
+                let result_i32 = blk.zext(I8, &byte_val, I32);
+                return Ok(ctx.block().sitofp(I32, &result_i32, DOUBLE));
+            }
+            let a = lower_expr(ctx, array)?;
             let blk = ctx.block();
             let handle = unbox_to_i64(blk, &a);
             let len_i32 = blk.safe_load_i32_from_ptr(&handle);
@@ -4395,7 +4441,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             // Inline `buf[idx] = v` — branchless via @llvm.assume.
             // Uses i32 fast path for both index and value when possible,
             // eliminating double↔int conversions in tight byte-write loops.
-            let a = lower_expr(ctx, array)?;
+            let buffer_slot_info = if let Expr::LocalGet(id) = array.as_ref() {
+                ctx.buffer_data_slots.get(id).cloned()
+            } else {
+                None
+            };
             let idx_is_i32 = can_lower_expr_as_i32(index, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
             let val_is_i32 = can_lower_expr_as_i32(value, &ctx.i32_counter_slots, ctx.flat_const_arrays, &ctx.array_row_aliases, ctx.integer_locals, ctx.clamp3_functions, ctx.clamp_u8_functions);
             let idx_i32 = if idx_is_i32 {
@@ -4410,6 +4460,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let v = lower_expr(ctx, value)?;
                 ctx.block().fptosi(DOUBLE, &v, I32)
             };
+            if let Some((ptr_slot, scope_idx)) = buffer_slot_info {
+                let blk = ctx.block();
+                let data_ptr = blk.load(PTR, &ptr_slot);
+                let header_ptr = blk.gep(I8, &data_ptr, &[(I32, "-8")]);
+                let len_i32 = blk.load_invariant(I32, &header_ptr);
+                let in_bounds = blk.icmp_ult(I32, &idx_i32, &len_i32);
+                blk.emit_raw(format!("call void @llvm.assume(i1 {})", in_bounds));
+                let byte_ptr = blk.gep_inbounds(I8, &data_ptr, &[(I32, &idx_i32)]);
+                let byte_val = blk.trunc(I32, &val_i32, I8);
+                let meta = buffer_alias_metadata_suffix(scope_idx);
+                blk.emit_raw(format!("store i8 {}, ptr {}{}", byte_val, byte_ptr, meta));
+                return Ok(ctx.block().sitofp(I32, &val_i32, DOUBLE));
+            }
+            let a = lower_expr(ctx, array)?;
             let blk = ctx.block();
             let handle = unbox_to_i64(blk, &a);
             let len_i32 = blk.safe_load_i32_from_ptr(&handle);
@@ -7487,6 +7551,25 @@ fn proxy_build_args_array(ctx: &mut FnCtx<'_>, args: &[Expr]) -> Result<String> 
         );
     }
     Ok(current)
+}
+
+/// Build the `, !alias.scope !N, !noalias !M` suffix attached to Buffer
+/// load/store instructions on the GEP fast path. `scope_idx` is the per-
+/// buffer identifier allocated by `Stmt::Let` when a `BufferAlloc` init
+/// is detected. The metadata IDs map to nodes emitted at module level
+/// by `emit_buffer_alias_metadata` (`codegen.rs`):
+///
+/// - `!(201 + idx)` is the alias-scope list containing this buffer's scope
+/// - `!(301 + idx)` is the noalias set listing every *other* buffer's scope
+///
+/// LLVM's LoopVectorizer uses these to prove that loads from one buffer
+/// don't alias stores to another buffer — the fix for the "unsafe
+/// dependent memory operations" vectorization remark on the image_conv
+/// blur kernel (src reads vs dst writes).
+pub(crate) fn buffer_alias_metadata_suffix(scope_idx: u32) -> String {
+    let scope_list = 201 + scope_idx;
+    let noalias_list = 301 + scope_idx;
+    format!(", !alias.scope !{}, !noalias !{}", scope_list, noalias_list)
 }
 
 /// Helper: unbox a NaN-boxed string/object/array double into a raw i64

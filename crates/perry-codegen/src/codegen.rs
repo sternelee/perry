@@ -1552,6 +1552,7 @@ fn compile_function(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
+        buffer_data_slots: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of '{}'", f.name))?;
@@ -1808,6 +1809,7 @@ fn compile_closure(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
+        buffer_data_slots: HashMap::new(),
     };
 
     stmt::lower_stmts(&mut ctx, body)
@@ -1961,6 +1963,7 @@ fn compile_method(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
+        buffer_data_slots: HashMap::new(),
     };
 
     // Constructors emitted as standalone cross-module LLVM functions (named
@@ -2138,6 +2141,7 @@ fn compile_module_entry(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
+        buffer_data_slots: HashMap::new(),
         };
         // Register every module-level global's ADDRESS as a GC root so
         // the mark phase can discover pointer-typed values (Maps, Arrays,
@@ -2225,6 +2229,7 @@ fn compile_module_entry(
         }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let pending = std::mem::take(&mut ctx.pending_declares);
+        let buffer_alias_count = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
@@ -2232,6 +2237,7 @@ fn compile_module_entry(
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
+        emit_buffer_alias_metadata(llmod, buffer_alias_count);
     } else {
         let init_name = format!("{}__init", module_prefix);
         // Debug: emit puts("INIT: <prefix>") at the top of each module init
@@ -2324,6 +2330,7 @@ fn compile_module_entry(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
+        buffer_data_slots: HashMap::new(),
         };
         // Register every module-level global's ADDRESS as a GC root —
         // same reason as the entry-module branch above (issue #36). For
@@ -2341,6 +2348,7 @@ fn compile_module_entry(
         }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
         let pending = std::mem::take(&mut ctx.pending_declares);
+        let buffer_alias_count = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
@@ -2348,8 +2356,59 @@ fn compile_module_entry(
     for ic_name in &ic_globals {
         llmod.add_raw_global(format!("@{} = private global [2 x i64] zeroinitializer", ic_name));
     }
+        emit_buffer_alias_metadata(llmod, buffer_alias_count);
     }
     Ok(())
+}
+
+/// Emit LLVM alias-scope metadata for the module's Buffer/Uint8Array data
+/// pointers. Each buffer registered in `FnCtx::buffer_data_slots` gets a
+/// unique scope within a shared alias domain, plus a scope-list node
+/// (`!alias.scope` target) and a noalias-list node (`!noalias` target) that
+/// enumerates every *other* buffer's scope.
+///
+/// Numbering (chosen to avoid colliding with `!0 = !{}` used by
+/// `!invariant.load`):
+/// - `!100`                — shared alias domain
+/// - `!(101 + idx)`        — per-buffer scope, one per entry in buffer_data_slots
+/// - `!(201 + idx)`        — scope list referenced by `!alias.scope` on loads/stores
+/// - `!(301 + idx)`        — noalias list referenced by `!noalias` on loads/stores
+///
+/// LLVM's LoopVectorizer can then prove that `src[i]` reads don't alias
+/// `dst[j]` writes — the fix for the "unsafe dependent memory operations"
+/// vectorization remark on the image_conv blur kernel.
+fn emit_buffer_alias_metadata(llmod: &mut LlModule, count: u32) {
+    if count == 0 {
+        return;
+    }
+    // Shared domain.
+    llmod.add_metadata_line("!100 = distinct !{!100}".to_string());
+    // Per-buffer scope nodes.
+    for i in 0..count {
+        let sid = 101 + i;
+        llmod.add_metadata_line(format!("!{} = distinct !{{!{}, !100}}", sid, sid));
+    }
+    // Single-element alias-scope lists (one per buffer).
+    for i in 0..count {
+        let list_id = 201 + i;
+        let scope_id = 101 + i;
+        llmod.add_metadata_line(format!("!{} = !{{!{}}}", list_id, scope_id));
+    }
+    // Noalias lists: for buffer i, every *other* buffer's scope.
+    for i in 0..count {
+        let list_id = 301 + i;
+        let others: Vec<String> = (0..count)
+            .filter(|j| *j != i)
+            .map(|j| format!("!{}", 101 + j))
+            .collect();
+        if others.is_empty() {
+            // Single buffer: empty noalias set — LLVM accepts `!{}` but
+            // it's a no-op. Still emit so `!noalias !{N}` references resolve.
+            llmod.add_metadata_line(format!("!{} = !{{}}", list_id));
+        } else {
+            llmod.add_metadata_line(format!("!{} = !{{{}}}", list_id, others.join(", ")));
+        }
+    }
 }
 
 /// Emit the string pool into the module: byte-array constants, handle
@@ -2614,6 +2673,7 @@ fn compile_static_method(
         clamp_u8_functions: &cross_module.clamp_u8_functions,
         ic_site_counter: 0,
         ic_globals: Vec::new(),
+        buffer_data_slots: HashMap::new(),
     };
     stmt::lower_stmts(&mut ctx, &f.body)
         .with_context(|| format!("lowering body of static '{}::{}'", class_name, f.name))?;

@@ -9,7 +9,7 @@ use perry_hir::Stmt;
 
 use crate::expr::{lower_expr, FnCtx};
 use crate::lower_conditional::lower_truthy;
-use crate::types::{DOUBLE, I32};
+use crate::types::{DOUBLE, I8, I32, I64, PTR};
 
 /// Lower a sequence of statements into the current block of `ctx`. If any
 /// statement splits control flow, `ctx.current_block` is updated to the
@@ -256,6 +256,25 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                     let v = lower_expr(ctx, init_expr)?;
                     let g_ref = format!("@{}", global_name);
                     ctx.block().store(DOUBLE, &v, &g_ref);
+
+                    // Buffer data-pointer slot: when init is BufferAlloc on an
+                    // immutable module global, pre-compute the data base pointer
+                    // (handle + 8, past BufferHeader) and store it in a ptr
+                    // alloca. Uint8ArrayGet/Set then uses `getelementptr inbounds`
+                    // from this pointer instead of the inttoptr chain — giving
+                    // LLVM proper pointer provenance for auto-vectorization.
+                    if !*mutable {
+                        if matches!(init_expr, perry_hir::Expr::BufferAlloc { .. }) {
+                            let blk = ctx.block();
+                            let handle = crate::expr::unbox_to_i64(blk, &v);
+                            let handle_ptr = blk.inttoptr(I64, &handle);
+                            let data_ptr = blk.gep(I8, &handle_ptr, &[(I32, "8")]);
+                            let slot = ctx.func.alloca_entry(PTR);
+                            ctx.block().store(PTR, &data_ptr, &slot);
+                            let scope_idx = ctx.buffer_data_slots.len() as u32;
+                            ctx.buffer_data_slots.insert(*id, (slot, scope_idx));
+                        }
+                    }
                 }
                 return Ok(());
             }
@@ -360,6 +379,24 @@ pub(crate) fn lower_stmt(ctx: &mut FnCtx<'_>, stmt: &Stmt) -> Result<()> {
                     let v_i64 = ctx.block().fptosi(DOUBLE, &v, crate::types::I64);
                     let v_i32 = ctx.block().trunc(crate::types::I64, &v_i64, I32);
                     ctx.block().store(I32, &v_i32, &i32_slot);
+                }
+                // Buffer data-pointer slot for local (non-global) const buffers.
+                // `const src = Buffer.alloc(N)` at module-level lives here when
+                // `src` doesn't escape to functions — same pattern as the
+                // image_conv blur kernel. The pre-computed ptr slot lets
+                // Uint8ArrayGet/Set emit `getelementptr inbounds` from a
+                // proper `ptr` base instead of an `inttoptr` chain.
+                if !*mutable {
+                    if matches!(init_expr, perry_hir::Expr::BufferAlloc { .. }) {
+                        let blk = ctx.block();
+                        let handle = crate::expr::unbox_to_i64(blk, &v);
+                        let handle_ptr = blk.inttoptr(I64, &handle);
+                        let data_ptr = blk.gep(I8, &handle_ptr, &[(I32, "8")]);
+                        let buf_slot = ctx.func.alloca_entry(PTR);
+                        ctx.block().store(PTR, &data_ptr, &buf_slot);
+                        let scope_idx = ctx.buffer_data_slots.len() as u32;
+                        ctx.buffer_data_slots.insert(*id, (buf_slot, scope_idx));
+                    }
                 }
             } else if let Some(cv) = ctx.compile_time_constants.get(id) {
                 // Compile-time constants (e.g. `declare const __platform__: number`)
