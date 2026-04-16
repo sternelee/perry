@@ -16,6 +16,14 @@ thread_local! {
     /// Stack of object pointers currently being stringified (for circular detection).
     static STRINGIFY_STACK: RefCell<Vec<usize>> = RefCell::new(Vec::new());
 
+    /// Reusable scratch buffer for JSON.stringify (issue #64). Avoids the
+    /// per-call `String::with_capacity` allocate+free that dominated the
+    /// small-stringify path. Wrapped in `Cell<Option<_>>` so reentrant calls
+    /// (via `toJSON` callbacks etc.) get a fresh buffer instead of panicking
+    /// on a `RefCell` borrow conflict; the larger of the two is restored.
+    static STRINGIFY_BUF: std::cell::Cell<Option<String>> =
+        std::cell::Cell::new(Some(String::with_capacity(4096)));
+
     /// Key string intern cache for JSON.parse (issue #51 follow-up).
     /// Maps key bytes → already-allocated StringHeader pointer.
     /// Avoids re-allocating "id", "name", etc. for every record in a
@@ -65,6 +73,25 @@ fn parse_root_save_len() -> usize {
 #[inline]
 fn parse_root_restore(len: usize) {
     PARSE_ROOTS.with(|r| r.borrow_mut().truncate(len));
+}
+
+/// Take the shared scratch buffer (or allocate a fresh one on reentrancy).
+#[inline]
+fn take_stringify_buf() -> String {
+    STRINGIFY_BUF.with(|b| b.take()).unwrap_or_default()
+}
+
+/// Restore the scratch buffer after use, keeping whichever capacity is larger.
+#[inline]
+fn restore_stringify_buf(mut buf: String) {
+    buf.clear();
+    STRINGIFY_BUF.with(|b| {
+        let existing = b.take();
+        match existing {
+            Some(e) if e.capacity() > buf.capacity() => b.set(Some(e)),
+            _ => b.set(Some(buf)),
+        }
+    });
 }
 
 /// Root scanner called by GC — marks every value in PARSE_ROOTS as live.
@@ -1242,10 +1269,17 @@ unsafe fn stringify_array_depth(ptr: *const u8, buf: &mut String, depth: u32) {
     // `keys_array` (issue #59). The template is built from element 0 and
     // reused for every subsequent element whose shape matches; mismatches
     // fall back per-element via `stringify_value_depth`, so mixed arrays
-    // still produce correct output.
+    // still produce correct output. Pre-check the tag inline to skip the
+    // function call entirely for arrays of primitives (issue #64) — common
+    // for nested fields like `tags: ["x","y"]` that fired per-element.
     let template = if len >= 2 {
         let first_bits = (*elements).to_bits();
-        build_shape_prefix_template(first_bits)
+        let tag = first_bits & 0xFFFF_0000_0000_0000;
+        if tag == POINTER_TAG || is_raw_pointer(first_bits) {
+            build_shape_prefix_template(first_bits)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1366,8 +1400,11 @@ unsafe fn estimate_json_size(value: f64, type_hint: u32) -> usize {
 /// Returns a string pointer
 #[no_mangle]
 pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut StringHeader {
+    let mut buf = take_stringify_buf();
     let estimated = estimate_json_size(value, type_hint);
-    let mut buf = String::with_capacity(estimated);
+    if buf.capacity() < estimated {
+        buf.reserve(estimated - buf.capacity());
+    }
     stringify_value(value, type_hint, &mut buf);
     // JSON output is always ASCII (non-ASCII is \uXXXX escaped), so
     // utf16_len == byte_len. Use gc_malloc directly and skip the
@@ -1383,6 +1420,7 @@ pub unsafe extern "C" fn js_json_stringify(value: f64, type_hint: u32) -> *mut S
     if len > 0 {
         std::ptr::copy_nonoverlapping(buf.as_ptr(), raw.add(std::mem::size_of::<StringHeader>()), len as usize);
     }
+    restore_stringify_buf(buf);
     ptr
 }
 
@@ -1873,7 +1911,10 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
     }
 
     let estimated = estimate_json_size(value, type_hint);
-    let mut buf = String::with_capacity(estimated);
+    let mut buf = take_stringify_buf();
+    if buf.capacity() < estimated {
+        buf.reserve(estimated - buf.capacity());
+    }
 
     // Check what the replacer returned
     let replaced_tag = replaced_bits & 0xFFFF_0000_0000_0000;
@@ -1927,7 +1968,9 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
         write_number(&mut buf, replaced_root);
     }
 
-    js_string_from_bytes(buf.as_ptr(), buf.len() as u32)
+    let result = js_string_from_bytes(buf.as_ptr(), buf.len() as u32);
+    restore_stringify_buf(buf);
+    result
 }
 
 // ─── Pretty-print stringify ─────────────────────────────────────────────────
@@ -2324,7 +2367,7 @@ pub unsafe extern "C" fn js_json_stringify_full(
     // Clear the circular detection stack
     STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
 
-    let mut buf = String::with_capacity(4096);
+    let mut buf = take_stringify_buf();
 
     if let Some(ref allowed_keys) = array_replacer {
         // Array replacer: only applies to objects at the top level
@@ -2379,7 +2422,27 @@ pub unsafe extern "C" fn js_json_stringify_full(
 
     STRINGIFY_STACK.with(|s| s.borrow_mut().clear());
 
-    let result_ptr = js_string_from_bytes(buf.as_ptr(), buf.len() as u32);
+    // JSON output is always ASCII (high bytes are \uXXXX-escaped), so
+    // utf16_len == byte_len. Allocate the StringHeader directly via
+    // gc_malloc/arena and skip the compute_utf16_len byte scan that
+    // js_string_from_bytes performs (issue #64). For 1MB stringify output
+    // that's a 1MB pass per call.
+    let len = buf.len() as u32;
+    let total = std::mem::size_of::<StringHeader>() + len as usize;
+    let raw = crate::arena::arena_alloc_gc(total, 8, crate::gc::GC_TYPE_STRING);
+    let result_ptr = raw as *mut StringHeader;
+    (*result_ptr).utf16_len = len;
+    (*result_ptr).byte_len = len;
+    (*result_ptr).capacity = len;
+    (*result_ptr).refcount = 0;
+    if len > 0 {
+        std::ptr::copy_nonoverlapping(
+            buf.as_ptr(),
+            raw.add(std::mem::size_of::<StringHeader>()),
+            len as usize,
+        );
+    }
+    restore_stringify_buf(buf);
     // Return as NaN-boxed string
     (STRING_TAG | (result_ptr as u64 & POINTER_MASK)) as i64
 }
