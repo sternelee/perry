@@ -1367,6 +1367,7 @@ fn is_int32_producing_expr(
         ),
         Expr::LocalGet(id) => known_int_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        Expr::MathImul(_, _) => true, // Math.imul always returns i32
         // Issue #50 bridge: element access on a flat-const 2D int array
         // produces i32. Two shapes:
         //   - inline `X[i][j]`: IndexGet(IndexGet(LocalGet(X), i), j)
@@ -1988,6 +1989,43 @@ pub fn is_integer_specializable(f: &Function) -> bool {
     if !f.params.iter().all(|p| matches!(p.ty, perry_types::Type::Number)) { return false; }
     i64s_stmts(&f.body, f.id)
 }
+/// Detect functions that always return an integer value (all return paths
+/// end with `| 0`, `>>> 0`, or another bitwise op). These functions can be
+/// treated as int-producing at call sites, enabling the i32 fast path for
+/// `h = userImul(h, p)` style patterns.
+pub fn returns_integer(f: &Function) -> bool {
+    if f.is_async || f.is_generator { return false; }
+    if !matches!(f.return_type, perry_types::Type::Number) { return false; }
+    returns_int_stmts(&f.body)
+}
+fn returns_int_stmts(ss: &[Stmt]) -> bool {
+    for s in ss {
+        match s {
+            Stmt::Return(Some(e)) => {
+                if !returns_int_expr(e) { return false; }
+            }
+            Stmt::If { then_branch, else_branch, .. } => {
+                if !returns_int_stmts(then_branch) { return false; }
+                if let Some(eb) = else_branch {
+                    if !returns_int_stmts(eb) { return false; }
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+fn returns_int_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Integer(_) => true,
+        Expr::Binary { op, .. } => matches!(op,
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+            | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr),
+        Expr::MathImul(_, _) => true,
+        _ => false,
+    }
+}
+
 fn i64s_stmts(ss: &[Stmt], sid: u32) -> bool {
     ss.iter().all(|s| match s {
         Stmt::Return(Some(e)) => i64s_expr(e, sid),

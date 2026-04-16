@@ -7207,11 +7207,11 @@ fn is_known_finite(ctx: &FnCtx<'_>, e: &Expr) -> bool {
         Expr::LocalGet(id) => ctx.integer_locals.contains(id),
         Expr::Update { id, .. } => ctx.integer_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        Expr::MathImul(_, _) => true, // Math.imul returns i32 → always finite
         Expr::Binary { op, left, right } => match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                 is_known_finite(ctx, left) && is_known_finite(ctx, right)
             }
-            // Bitwise results are always i32 → finite.
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
             | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr => true,
             _ => false,
@@ -7359,6 +7359,10 @@ pub(crate) fn can_lower_expr_as_i32(
         Expr::Integer(n) => i32::try_from(*n).is_ok(),
         Expr::LocalGet(id) => i32_slots.contains_key(id) || integer_locals.contains(id),
         Expr::Uint8ArrayGet { .. } | Expr::BufferIndexGet { .. } => true,
+        Expr::MathImul(a, b) => {
+            can_lower_expr_as_i32(a, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+                && can_lower_expr_as_i32(b, i32_slots, flat_const_arrays, array_row_aliases, integer_locals, clamp3_fns, clamp_u8_fns)
+        }
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul
                 | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
@@ -7401,6 +7405,12 @@ pub(crate) fn lower_expr_as_i32(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String>
                 let d = lower_expr(ctx, e)?;
                 Ok(ctx.block().fptosi(DOUBLE, &d, I32))
             }
+        }
+        // Math.imul(a, b) → single `mul i32` instruction.
+        Expr::MathImul(a, b) => {
+            let l = lower_expr_as_i32(ctx, a)?;
+            let r = lower_expr_as_i32(ctx, b)?;
+            Ok(ctx.block().mul(I32, &l, &r))
         }
         Expr::Binary { op, left, right }
             if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul

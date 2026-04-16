@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.57
+**Current Version:** 0.5.58
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.58** — `Math.imul` i32 native path + `returns_integer` function detection. `MathImul(a,b)` in `can_lower_expr_as_i32`/`lower_expr_as_i32` emits single `mul i32` — no fptosi/sitofp. `returns_integer(f)` detects functions where ALL return paths end with `|0`/`>>>0`/bitwise (e.g. user-defined `imul32` polyfills) and includes them in the integer-candidate seeding. image_conv with Math.imul: **blur 287ms (1.17× Zig), total 467ms (1.9× Zig)**.
 - **v0.5.57** — Fix dylib GC root segfault (closes #54). Dylib entry module now emits `perry_module_init()` instead of `main()` — initializes GC, string pools, module globals (GC root registration), and top-level statements. Host calls this once after dlopen; event loop is omitted (host manages its own).
 - **v0.5.56** — i32-native bitwise ops in `lower_expr_as_i32` + i32 index/value in Uint8ArrayGet/Set. `can_lower_expr_as_i32` and `lower_expr_as_i32` now handle `BitAnd/BitOr/BitXor/Shl/Shr/UShr` — entire xorshift/FNV chains stay in i32. Uint8ArrayGet/Set use `lower_expr_as_i32` for index (and value for Set) when possible, skipping double round-trips. image_conv total: **456ms** (was 483ms). Blur: 280ms (1.14× Zig). Gap: **1.85× Zig** (was 1.97×).
 - **v0.5.55** — Eliminate TLS overhead from transition cache + descriptor check (#60 follow-up). `TRANSITION_CACHE_GLOBAL` is now a plain `static mut` (user code is single-threaded), `ANY_DESCRIPTORS_IN_USE` → `static AtomicBool` with `Relaxed` load. 10k×20 benchmark: **142ms→77ms (1.8× faster)**, gap vs Node down to **4.5×** (was 84× before v0.5.51).
