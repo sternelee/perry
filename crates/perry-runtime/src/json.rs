@@ -478,8 +478,17 @@ pub unsafe extern "C" fn js_json_parse(text_ptr: *const StringHeader) -> JSValue
     crate::gc::gc_unsuppress();
     crate::gc::gc_bump_malloc_trigger();
 
-    // Clear key intern cache — cached pointers could dangle after GC.
-    PARSE_KEY_CACHE.with(|c| c.borrow_mut().clear());
+    // Keep key intern cache across parses — scan_parse_roots marks cached
+    // strings as GC roots so they survive collection. This saves ~10k
+    // gc_malloc calls per repeated parse of homogeneous JSON (same keys).
+    // Cap at 4096 entries to bound memory for varied-schema workloads.
+    PARSE_KEY_CACHE.with(|c| {
+        let cache = c.borrow();
+        if cache.len() > 4096 {
+            drop(cache);
+            c.borrow_mut().clear();
+        }
+    });
 
     // If parser didn't consume meaningful input (result is null and input wasn't "null"),
     // the input was invalid JSON — throw SyntaxError
@@ -879,15 +888,6 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
         STRINGIFY_STACK.with(|s| s.borrow_mut().push(ptr as usize));
     }
 
-    // Check for toJSON method
-    if let Some(to_json_val) = object_get_to_json(ptr) {
-        if depth > MAX_FAST_DEPTH {
-            STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
-        }
-        stringify_value(to_json_val, TYPE_UNKNOWN, buf);
-        return;
-    }
-
     let obj = ptr as *const crate::ObjectHeader;
     let num_fields = (*obj).field_count;
     let keys_arr = (*obj).keys_array;
@@ -895,18 +895,47 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
     let keys_elements = (keys_arr as *const u8).add(std::mem::size_of::<crate::ArrayHeader>()) as *const f64;
     let fields_ptr = (ptr as *const u8)
         .add(std::mem::size_of::<crate::ObjectHeader>()) as *const f64;
-
     let actual_fields = std::cmp::min(num_fields, keys_len);
+
+    // Deferred toJSON + closure checks: scan fields once to detect if any
+    // value is a POINTER_TAG that could be a closure. For data-only objects
+    // (the common case from JSON.parse / object literals) this lets us skip
+    // the toJSON key scan and per-field is_closure_value entirely.
+    let has_pointer_fields = {
+        let mut found = false;
+        for f in 0..actual_fields {
+            let tag = (*fields_ptr.add(f as usize)).to_bits() & 0xFFFF_0000_0000_0000;
+            if tag == POINTER_TAG {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+
+    if has_pointer_fields {
+        // Only objects with pointer-tagged fields can have closures/toJSON.
+        // Check toJSON first, then filter closures in the loop below.
+        if let Some(to_json_val) = object_get_to_json(ptr) {
+            if depth > MAX_FAST_DEPTH {
+                STRINGIFY_STACK.with(|s| s.borrow_mut().pop());
+            }
+            stringify_value(to_json_val, TYPE_UNKNOWN, buf);
+            return;
+        }
+    }
+
     buf.push('{');
     let mut first = true;
     for f in 0..actual_fields {
         let field_val = *fields_ptr.add(f as usize);
         let field_bits = field_val.to_bits();
-        // Skip undefined and function/closure values per JSON spec
+        // Skip undefined per JSON spec
         if field_bits == TAG_UNDEFINED {
             continue;
         }
-        if is_closure_value(field_bits) {
+        // Skip closures per JSON spec (only possible for pointer-tagged values)
+        if has_pointer_fields && is_closure_value(field_bits) {
             continue;
         }
 
@@ -915,27 +944,44 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
         }
         first = false;
 
-        if (f as u32) < keys_len {
-            let key_f64 = *keys_elements.add(f as usize);
-            let key_bits = key_f64.to_bits();
-            let key_tag = key_bits & 0xFFFF_0000_0000_0000;
-            let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
-                (key_bits & POINTER_MASK) as *const StringHeader
-            } else {
-                key_bits as *const StringHeader
-            };
-            if let Some(key_str) = str_from_header(key_ptr) {
-                buf.push('"');
-                buf.push_str(key_str);
-                buf.push_str("\":");
-            } else {
-                let _ = write!(buf, "\"field{}\":", f);
-            }
+        let key_f64 = *keys_elements.add(f as usize);
+        let key_bits = key_f64.to_bits();
+        let key_tag = key_bits & 0xFFFF_0000_0000_0000;
+        let key_ptr = if key_tag == STRING_TAG || key_tag == POINTER_TAG {
+            (key_bits & POINTER_MASK) as *const StringHeader
+        } else {
+            key_bits as *const StringHeader
+        };
+        if let Some(key_str) = str_from_header(key_ptr) {
+            buf.push('"');
+            buf.push_str(key_str);
+            buf.push_str("\":");
         } else {
             let _ = write!(buf, "\"field{}\":", f);
         }
 
-        stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
+        // Inline value dispatch for common types to avoid function call overhead
+        let val_tag = field_bits & 0xFFFF_0000_0000_0000;
+        if field_bits == TAG_NULL {
+            buf.push_str("null");
+        } else if field_bits == TAG_TRUE {
+            buf.push_str("true");
+        } else if field_bits == TAG_FALSE {
+            buf.push_str("false");
+        } else if val_tag == STRING_TAG {
+            let str_ptr = (field_bits & POINTER_MASK) as *const StringHeader;
+            if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if val_tag == POINTER_TAG || is_raw_pointer(field_bits) {
+            // Nested object/array — recurse with depth
+            stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
+        } else {
+            // Number (most common for data objects)
+            write_number(buf, field_val);
+        }
     }
     buf.push('}');
     if depth > MAX_FAST_DEPTH {
