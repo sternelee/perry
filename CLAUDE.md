@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.50
+**Current Version:** 0.5.51
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.51** — Content-hash shape-transition cache for dynamic property writes (closes #60). Transition cache keyed on FNV-1a content hash instead of string pointer identity — freshly concatenated keys (`"field_"+j`) now hit the cache across objects. Cache size 4096→16384. 10k×20 benchmark: **1300ms→136ms (9.6× faster)**, gap vs Node 84×→8.5×.
 - **v0.5.50** — `toint32_fast` for known-finite bitwise operands + `alwaysinline` on small functions. `is_known_finite` analysis skips the 5-insn NaN/Inf guard from v0.5.49 when operands are provably finite (integer_locals, literals, byte loads, bitwise results). `force_inline` attribute on functions ≤8 stmts + i64-specialized wrappers. Clamp pattern detection (smin/smax in `lower_expr_as_i32`).
 - **v0.5.49** — Bitwise ops with NaN/Infinity produce 0 per ECMAScript ToInt32 spec (closes #57). `LlBlock::toint32` emits inline NaN/Inf guard (`fcmp uno` + `fabs` + `fcmp oeq ±inf` → `select 0.0`) before `fptosi`, fixing UB for all bitwise ops (`|`, `&`, `^`, `<<`, `>>`, `>>>`).
 - **v0.5.48** — `sdiv` for `(int / const) | 0` + `@llvm.assume` bounds in Uint8ArrayGet. image_conv: 0.69s → 0.61s.

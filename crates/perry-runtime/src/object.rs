@@ -396,36 +396,49 @@ fn shape_cache_insert(shape_id: u32, keys_array: *mut ArrayHeader) {
 #[derive(Clone, Copy)]
 struct TransitionEntry {
     prev_keys: usize,
-    key_ptr: usize,
+    key_hash: u64,
     next_keys: usize,
     slot_idx: u32,
 }
 
-const TRANSITION_CACHE_SIZE: usize = 4096;
+const TRANSITION_CACHE_SIZE: usize = 16384;
 
 thread_local! {
     static TRANSITION_CACHE: std::cell::UnsafeCell<[TransitionEntry; TRANSITION_CACHE_SIZE]> =
         std::cell::UnsafeCell::new([TransitionEntry {
-            prev_keys: 0, key_ptr: 0, next_keys: 0, slot_idx: 0,
+            prev_keys: 0, key_hash: 0, next_keys: 0, slot_idx: 0,
         }; TRANSITION_CACHE_SIZE]);
 }
 
+/// FNV-1a content hash for a property-name string.
 #[inline(always)]
-fn transition_cache_slot(prev_keys: usize, key_ptr: usize) -> usize {
-    // Both keys are pointer-aligned (8-byte); shift the low 3 bits out
-    // and mix with two distinct multipliers so the same key_ptr across
-    // different prev_keys maps to different slots.
-    let mixed = (prev_keys >> 3).wrapping_mul(0x9E3779B97F4A7C15)
-        ^ (key_ptr >> 3).wrapping_mul(0xC6BC279692B5C323);
+fn key_content_hash(key: *const crate::StringHeader) -> u64 {
+    unsafe {
+        let len = (*key).byte_len as usize;
+        let data = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+        let mut h: u64 = 0xcbf29ce484222325;
+        for i in 0..len {
+            h ^= *data.add(i) as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+}
+
+#[inline(always)]
+fn transition_cache_slot(prev_keys: usize, key_hash: u64) -> usize {
+    let mixed = ((prev_keys >> 3) as u64).wrapping_mul(0x9E3779B97F4A7C15)
+        ^ key_hash.wrapping_mul(0xC6BC279692B5C323);
     (mixed as usize) & (TRANSITION_CACHE_SIZE - 1)
 }
 
 #[inline(always)]
-fn transition_cache_lookup(prev_keys: usize, key_ptr: usize) -> Option<(usize, u32)> {
+fn transition_cache_lookup(prev_keys: usize, key: *const crate::StringHeader) -> Option<(usize, u32)> {
+    let kh = key_content_hash(key);
     TRANSITION_CACHE.with(|c| {
-        let slot = transition_cache_slot(prev_keys, key_ptr);
+        let slot = transition_cache_slot(prev_keys, kh);
         let entry = unsafe { (*c.get())[slot] };
-        if entry.next_keys != 0 && entry.prev_keys == prev_keys && entry.key_ptr == key_ptr {
+        if entry.next_keys != 0 && entry.prev_keys == prev_keys && entry.key_hash == kh {
             Some((entry.next_keys, entry.slot_idx))
         } else {
             None
@@ -433,14 +446,15 @@ fn transition_cache_lookup(prev_keys: usize, key_ptr: usize) -> Option<(usize, u
     })
 }
 
-fn transition_cache_insert(prev_keys: usize, key_ptr: usize, next_keys: usize, slot_idx: u32) {
+fn transition_cache_insert(prev_keys: usize, key: *const crate::StringHeader, next_keys: usize, slot_idx: u32) {
     if next_keys == 0 {
         return;
     }
+    let kh = key_content_hash(key);
     TRANSITION_CACHE.with(|c| {
-        let slot = transition_cache_slot(prev_keys, key_ptr);
+        let slot = transition_cache_slot(prev_keys, kh);
         unsafe {
-            (*c.get())[slot] = TransitionEntry { prev_keys, key_ptr, next_keys, slot_idx };
+            (*c.get())[slot] = TransitionEntry { prev_keys, key_hash: kh, next_keys, slot_idx };
         }
     });
     // Mark the target as shape-shared so any future extension on the
@@ -2324,7 +2338,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             && !is_sealed_or_no_extend
             && !ANY_DESCRIPTORS_IN_USE.with(|c| c.get())
         {
-            if let Some((next_keys, slot_idx)) = transition_cache_lookup(prev_keys_usize, key as usize) {
+            if let Some((next_keys, slot_idx)) = transition_cache_lookup(prev_keys_usize, key) {
                 // Defensive: strip a raw-null POINTER_TAG value the same
                 // way the slow overflow path below does, so a bogus
                 // 0x7FFD_0000_0000_0000 store doesn't leak into an
@@ -2388,7 +2402,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             // that starts with `{}` and sets the same first key hits the
             // fast path above instead of allocating a fresh 4-elem
             // keys_array here.
-            transition_cache_insert(0, key as usize, new_keys as usize, 0);
+            transition_cache_insert(0, key, new_keys as usize, 0);
             return;
         }
 
@@ -2531,7 +2545,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             // The cached target is stamped `GC_FLAG_SHAPE_SHARED` by
             // `transition_cache_insert`, which triggers clone-on-extend
             // on either object if someone later appends past this key.
-            transition_cache_insert(prev_keys_usize, key as usize, new_keys as usize, new_index as u32);
+            transition_cache_insert(prev_keys_usize, key, new_keys as usize, new_index as u32);
             return;
         }
         // First, add the key to the keys array (may reallocate)
@@ -2546,7 +2560,7 @@ pub extern "C" fn js_object_set_field_by_name(obj: *mut ObjectHeader, key: *cons
             (*obj).field_count = new_index as u32 + 1;
         }
         // Record the shape transition — see above for semantics.
-        transition_cache_insert(prev_keys_usize, key as usize, new_keys as usize, new_index as u32);
+        transition_cache_insert(prev_keys_usize, key, new_keys as usize, new_index as u32);
     }
 }
 
