@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.59
+**Current Version:** 0.5.60
 
 ## TypeScript Parity Status
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.60** — GC suppression during JSON.parse (issue #59). `gc_suppress`/`gc_unsuppress` flag skips `gc_check_trigger` during parse; `gc_bump_malloc_trigger` rebaselines the threshold post-parse so freshly-created objects don't trip immediate collection. Clears PARSE_KEY_CACHE after each parse (correctness: dangling pointers). **JSON.parse 50×10k: 3250ms→143ms (22× faster, ~1.1× Node 122ms). Roundtrip: 21254ms→241ms (88× faster, 1.5× Node 157ms). Peak RSS: 842MB→254MB (3.3× less)**.
 - **v0.5.59** — Pure-function HIR inlining in init context + broader integer-local seeding. Phase 4 of the inline pass now inlines standalone pure functions (no module-global refs) into module init — `imul32` polyfill body exposed to i32 analysis. `collect_integer_let_ids` seeds immutable bitwise Lets and mutable `|0` Lets. Multi-statement `[Let*, Return(expr)]` functions now inline at expression level with setup-stmt hoisting. **FNV: 380ms→60ms (6.3× faster). image_conv total: 800ms→490ms (1.6× faster, 2.2× Zig)**.
 - **v0.5.59** — Property-name string interning + pointer-identity transition cache + small-integer string cache (issue #60 follow-up). `js_string_concat` checks intern table for short results before allocating (zero gc_malloc on repeated keys). Transition cache uses interned pointer identity instead of FNV-1a hash. `js_number_to_string` caches 0–255. **10k×20 dynamic property writes: 77ms→8ms (10× faster, 2× faster than Node 17ms)**.
 - **v0.5.58** — `Math.imul` i32 native path + `returns_integer` function detection. `MathImul(a,b)` in `can_lower_expr_as_i32`/`lower_expr_as_i32` emits single `mul i32` — no fptosi/sitofp. `returns_integer(f)` detects functions where ALL return paths end with `|0`/`>>>0`/bitwise (e.g. user-defined `imul32` polyfills) and includes them in the integer-candidate seeding. image_conv with Math.imul: **blur 287ms (1.17× Zig), total 467ms (1.9× Zig)**.
