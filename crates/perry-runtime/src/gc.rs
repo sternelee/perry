@@ -156,13 +156,13 @@ thread_local! {
     /// malloc objects) don't GC-thrash on every subsequent allocation.
     /// See `gc_check_trigger` for the update rule.
     static GC_NEXT_MALLOC_TRIGGER: std::cell::Cell<usize> =
-        std::cell::Cell::new(GC_MALLOC_COUNT_STEP);
+        std::cell::Cell::new(100_000);
 }
 
-/// Step for the malloc-count-based GC trigger. The next trigger is always
-/// set to `survivor_count + GC_MALLOC_COUNT_STEP` after each collection,
-/// so each cycle gets at least this many fresh allocations before the
-/// next GC regardless of live-set size.
+/// Initial step for the malloc-count-based GC trigger. Adaptive: doubles
+/// when >75% of malloc objects are garbage (loop-scoped temporaries),
+/// halves when <25% are garbage (large live set). Capped at
+/// `GC_MALLOC_COUNT_STEP_MAX` to bound memory between collections.
 ///
 /// Originally a single hardcoded threshold (`GC_MALLOC_COUNT_THRESHOLD`);
 /// issue #34 showed that triggering GC from `gc_malloc` (needed for
@@ -170,7 +170,21 @@ thread_local! {
 /// @perry/postgres's `parseBigIntDecimal` bigint chain) combined with a
 /// hardcoded threshold would thrash for any program whose live set
 /// exceeded the threshold. Making it a per-cycle step fixes that.
-const GC_MALLOC_COUNT_STEP: usize = 10_000;
+///
+/// Issue #58: the constant 10k step caused ~100 GC cycles for 500k-iter
+/// string-concat loops where almost every object is dead. Adaptive
+/// doubling ramps the step to 160k+ after a few mostly-garbage sweeps,
+/// cutting GC cycles from ~100 to ~10.
+const GC_MALLOC_COUNT_STEP_INITIAL: usize = 100_000;
+const GC_MALLOC_COUNT_STEP_MAX: usize = 2_000_000;
+const GC_MALLOC_COUNT_STEP_MIN: usize = 10_000;
+
+thread_local! {
+    /// Per-program adaptive malloc-count step. Mirrors `GC_STEP_BYTES`
+    /// behaviour: doubles when mostly-garbage, halves when mostly-live.
+    static GC_MALLOC_COUNT_STEP: std::cell::Cell<usize> =
+        std::cell::Cell::new(GC_MALLOC_COUNT_STEP_INITIAL);
+}
 
 /// Allocate memory via malloc with GcHeader prepended.
 /// Returns pointer to usable memory AFTER the header.
@@ -382,7 +396,8 @@ pub fn gc_unsuppress() {
 /// don't immediately trip a collection on the next allocation.
 pub fn gc_bump_malloc_trigger() {
     let current = MALLOC_OBJECTS.with(|list| list.borrow().len());
-    GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(current + GC_MALLOC_COUNT_STEP));
+    let step = GC_MALLOC_COUNT_STEP.with(|c| c.get());
+    GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(current + step));
 }
 
 /// Check if GC should run. Called only when a new arena block is allocated.
@@ -424,21 +439,58 @@ pub fn gc_check_trigger() {
         // swept malloc objects, so the next malloc-count trigger should
         // be relative to the new survivor count.
         let survivors = MALLOC_OBJECTS.with(|list| list.borrow().len());
-        GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(survivors + GC_MALLOC_COUNT_STEP));
+        let mstep = GC_MALLOC_COUNT_STEP.with(|c| c.get());
+        GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(survivors + mstep));
         return;
     }
     // Also trigger on malloc object count to bound memory growth for
     // services that stay within a single arena block but produce many
     // short-lived strings/closures/bigints per iteration. Since
     // gc_malloc now calls this (issue #34), the threshold is adaptive
-    // — it's always `survivor_count + GC_MALLOC_COUNT_STEP` after each
-    // cycle, so programs with large legitimate live sets don't thrash.
+    // — it's always `survivor_count + step` after each cycle, so
+    // programs with large legitimate live sets don't thrash.
+    //
+    // Issue #58: the step is now adaptive — after each malloc-triggered
+    // collection, if >75% of objects were garbage, double the step (up
+    // to 500k). If <25% were garbage, halve it (down to 5k floor).
+    // This lets tight loops that produce tons of dead temporaries
+    // (string concat, object creation) ramp the step quickly so they
+    // pay only a handful of GC cycles instead of ~100.
     let malloc_count = MALLOC_OBJECTS.with(|list| list.borrow().len());
     let next_malloc_trigger = GC_NEXT_MALLOC_TRIGGER.with(|c| c.get());
     if malloc_count >= next_malloc_trigger {
+        let pre_count = malloc_count;
         gc_collect_inner();
         let survivors = MALLOC_OBJECTS.with(|list| list.borrow().len());
-        GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(survivors + GC_MALLOC_COUNT_STEP));
+        // Adapt the malloc-count step based on collection effectiveness.
+        //
+        // Issue #58 insight: in tight allocation loops the conservative
+        // stack scanner keeps almost everything alive — GC finds <10%
+        // garbage and wastes time walking 100k+ objects. In this regime
+        // we should BACK OFF (increase the step) so the loop can finish
+        // without GC interference. Once control returns to a higher scope
+        // the dead objects will fall off the stack and become collectable.
+        //
+        // Conversely, when GC reclaims >75% it's working well and can
+        // afford to stay at the current cadence or even speed up.
+        let mut mstep = GC_MALLOC_COUNT_STEP.with(|c| c.get());
+        if pre_count > 0 {
+            let freed = pre_count.saturating_sub(survivors);
+            let pct_freed = (freed * 100) / pre_count;
+            if pct_freed < 15 {
+                // GC is nearly useless — quadruple the step to back off fast
+                mstep = (mstep * 4).min(GC_MALLOC_COUNT_STEP_MAX);
+            } else if pct_freed < 50 {
+                // GC is partially effective — double the step
+                mstep = (mstep * 2).min(GC_MALLOC_COUNT_STEP_MAX);
+            } else if pct_freed > 90 {
+                // GC is highly effective — halve the step to collect sooner
+                mstep = (mstep / 2).max(GC_MALLOC_COUNT_STEP_MIN);
+            }
+            // 50-90% freed: keep current step (balanced)
+            GC_MALLOC_COUNT_STEP.with(|c| c.set(mstep));
+        }
+        GC_NEXT_MALLOC_TRIGGER.with(|c| c.set(survivors + mstep));
     }
 }
 

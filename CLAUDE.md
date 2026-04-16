@@ -8,22 +8,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.60
+**Current Version:** 0.5.61
 
 ## TypeScript Parity Status
 
 Tracked via the gap test suite (`test-files/test_gap_*.ts`, 22 tests). Compared byte-for-byte against `node --experimental-strip-types`. Run via `/tmp/run_gap_tests.sh` after `cargo build --release -p perry-runtime -p perry-stdlib -p perry`.
 
-**Last sweep:** **8/22 passing**, **347 total diff lines**.
+**Last sweep:** **14/28 passing**, **117 total diff lines**.
 
 | Status | Test | Diffs |
 |--------|------|-------|
-| ✅ PASS | `date_methods`, `encoding_timers`, `error_extensions`, `fetch_response`, `json_advanced`, `node_path`, `node_process`, `weakref_finalization` | 0 |
-| 🟡 close | `regexp_advanced` (2), `generators` (3), `number_math` (4), `string_methods` (2) | 2–4 |
-| 🟡 mid | `class_advanced` (18), `proxy_reflect` (27, segfault), `object_methods` (28), `node_fs` (30), `global_apis` (30) | 18–30 |
-| 🔴 work | `symbols` (31, segfault), `async_advanced` (35, segfault), `console_methods` (40), `array_methods` (45), `node_crypto_buffer` (46) | 31–46 |
+| ✅ PASS | `array_methods`, `bigint`, `buffer_ops`, `closures`, `date_methods`, `error_extensions`, `fetch_response`, `generators`, `json_advanced`, `number_math`, `object_methods`, `proxy_reflect`, `regexp_advanced`, `symbols` | 0 |
+| 🟡 close | `async_advanced` (4), `encoding_timers` (4), `node_crypto_buffer` (4), `node_fs` (4), `node_path` (4), `node_process` (4), `typeof_instanceof` (4), `weakref_finalization` (4) | 4 |
+| 🟡 mid | `map_set_extended` (6), `string_methods` (8), `typed_arrays` (12), `class_advanced` (14) | 6–14 |
+| 🔴 work | `global_apis` (22), `console_methods` (23) | 22–23 |
 
-**Known categorical gaps**: lookbehind regex (Rust `regex` crate), `Proxy`/`Reflect`, `Symbol(...)`, `Object.getPrototypeOf` sentinel, `console.dir`/`console.group*` formatting, lone surrogate handling (WTF-8).
+**Known categorical gaps**: lookbehind regex (Rust `regex` crate), `console.dir`/`console.group*` formatting, lone surrogate handling (WTF-8).
 
 ## Workflow Requirements
 
@@ -150,6 +150,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.61** — Adaptive GC malloc-count step + fused string-number concat (closes #58). GC malloc-count trigger now backs off when collection is ineffective (<15% freed → 4× step, <50% → 2× step), preventing useless GC cycles during tight allocation loops where conservative stack scanning keeps everything alive. Fused `js_string_concat_value`/`js_value_concat_string` eliminates intermediate string allocation for `"str" + number` patterns. **Object+string alloc loop: 1012ms→148ms (6.8× faster, ~10× Node 15ms). Was 218× slower at v0.5.44**.
 - **v0.5.60** — Math.imul polyfill detection + unsigned i32 locals (`>>> 0` seeding). Phase 0 in inline pass detects `imul32`-like polyfills (2-param, half-word decomposition, `| 0` return) and rewrites calls to `MathImul(a, b)` → single `mul i32`. `collect_integer_let_ids` now seeds `>>> 0` mutable inits; i32 slot init uses `fptosi→i64 + trunc→i32` to safely handle unsigned values exceeding INT32_MAX. **FNV: 60ms→37ms (1.6×), input gen: 123ms→24ms (5.1×). Total: 480ms→375ms (1.57× Zig, was 2.2×)**.
 - **v0.5.60** — GC suppression during JSON.parse (issue #59). `gc_suppress`/`gc_unsuppress` flag skips `gc_check_trigger` during parse; `gc_bump_malloc_trigger` rebaselines the threshold post-parse so freshly-created objects don't trip immediate collection. Clears PARSE_KEY_CACHE after each parse (correctness: dangling pointers). **JSON.parse 50×10k: 3250ms→143ms (22× faster, ~1.1× Node 122ms). Roundtrip: 21254ms→241ms (88× faster, 1.5× Node 157ms). Peak RSS: 842MB→254MB (3.3× less)**.
 - **v0.5.59** — Pure-function HIR inlining in init context + broader integer-local seeding. Phase 4 of the inline pass now inlines standalone pure functions (no module-global refs) into module init — `imul32` polyfill body exposed to i32 analysis. `collect_integer_let_ids` seeds immutable bitwise Lets and mutable `|0` Lets. Multi-statement `[Let*, Return(expr)]` functions now inline at expression level with setup-stmt hoisting. **FNV: 380ms→60ms (6.3× faster). image_conv total: 800ms→490ms (1.6× faster, 2.2× Zig)**.

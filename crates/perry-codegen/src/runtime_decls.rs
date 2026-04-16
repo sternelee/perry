@@ -77,6 +77,13 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // raw string handle (`crates/perry-runtime/src/value.rs:813`).
     module.declare_function("js_jsvalue_to_string", I64, &[DOUBLE]);
 
+    // Fused string+value concat (issue #58): collapses js_jsvalue_to_string +
+    // js_string_concat into a single allocation for number operands.
+    // `js_string_concat_value(prefix_handle, value_f64) -> handle`
+    // `js_value_concat_string(value_f64, suffix_handle) -> handle`
+    module.declare_function("js_string_concat_value", I64, &[I64, DOUBLE]);
+    module.declare_function("js_value_concat_string", I64, &[DOUBLE, I64]);
+
     // In-place append for the `x = x + y` pattern. When `x` has
     // refcount=1 (unique owner), the runtime mutates in-place and
     // returns the same pointer; otherwise it allocates a new string.

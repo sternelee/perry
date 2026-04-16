@@ -342,6 +342,194 @@ pub extern "C" fn js_string_concat(a: *const StringHeader, b: *const StringHeade
     }
 }
 
+/// Fused string + NaN-boxed value concatenation (issue #58).
+///
+/// `"item_" + i` currently requires two gc_malloc calls:
+///   1. `js_jsvalue_to_string(i)` → intermediate StringHeader
+///   2. `js_string_concat(prefix, intermediate)` → result StringHeader
+///
+/// This function collapses both into a single allocation when the value
+/// is a number (the common case for `"str" + i` patterns in loops).
+/// For non-number values, it falls back to js_jsvalue_to_string + concat.
+///
+/// The number formatting uses `itoa` for integers and a stack buffer for
+/// `format!`, eliminating the Rust heap allocation from `format!()`.
+#[no_mangle]
+pub extern "C" fn js_string_concat_value(
+    prefix: *const StringHeader,
+    value: f64,
+) -> *mut StringHeader {
+    let prefix_blen = if is_valid_string_ptr(prefix) { unsafe { (*prefix).byte_len } } else { 0 };
+    let prefix_u16 = if is_valid_string_ptr(prefix) { unsafe { (*prefix).utf16_len } } else { 0 };
+
+    // Fast path: value is a number (no NaN-boxing tag in upper 16 bits → plain f64).
+    // This covers the hot `"item_" + i` pattern.
+    let bits = value.to_bits();
+    let tag = bits >> 48;
+    let is_plain_f64 = tag < 0x7FF8 || (tag == 0x7FF8 && (bits & 0x000F_FFFF_FFFF_FFFF) == 0);
+
+    if is_plain_f64 {
+        // Format the number into a stack buffer
+        let mut num_buf = [0u8; 32]; // max f64 string is ~24 chars
+        let num_len: usize;
+
+        if value.fract() == 0.0 && value.abs() < 1e15 && !value.is_nan() && !value.is_infinite() {
+            // Integer path: format directly without Rust heap allocation
+            let n = value as i64;
+            if n >= 0 && n <= 999_999_999 {
+                // Fast itoa for common positive integers
+                num_len = fast_itoa_u32(n as u32, &mut num_buf);
+            } else {
+                let s = format!("{}", n);
+                let len = s.len().min(num_buf.len());
+                num_buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+                num_len = len;
+            }
+        } else if value.is_nan() {
+            num_buf[..3].copy_from_slice(b"NaN");
+            num_len = 3;
+        } else if value.is_infinite() {
+            if value > 0.0 {
+                num_buf[..8].copy_from_slice(b"Infinity");
+                num_len = 8;
+            } else {
+                num_buf[..9].copy_from_slice(b"-Infinity");
+                num_len = 9;
+            }
+        } else if value == 0.0 {
+            num_buf[0] = b'0';
+            num_len = 1;
+        } else {
+            let s = format!("{}", value);
+            let len = s.len().min(num_buf.len());
+            num_buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+            num_len = len;
+        }
+
+        // Single allocation for prefix + number string
+        let total_blen = prefix_blen as usize + num_len;
+        let total_size = std::mem::size_of::<StringHeader>() + total_blen;
+        let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+        let ptr = raw as *mut StringHeader;
+
+        unsafe {
+            // Both prefix and number digits are ASCII, so utf16_len == byte_len for the number part
+            (*ptr).utf16_len = prefix_u16 + num_len as u32;
+            (*ptr).byte_len = total_blen as u32;
+            (*ptr).capacity = total_blen as u32;
+            (*ptr).refcount = 0;
+
+            let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
+            if is_valid_string_ptr(prefix) && prefix_blen > 0 {
+                ptr::copy_nonoverlapping(string_data(prefix), data_ptr, prefix_blen as usize);
+            }
+            ptr::copy_nonoverlapping(num_buf.as_ptr(), data_ptr.add(prefix_blen as usize), num_len);
+        }
+
+        return ptr;
+    }
+
+    // Slow path: non-number value — fall back to js_jsvalue_to_string + js_string_concat
+    let value_str = crate::value::js_jsvalue_to_string(value);
+    js_string_concat(prefix, value_str)
+}
+
+/// Fused value + string concatenation (value on the LEFT, string on the RIGHT).
+/// Handles the `i + "_suffix"` pattern.
+#[no_mangle]
+pub extern "C" fn js_value_concat_string(
+    value: f64,
+    suffix: *const StringHeader,
+) -> *mut StringHeader {
+    let suffix_blen = if is_valid_string_ptr(suffix) { unsafe { (*suffix).byte_len } } else { 0 };
+    let suffix_u16 = if is_valid_string_ptr(suffix) { unsafe { (*suffix).utf16_len } } else { 0 };
+
+    let bits = value.to_bits();
+    let tag = bits >> 48;
+    let is_plain_f64 = tag < 0x7FF8 || (tag == 0x7FF8 && (bits & 0x000F_FFFF_FFFF_FFFF) == 0);
+
+    if is_plain_f64 {
+        let mut num_buf = [0u8; 32];
+        let num_len: usize;
+
+        if value.fract() == 0.0 && value.abs() < 1e15 && !value.is_nan() && !value.is_infinite() {
+            let n = value as i64;
+            if n >= 0 && n <= 999_999_999 {
+                num_len = fast_itoa_u32(n as u32, &mut num_buf);
+            } else {
+                let s = format!("{}", n);
+                let len = s.len().min(num_buf.len());
+                num_buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+                num_len = len;
+            }
+        } else if value.is_nan() {
+            num_buf[..3].copy_from_slice(b"NaN");
+            num_len = 3;
+        } else if value.is_infinite() {
+            if value > 0.0 {
+                num_buf[..8].copy_from_slice(b"Infinity");
+                num_len = 8;
+            } else {
+                num_buf[..9].copy_from_slice(b"-Infinity");
+                num_len = 9;
+            }
+        } else if value == 0.0 {
+            num_buf[0] = b'0';
+            num_len = 1;
+        } else {
+            let s = format!("{}", value);
+            let len = s.len().min(num_buf.len());
+            num_buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+            num_len = len;
+        }
+
+        let total_blen = num_len + suffix_blen as usize;
+        let total_size = std::mem::size_of::<StringHeader>() + total_blen;
+        let raw = crate::gc::gc_malloc(total_size, crate::gc::GC_TYPE_STRING);
+        let ptr = raw as *mut StringHeader;
+
+        unsafe {
+            (*ptr).utf16_len = num_len as u32 + suffix_u16;
+            (*ptr).byte_len = total_blen as u32;
+            (*ptr).capacity = total_blen as u32;
+            (*ptr).refcount = 0;
+
+            let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
+            ptr::copy_nonoverlapping(num_buf.as_ptr(), data_ptr, num_len);
+            if is_valid_string_ptr(suffix) && suffix_blen > 0 {
+                ptr::copy_nonoverlapping(string_data(suffix), data_ptr.add(num_len), suffix_blen as usize);
+            }
+        }
+
+        return ptr;
+    }
+
+    let value_str = crate::value::js_jsvalue_to_string(value);
+    js_string_concat(value_str, suffix)
+}
+
+/// Fast integer-to-ASCII formatting into a provided buffer.
+/// Returns the number of bytes written. Digits are written to the END
+/// of the buffer and then shifted to the front.
+#[inline]
+fn fast_itoa_u32(mut n: u32, buf: &mut [u8; 32]) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+    let mut pos = 31usize;
+    while n > 0 {
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        pos -= 1;
+    }
+    let start = pos + 1;
+    let len = 32 - start;
+    // Shift digits to front
+    buf.copy_within(start..32, 0);
+    len
+}
+
 /// Cached small-integer string table (0..=255). Initialized lazily on
 /// first access. Avoids gc_malloc + format! for commonly repeated
 /// number-to-string conversions (loop counters, property name suffixes).

@@ -633,19 +633,40 @@ pub(crate) fn lower_string_coerce_concat(
     let r_box = lower_expr(ctx, right)?;
     let blk = ctx.block();
 
-    let l_handle = if l_is_string {
-        let bits = blk.bitcast_double_to_i64(&l_box);
-        blk.and(I64, &bits, POINTER_MASK_I64)
-    } else {
-        blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &l_box)])
-    };
+    // Issue #58: fused string+value concat — when one side is a string
+    // and the other is not, use the fused runtime call that collapses
+    // js_jsvalue_to_string + js_string_concat into a single allocation
+    // for number operands (the common `"item_" + i` pattern).
+    if l_is_string && !r_is_string {
+        let l_handle = {
+            let bits = blk.bitcast_double_to_i64(&l_box);
+            blk.and(I64, &bits, POINTER_MASK_I64)
+        };
+        let result_handle = blk.call(
+            I64,
+            "js_string_concat_value",
+            &[(I64, &l_handle), (DOUBLE, &r_box)],
+        );
+        return Ok(nanbox_string_inline(blk, &result_handle));
+    }
 
-    let r_handle = if r_is_string {
-        let bits = blk.bitcast_double_to_i64(&r_box);
-        blk.and(I64, &bits, POINTER_MASK_I64)
-    } else {
-        blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &r_box)])
-    };
+    if !l_is_string && r_is_string {
+        let r_handle = {
+            let bits = blk.bitcast_double_to_i64(&r_box);
+            blk.and(I64, &bits, POINTER_MASK_I64)
+        };
+        let result_handle = blk.call(
+            I64,
+            "js_value_concat_string",
+            &[(DOUBLE, &l_box), (I64, &r_handle)],
+        );
+        return Ok(nanbox_string_inline(blk, &result_handle));
+    }
+
+    // Both non-string (shouldn't normally reach here) — fall back to
+    // the generic path.
+    let l_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &l_box)]);
+    let r_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &r_box)]);
 
     let result_handle = blk.call(
         I64,
