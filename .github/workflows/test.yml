@@ -1,0 +1,245 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build compiler + runtime once, cache for downstream jobs
+  # ---------------------------------------------------------------------------
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release (runtime + stdlib + compiler)
+        run: cargo build --release
+
+      - name: Upload built binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: perry-binaries
+          path: |
+            target/release/perry
+            target/release/libperry_runtime.a
+            target/release/libperry_stdlib.a
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Rust unit tests (266+ tests across all crates)
+  # ---------------------------------------------------------------------------
+  cargo-test:
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run cargo test
+        run: cargo test --workspace --exclude perry-ui-ios
+
+  # ---------------------------------------------------------------------------
+  # Parity tests (Perry output vs Node.js)
+  # ---------------------------------------------------------------------------
+  parity:
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build compiler
+        run: cargo build --release
+
+      - name: Run parity tests
+        run: ./run_parity_tests.sh
+
+      - name: Check parity threshold
+        run: |
+          REPORT="test-parity/reports/latest.json"
+          THRESHOLD_FILE="test-parity/threshold.json"
+
+          if [[ ! -f "$REPORT" ]]; then
+            echo "No parity report found"
+            exit 1
+          fi
+
+          ACTUAL=$(python3 -c "import json; print(json.load(open('$REPORT'))['summary']['parity_percentage'])")
+          MIN=$(python3 -c "import json; print(json.load(open('$THRESHOLD_FILE'))['min_parity_pct'])")
+
+          echo "Parity: ${ACTUAL}% (threshold: ${MIN}%)"
+
+          python3 -c "
+import sys
+actual, minimum = float('$ACTUAL'), float('$MIN')
+if actual < minimum:
+    print(f'FAIL: Parity {actual}% is below threshold {minimum}%')
+    sys.exit(1)
+print(f'OK: Parity {actual}% meets threshold {minimum}%')
+"
+
+      - name: Check for new failures
+        run: |
+          REPORT="test-parity/reports/latest.json"
+          KNOWN="test-parity/known_failures.json"
+
+          python3 -c "
+import json, sys
+report = json.load(open('$REPORT'))
+known = json.load(open('$KNOWN')) if __import__('os').path.exists('$KNOWN') else {}
+parity_fails = report['failures'].get('parity', [])
+compile_fails = report['failures'].get('compile', [])
+all_fails = parity_fails + compile_fails
+new_failures = [f for f in all_fails if f not in known]
+if new_failures:
+    print('NEW FAILURES (not in known_failures.json):')
+    for f in new_failures:
+        print(f'  - {f}')
+    sys.exit(1)
+else:
+    print(f'All {len(all_fails)} failures are known/triaged.')
+"
+
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report
+          path: test-parity/reports/latest.json
+
+  # ---------------------------------------------------------------------------
+  # Compile smoke test (all 130+ test files must compile)
+  # ---------------------------------------------------------------------------
+  compile-smoke:
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build compiler
+        run: cargo build --release
+
+      - name: Compile all test files
+        run: |
+          PERRY="target/release/perry"
+          PASS=0
+          FAIL=0
+          FAILURES=()
+
+          for f in test-files/*.ts; do
+            [[ -d "$f" ]] && continue
+            name=$(basename "$f" .ts)
+            if $PERRY "$f" -o "/tmp/perry_smoke_${name}" 2>/dev/null; then
+              ((PASS++))
+              rm -f "/tmp/perry_smoke_${name}"
+            else
+              ((FAIL++))
+              FAILURES+=("$name")
+            fi
+          done
+
+          echo "Compile smoke: $PASS passed, $FAIL failed"
+
+          if [[ $FAIL -gt 0 ]]; then
+            echo "Compile failures:"
+            for f in "${FAILURES[@]}"; do
+              echo "  - $f"
+            done
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Binary size tracking (main branch only)
+  # ---------------------------------------------------------------------------
+  binary-size:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-14
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: perry-binaries
+          path: target/release/
+
+      - name: Report binary sizes
+        run: |
+          echo "## Binary Sizes" > /tmp/sizes.md
+          echo '```' >> /tmp/sizes.md
+          ls -lh target/release/perry target/release/libperry_runtime.a target/release/libperry_stdlib.a 2>/dev/null | awk '{print $5, $9}' >> /tmp/sizes.md
+          echo '```' >> /tmp/sizes.md
+          cat /tmp/sizes.md
+
+      - name: Upload size report
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-sizes
+          path: /tmp/sizes.md

@@ -1,0 +1,74 @@
+{
+  "test_edge_class_advanced": {
+    "status": "known_limitation",
+    "reason": "Advanced class features: private methods, static blocks not fully implemented"
+  },
+  "test_edge_classes": {
+    "status": "bug",
+    "reason": "Class edge cases: getter/setter or inheritance dispatch issues"
+  },
+  "test_edge_complex_patterns": {
+    "status": "bug",
+    "reason": "Complex pattern matching edge cases in destructuring/spread"
+  },
+  "test_edge_generics": {
+    "status": "bug",
+    "reason": "Generic type instantiation edge cases"
+  },
+  "test_edge_interfaces": {
+    "status": "bug",
+    "reason": "Interface implementation edge cases"
+  },
+  "test_gap_async_advanced": {
+    "status": "known_limitation",
+    "reason": "Async generators, for-await-of, Promise.allSettled not implemented (segfault)"
+  },
+  "test_gap_class_advanced": {
+    "status": "known_limitation",
+    "reason": "Private methods, static blocks not implemented"
+  },
+  "test_gap_console_methods": {
+    "status": "known_limitation",
+    "reason": "console.dir formatting, console.group indent, console.table differences"
+  },
+  "test_gap_global_apis": {
+    "status": "known_limitation",
+    "reason": "Missing global APIs: URL/Blob/AbortController extensions"
+  },
+  "test_gap_string_methods": {
+    "status": "known_limitation",
+    "reason": "Lone surrogate handling (isWellFormed/toWellFormed needs WTF-8)"
+  },
+  "test_getters_setters": {
+    "status": "bug",
+    "reason": "Getter/setter dispatch issues in some patterns"
+  },
+  "test_method_inherit": {
+    "status": "bug",
+    "reason": "Method inheritance dispatch edge cases"
+  },
+  "test_net_min": {
+    "status": "skip",
+    "reason": "Requires live network socket"
+  },
+  "test_net_socket": {
+    "status": "skip",
+    "reason": "Requires live network socket"
+  },
+  "test_net_upgrade_tls": {
+    "status": "skip",
+    "reason": "Requires TLS/network infrastructure"
+  },
+  "test_perf_paths": {
+    "status": "bug",
+    "reason": "Performance path optimization edge case"
+  },
+  "test_super_calls": {
+    "status": "bug",
+    "reason": "Super call dispatch in deep inheritance chains"
+  },
+  "test_tls_connect": {
+    "status": "skip",
+    "reason": "Compile failure — TLS connect not implemented"
+  }
+}

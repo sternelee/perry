@@ -1,0 +1,45 @@
+{
+  "commit": "fb7f456",
+  "generated_at": "2026-04-16T07:21:26Z",
+  "benchmarks": {
+    "02_loop_overhead": {
+      "perry_ms": 0,
+      "perry_rss_kb": 1872,
+      "node_ms": 62,
+      "node_rss_kb": 34113,
+      "memory_ratio": 0.055
+    },
+    "05_fibonacci": {
+      "perry_ms": 350,
+      "perry_rss_kb": 1888,
+      "node_ms": 1138,
+      "node_rss_kb": 36513,
+      "speed_ratio": 0.308,
+      "memory_ratio": 0.052
+    },
+    "06_math_intensive": {
+      "perry_ms": 16,
+      "perry_rss_kb": 1888,
+      "node_ms": 67,
+      "node_rss_kb": 36642,
+      "speed_ratio": 0.239,
+      "memory_ratio": 0.052
+    },
+    "10_nested_loops": {
+      "perry_ms": 9,
+      "perry_rss_kb": 1936,
+      "node_ms": 22,
+      "node_rss_kb": 36817,
+      "speed_ratio": 0.409,
+      "memory_ratio": 0.053
+    },
+    "13_factorial": {
+      "perry_ms": 38,
+      "perry_rss_kb": 1872,
+      "node_ms": 729,
+      "node_rss_kb": 35970,
+      "speed_ratio": 0.052,
+      "memory_ratio": 0.052
+    }
+  }
+}
