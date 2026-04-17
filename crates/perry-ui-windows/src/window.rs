@@ -3,12 +3,24 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+fn debug_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("perry_window_debug.log") {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 thread_local! {
     #[cfg(target_os = "windows")]
     static WINDOWS: RefCell<HashMap<i64, windows::Win32::Foundation::HWND>> = RefCell::new(HashMap::new());
     #[cfg(not(target_os = "windows"))]
     static WINDOWS: RefCell<HashMap<i64, isize>> = RefCell::new(HashMap::new());
     static NEXT_WINDOW_ID: RefCell<i64> = RefCell::new(1);
+    /// Maps window id → root widget handle so we can re-layout on resize.
+    static WINDOW_ROOTS: RefCell<HashMap<i64, i64>> = RefCell::new(HashMap::new());
+    /// Reverse map: HWND (as isize) → window id, for the wndproc.
+    #[cfg(target_os = "windows")]
+    static HWND_TO_WINDOW: RefCell<HashMap<isize, i64>> = RefCell::new(HashMap::new());
 }
 
 fn str_from_header(ptr: *const u8) -> &'static str {
@@ -33,7 +45,51 @@ unsafe extern "system" fn window_default_wnd_proc(
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam)
+    use windows::Win32::Foundation::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    match msg {
+        WM_SIZE => {
+            let width = (lparam.0 & 0xFFFF) as i32;
+            let height = ((lparam.0 >> 16) & 0xFFFF) as i32;
+            let window_id = HWND_TO_WINDOW.with(|m| m.borrow().get(&(hwnd.0 as isize)).copied());
+            if let Some(wid) = window_id {
+                let root = WINDOW_ROOTS.with(|m| m.borrow().get(&wid).copied());
+                if let Some(root_handle) = root {
+                    if let Some(child_hwnd) = crate::widgets::get_hwnd(root_handle) {
+                        let _ = MoveWindow(child_hwnd, 0, 0, width, height, true);
+                        crate::layout::layout_widget(root_handle, width, height);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_COMMAND => {
+            let control_id = (wparam.0 & 0xFFFF) as u16;
+            let notify_code = ((wparam.0 >> 16) & 0xFFFF) as u16;
+            crate::widgets::handle_command(control_id, notify_code, lparam);
+            LRESULT(0)
+        }
+        WM_CTLCOLORSTATIC => {
+            use windows::Win32::Graphics::Gdi::HDC;
+            let hdc = HDC(wparam.0 as *mut _);
+            let child_hwnd = HWND(lparam.0 as *mut _);
+            if let Some(result) = crate::widgets::text::handle_ctlcolor(hdc, child_hwnd) {
+                return result;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        x if x == 0x0133 /* WM_CTLCOLOREDIT */ => {
+            use windows::Win32::Graphics::Gdi::HDC;
+            let hdc = HDC(wparam.0 as *mut _);
+            let child_hwnd = HWND(lparam.0 as *mut _);
+            if let Some(result) = crate::widgets::text::handle_ctlcolor(hdc, child_hwnd) {
+                return result;
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 /// Create a new window.
@@ -82,6 +138,7 @@ pub fn create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
                 None,
             ).unwrap();
 
+            HWND_TO_WINDOW.with(|m| m.borrow_mut().insert(hwnd.0 as isize, id));
             WINDOWS.with(|w| w.borrow_mut().insert(id, hwnd));
         }
     }
@@ -97,8 +154,12 @@ pub fn create(title_ptr: *const u8, width: f64, height: f64) -> i64 {
 
 /// Set the body (root widget) of a window.
 pub fn set_body(window_handle: i64, widget_handle: i64) {
+    debug_log(&format!("[perry-window] set_body: window={} widget={}", window_handle, widget_handle));
+    WINDOW_ROOTS.with(|m| m.borrow_mut().insert(window_handle, widget_handle));
+
     #[cfg(target_os = "windows")]
     {
+        use windows::Win32::Foundation::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
         WINDOWS.with(|w| {
             if let Some(parent_hwnd) = w.borrow().get(&window_handle) {
@@ -107,8 +168,18 @@ pub fn set_body(window_handle: i64, widget_handle: i64) {
                         let _ = SetParent(child_hwnd, *parent_hwnd);
                         let style = GetWindowLongW(child_hwnd, GWL_STYLE) as u32;
                         SetWindowLongW(child_hwnd, GWL_STYLE, (style | WS_CHILD.0) as i32);
+                        // Trigger initial layout (mirrors app_set_body)
+                        let mut rect = RECT::default();
+                        let _ = GetClientRect(*parent_hwnd, &mut rect);
+                        debug_log(&format!("[perry-window] set_body layout: rect={}x{} hwnd={:?}", rect.right, rect.bottom, parent_hwnd));
+                        let _ = MoveWindow(child_hwnd, 0, 0, rect.right, rect.bottom, true);
+                        crate::layout::layout_widget(widget_handle, rect.right, rect.bottom);
                     }
+                } else {
+                    debug_log(&format!("[perry-window] set_body: no child hwnd for widget {}", widget_handle));
                 }
+            } else {
+                debug_log(&format!("[perry-window] set_body: no parent hwnd for window {}", window_handle));
             }
         });
     }
@@ -120,12 +191,25 @@ pub fn set_body(window_handle: i64, widget_handle: i64) {
 pub fn show(window_handle: i64) {
     #[cfg(target_os = "windows")]
     {
+        use windows::Win32::Foundation::*;
         use windows::Win32::UI::WindowsAndMessaging::*;
         use windows::Win32::Graphics::Gdi::UpdateWindow;
         WINDOWS.with(|w| {
             if let Some(hwnd) = w.borrow().get(&window_handle) {
                 unsafe {
                     let _ = ShowWindow(*hwnd, SW_SHOW);
+                    // Re-layout in case set_body was called before the window was visible
+                    let root = WINDOW_ROOTS.with(|m| m.borrow().get(&window_handle).copied());
+                    debug_log(&format!("[perry-window] show: window={} root={:?}", window_handle, root));
+                    if let Some(root_handle) = root {
+                        if let Some(child_hwnd) = crate::widgets::get_hwnd(root_handle) {
+                            let mut rect = RECT::default();
+                            let _ = GetClientRect(*hwnd, &mut rect);
+                            debug_log(&format!("[perry-window] show layout: rect={}x{}", rect.right, rect.bottom));
+                            let _ = MoveWindow(child_hwnd, 0, 0, rect.right, rect.bottom, true);
+                            crate::layout::layout_widget(root_handle, rect.right, rect.bottom);
+                        }
+                    }
                     let _ = UpdateWindow(*hwnd);
                 }
             }

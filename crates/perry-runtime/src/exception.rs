@@ -8,6 +8,7 @@
 // macOS ARM64: _JBLEN = 48 (48 * 4 = 192 bytes)
 // macOS x86_64: _JBLEN = 37 (37 * 4 = 148 bytes, but aligned to 156)
 // Linux x86_64: __jmp_buf is 8 * i64 = 64 bytes
+// Windows MSVC x86_64: _JBLEN = 16 doubles = 256 bytes
 // We use a conservative size that works for all
 const JMP_BUF_SIZE: usize = 64; // 64 * i32 = 256 bytes, enough for any platform
 

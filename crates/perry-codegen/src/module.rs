@@ -28,6 +28,9 @@ pub struct LlModule {
     /// noalias sets so LLVM's LoopVectorizer can prove different buffers
     /// don't alias.
     metadata_lines: Vec<String>,
+    /// Module-wide counter for inline cache globals (`perry_ic_N`).
+    /// Must be unique across all functions in the module.
+    pub ic_counter: u32,
 }
 
 impl LlModule {
@@ -41,6 +44,7 @@ impl LlModule {
             string_constants: Vec::new(),
             string_counter: 0,
             metadata_lines: Vec::new(),
+            ic_counter: 0,
         }
     }
 
@@ -65,7 +69,7 @@ impl LlModule {
         // the setjmp boundary. Without it, local variables modified
         // between setjmp and longjmp are clobbered when the second
         // return (via longjmp) happens.
-        let attrs = if name == "setjmp" { " #0" } else { "" };
+        let attrs = if name == "setjmp" || name == "_setjmp" { " #0" } else { "" };
         self.declarations.push((
             name.to_string(),
             format!("declare {} @{}({}){}", return_type, name, param_str, attrs),

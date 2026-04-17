@@ -677,7 +677,12 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // js_has_exception() returns i32 (1 if exception is active, 0 otherwise).
     // js_enter_finally() / js_leave_finally() bracket finally blocks.
     module.declare_function("js_try_push", PTR, &[]);
-    module.declare_function("setjmp", I32, &[PTR]);
+    // Windows MSVC uses _setjmp(buf, frame_ptr); Unix uses setjmp(buf).
+    if cfg!(target_os = "windows") {
+        module.declare_function("_setjmp", I32, &[PTR, PTR]);
+    } else {
+        module.declare_function("setjmp", I32, &[PTR]);
+    }
     module.declare_function("js_try_end", VOID, &[]);
     module.declare_function("js_get_exception", DOUBLE, &[]);
     module.declare_function("js_clear_exception", VOID, &[]);

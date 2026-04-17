@@ -1444,6 +1444,7 @@ fn compile_function(
         .map(|p| (DOUBLE, format!("%arg{}", p.id)))
         .collect();
 
+    let ic_base = llmod.ic_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     // Small leaf functions (≤ 8 statements) get alwaysinline so LLVM
     // exposes their operations to the caller's optimizer context — critical
@@ -1555,7 +1556,7 @@ fn compile_function(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
     };
@@ -1578,8 +1579,10 @@ fn compile_function(
         }
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx); // releases &mut LlFunction borrow on llmod
+    llmod.ic_counter = ic_end;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }
@@ -1647,6 +1650,7 @@ fn compile_closure(
         llvm_params.push((DOUBLE, format!("%arg{}", p.id)));
     }
 
+    let ic_base = llmod.ic_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, llvm_params);
     let _ = lf.create_block("entry");
 
@@ -1817,7 +1821,7 @@ fn compile_closure(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
     };
@@ -1829,8 +1833,10 @@ fn compile_closure(
         ctx.block().ret(DOUBLE, "0.0");
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
+    llmod.ic_counter = ic_end;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }
@@ -1882,6 +1888,7 @@ fn compile_method(
         params.push((DOUBLE, format!("%arg{}", p.id)));
     }
 
+    let ic_base = llmod.ic_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     let _ = lf.create_block("entry");
 
@@ -1976,7 +1983,7 @@ fn compile_method(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
     };
@@ -2000,8 +2007,10 @@ fn compile_method(
         ctx.block().ret(DOUBLE, "0.0");
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
+    llmod.ic_counter = ic_end;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }
@@ -2067,6 +2076,7 @@ fn compile_module_entry(
         // root registration), and run top-level statements. Without this,
         // module-level Maps/Arrays would never be registered as GC roots
         // and the first GC cycle after connect() would free them (issue #54).
+        let ic_base = llmod.ic_counter;
         let main = if is_dylib {
             llmod.define_function("perry_module_init", VOID, vec![])
         } else {
@@ -2159,7 +2169,7 @@ fn compile_module_entry(
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
         };
@@ -2248,9 +2258,11 @@ fn compile_module_entry(
             }
         }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+        let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
         let buffer_alias_count = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
+        llmod.ic_counter = ic_end;
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
@@ -2269,6 +2281,7 @@ fn compile_module_entry(
         } else {
             None
         };
+        let ic_base = llmod.ic_counter;
         let init_fn = llmod.define_function(&init_name, VOID, vec![]);
         let _ = init_fn.create_block("entry");
         {
@@ -2353,7 +2366,7 @@ fn compile_module_entry(
             array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
         };
@@ -2372,9 +2385,11 @@ fn compile_module_entry(
             ctx.block().ret_void();
         }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+        let ic_end = ctx.ic_site_counter;
         let pending = std::mem::take(&mut ctx.pending_declares);
         let buffer_alias_count = ctx.buffer_data_slots.len() as u32;
         drop(ctx);
+        llmod.ic_counter = ic_end;
         for (name, ret, params) in pending {
             llmod.declare_function(&name, ret, &params);
         }
@@ -2610,6 +2625,7 @@ fn compile_static_method(
         .map(|p| (DOUBLE, format!("%arg{}", p.id)))
         .collect();
 
+    let ic_base = llmod.ic_counter;
     let lf = llmod.define_function(&llvm_name, DOUBLE, params);
     let _ = lf.create_block("entry");
 
@@ -2701,7 +2717,7 @@ fn compile_static_method(
         array_row_aliases: HashMap::new(),
         clamp3_functions: &cross_module.clamp3_functions,
         clamp_u8_functions: &cross_module.clamp_u8_functions,
-        ic_site_counter: 0,
+        ic_site_counter: ic_base,
         ic_globals: Vec::new(),
         buffer_data_slots: HashMap::new(),
     };
@@ -2719,8 +2735,10 @@ fn compile_static_method(
         }
     }
     let ic_globals = std::mem::take(&mut ctx.ic_globals);
+    let ic_end = ctx.ic_site_counter;
     let pending = std::mem::take(&mut ctx.pending_declares);
     drop(ctx);
+    llmod.ic_counter = ic_end;
     for (name, ret, params) in pending {
         llmod.declare_function(&name, ret, &params);
     }

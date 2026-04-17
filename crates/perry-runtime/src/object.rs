@@ -844,52 +844,57 @@ unsafe fn call_vtable_method(
         if idx < args_len { *args_ptr.add(idx) } else { f64::NAN }
     }
 
+    // LLVM-generated methods have signature `double(double this, double arg0, ...)`.
+    // `this` is NaN-boxed as f64, so we must pass it as f64 — not i64 — to match
+    // the calling convention. On ARM64 i64 and f64 share registers, so passing i64
+    // works by accident; on Windows x64 ABI they use *different* registers (rcx vs
+    // xmm0), causing segfaults when the method reads `this` from the wrong register.
+    let this_f64: f64 = f64::from_bits(this as u64);
+
     match param_count {
         0 => {
-            let f: extern "C" fn(i64) -> f64 = std::mem::transmute(func_ptr);
-            let result = f(this);
-            // eprintln!("[vtable_call] func=0x{:x} this=0x{:x} pc=0 result_bits=0x{:016x} result_f64={}", func_ptr, this, result.to_bits(), result);
-            result
+            let f: extern "C" fn(f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64)
         }
         1 => {
-            let f: extern "C" fn(i64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0))
+            let f: extern "C" fn(f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0))
         }
         2 => {
-            let f: extern "C" fn(i64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1))
+            let f: extern "C" fn(f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1))
         }
         3 => {
-            let f: extern "C" fn(i64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2))
+            let f: extern "C" fn(f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2))
         }
         4 => {
-            let f: extern "C" fn(i64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3))
+            let f: extern "C" fn(f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3))
         }
         5 => {
-            let f: extern "C" fn(i64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4))
+            let f: extern "C" fn(f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4))
         }
         6 => {
-            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5))
+            let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5))
         }
         7 => {
-            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6))
+            let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6))
         }
         8 => {
-            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7))
+            let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7))
         }
         9 => {
-            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7), arg_or_nan(args_ptr, args_len, 8))
+            let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7), arg_or_nan(args_ptr, args_len, 8))
         }
         _ => {
-            let f: extern "C" fn(i64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
-            f(this, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7), arg_or_nan(args_ptr, args_len, 8), arg_or_nan(args_ptr, args_len, 9))
+            let f: extern "C" fn(f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64) -> f64 = std::mem::transmute(func_ptr);
+            f(this_f64, arg_or_nan(args_ptr, args_len, 0), arg_or_nan(args_ptr, args_len, 1), arg_or_nan(args_ptr, args_len, 2), arg_or_nan(args_ptr, args_len, 3), arg_or_nan(args_ptr, args_len, 4), arg_or_nan(args_ptr, args_len, 5), arg_or_nan(args_ptr, args_len, 6), arg_or_nan(args_ptr, args_len, 7), arg_or_nan(args_ptr, args_len, 8), arg_or_nan(args_ptr, args_len, 9))
         }
     }
 }
@@ -933,13 +938,17 @@ fn get_parent_class_id(class_id: u32) -> Option<u32> {
 }
 
 /// Check if a pointer is a valid heap object (safe to dereference GcHeader).
-/// On macOS ARM64, heap allocations from mmap are > 0x100000000 (4GB).
-/// Values below that are likely INT32_TAG extracts, small handles, or null.
+/// Values below 0x100000 (1MB) are likely INT32_TAG extracts, small handles,
+/// or null. The upper bound filters out NaN-box tag bits that leaked through.
 #[inline(always)]
 fn is_valid_obj_ptr(ptr: *const u8) -> bool {
     let addr = ptr as u64;
-    // macOS ARM64: heap/code/stack pointers are > 0x100000000 (4GB).
-    addr > 0x100000000 && addr < 0x800000000000
+    // Lower bound: skip null, small handles, and INT32_TAG extracts.
+    // Upper bound: platform-dependent userspace ceiling.
+    //   macOS ARM64: heap pointers < 0x800000000000 (48-bit)
+    //   Windows x86_64: userspace < 0x7FFFFFFFFFFF (top half is kernel)
+    //   Linux x86_64: userspace < 0x800000000000 (48-bit canonical)
+    addr > 0x100000 && addr < 0x800000000000
 }
 
 /// Object header - precedes the fields in memory

@@ -663,10 +663,18 @@ fn lower_try(
     // assignments. The standard `blk.call()` doesn't support call
     // attributes, so we emit the instruction manually.
     let sjr_reg = blk.next_reg();
-    blk.emit_raw(format!(
-        "{} = call i32 @setjmp(ptr {}) #0",
-        sjr_reg, jmpbuf
-    ));
+    // Windows MSVC uses _setjmp(buf, frame_ptr); Unix uses setjmp(buf).
+    if cfg!(target_os = "windows") {
+        blk.emit_raw(format!(
+            "{} = call i32 @_setjmp(ptr {}, ptr null) #0",
+            sjr_reg, jmpbuf
+        ));
+    } else {
+        blk.emit_raw(format!(
+            "{} = call i32 @setjmp(ptr {}) #0",
+            sjr_reg, jmpbuf
+        ));
+    }
     let sjr = sjr_reg;
     let is_exc = blk.icmp_ne(I32, &sjr, "0");
     blk.cond_br(&is_exc, &catch_label, &try_body_label);

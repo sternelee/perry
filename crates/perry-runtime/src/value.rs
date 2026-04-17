@@ -1733,9 +1733,11 @@ pub unsafe extern "C" fn js_dynamic_object_get_property(
             if let Some(ref reg) = *registry {
                 if let Some(vtable) = reg.get(&class_id) {
                     if let Some(&getter_ptr) = vtable.getters.get(property_name) {
-                        let this_i64 = ptr as i64;
-                        let f: extern "C" fn(i64) -> f64 = std::mem::transmute(getter_ptr);
-                        return f(this_i64);
+                        // Methods take `this` as f64 (NaN-boxed), not i64.
+                        // On Windows x64 ABI, i64 and f64 use different registers.
+                        let this_f64: f64 = f64::from_bits(ptr as u64);
+                        let f: extern "C" fn(f64) -> f64 = std::mem::transmute(getter_ptr);
+                        return f(this_f64);
                     }
                     // If the property is a registered method, return truthy so that
                     // `if (obj.method)` works (method existence checks).

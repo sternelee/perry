@@ -204,7 +204,22 @@ pub fn set_font_family(handle: i64, family_ptr: *const u8) {
             other => other,
         };
 
-        let font = create_font_with_family(14, 400, win_family);
+        // Preserve existing font size and weight from the current HFONT
+        let (size, weight) = TEXT_STYLES.with(|styles| {
+            let styles = styles.borrow();
+            if let Some(style) = styles.get(&handle) {
+                if !style.font.is_invalid() {
+                    let mut lf = LOGFONTW::default();
+                    unsafe { GetObjectW(style.font, std::mem::size_of::<LOGFONTW>() as i32, Some(&mut lf as *mut _ as *mut _)); }
+                    // Undo DPI scaling to get the logical size back
+                    let logical_size = ((-lf.lfHeight) as f64 / crate::app::get_dpi_scale()) as i32;
+                    return (logical_size.max(1), lf.lfWeight);
+                }
+            }
+            (14, 400) // default fallback
+        });
+
+        let font = create_font_with_family(size, weight, win_family);
         apply_font(handle, font);
     }
 
