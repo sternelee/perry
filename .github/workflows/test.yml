@@ -117,41 +117,36 @@ jobs:
             exit 1
           fi
 
-          ACTUAL=$(python3 -c "import json; print(json.load(open('$REPORT'))['summary']['parity_percentage'])")
-          MIN=$(python3 -c "import json; print(json.load(open('$THRESHOLD_FILE'))['min_parity_pct'])")
+          ACTUAL=$(jq -r '.summary.parity_percentage' "$REPORT")
+          MIN=$(jq -r '.min_parity_pct' "$THRESHOLD_FILE")
 
           echo "Parity: ${ACTUAL}% (threshold: ${MIN}%)"
 
-          python3 -c "
-import sys
-actual, minimum = float('$ACTUAL'), float('$MIN')
-if actual < minimum:
-    print(f'FAIL: Parity {actual}% is below threshold {minimum}%')
-    sys.exit(1)
-print(f'OK: Parity {actual}% meets threshold {minimum}%')
-"
+          awk -v a="$ACTUAL" -v m="$MIN" 'BEGIN {
+            if (a+0 < m+0) { print "FAIL: Parity " a "% is below threshold " m "%"; exit 1 }
+            print "OK: Parity " a "% meets threshold " m "%"
+          }'
 
       - name: Check for new failures
         run: |
           REPORT="test-parity/reports/latest.json"
           KNOWN="test-parity/known_failures.json"
 
-          python3 -c "
-import json, sys
-report = json.load(open('$REPORT'))
-known = json.load(open('$KNOWN')) if __import__('os').path.exists('$KNOWN') else {}
-parity_fails = report['failures'].get('parity', [])
-compile_fails = report['failures'].get('compile', [])
-all_fails = parity_fails + compile_fails
-new_failures = [f for f in all_fails if f not in known]
-if new_failures:
-    print('NEW FAILURES (not in known_failures.json):')
-    for f in new_failures:
-        print(f'  - {f}')
-    sys.exit(1)
-else:
-    print(f'All {len(all_fails)} failures are known/triaged.')
-"
+          jq -r '(.failures.parity // []) + (.failures.compile // []) | .[]' "$REPORT" | sort -u > /tmp/all_fails.txt
+          if [[ -f "$KNOWN" ]]; then
+            jq -r 'keys[]' "$KNOWN" | sort -u > /tmp/known.txt
+          else
+            : > /tmp/known.txt
+          fi
+
+          TOTAL=$(wc -l < /tmp/all_fails.txt | tr -d ' ')
+          comm -23 /tmp/all_fails.txt /tmp/known.txt > /tmp/new.txt
+          if [[ -s /tmp/new.txt ]]; then
+            echo "NEW FAILURES (not in known_failures.json):"
+            sed 's/^/  - /' /tmp/new.txt
+            exit 1
+          fi
+          echo "All ${TOTAL} failures are known/triaged."
 
       - name: Upload parity report
         if: always()
