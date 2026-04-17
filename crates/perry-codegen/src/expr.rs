@@ -1894,12 +1894,93 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                     return Ok(ctx.block().load(DOUBLE, &slot));
                 }
             }
+            // Issue #73: validate the receiver before the inline load.
+            // The compile-time condition above fires for Array / String /
+            // Named / Tuple, but TypeScript type erasure (a `Named`-typed
+            // binding that ends up holding a plain double; an `unknown[]`
+            // whose static analysis resolves back to `Array` at a caller
+            // that's actually passing a Buffer/Closure/number) lets
+            // non-length-bearing receivers flow in. The existing
+            // `safe_load_i32_from_ptr` only catches `handle < 4096`; a
+            // denormal double like `0x000000ff_00000000` masks to a
+            // ~1TB handle that clears the floor and segfaults the
+            // `ldr s0, [handle]`. Two-step guard:
+            //
+            //   1. Handle must be above the macOS __PAGEZERO region
+            //      (4GB). Real mimalloc + arena allocations always
+            //      land above this.
+            //   2. GC header byte at `handle-8` must indicate
+            //      GC_TYPE_ARRAY (1) or GC_TYPE_STRING (3) — the only
+            //      two layouts with `length: u32` at payload offset 0.
+            //      Buffer / TypedArray don't have GC headers
+            //      (they're `std::alloc`'d) so they route through the
+            //      runtime slow path, which consults the side-table
+            //      registries.
+            //
+            // Mirrors the v0.5.82 IC-receiver type-validation fix.
             let recv_box = lower_expr(ctx, object)?;
             let blk = ctx.block();
             let recv_bits = blk.bitcast_double_to_i64(&recv_box);
             let recv_handle = blk.and(I64, &recv_bits, POINTER_MASK_I64);
-            let len_i32 = blk.safe_load_i32_from_ptr(&recv_handle);
-            Ok(blk.sitofp(I32, &len_i32, DOUBLE))
+            // Constrain to the macOS ARM64 userspace heap range:
+            //   lower > 0x1_0000_0000 (skip __PAGEZERO and small-
+            //                          handle NaN-boxes)
+            //   upper < 0x8000_0000_0000 (47-bit userspace cap; above
+            //                             this is kernel / unmapped)
+            // mimalloc / arena pointers always land in this window.
+            // An above-cap handle (e.g. 0x00FF_0000_0000_0000) flowing
+            // through here would otherwise segfault the GC-header byte
+            // read at `handle - 8` on the next step.
+            let above_floor = blk.icmp_ugt(I64, &recv_handle, "4294967296"); // > 0x1_0000_0000
+            let below_ceil = blk.icmp_ult(I64, &recv_handle, "140737488355328"); // < 0x8000_0000_0000
+            let handle_ok = blk.and(I1, &above_floor, &below_ceil);
+
+            let check_gc_idx = ctx.new_block("plen.check_gc");
+            let fast_idx = ctx.new_block("plen.fast");
+            let slow_idx = ctx.new_block("plen.slow");
+            let merge_idx = ctx.new_block("plen.merge");
+            let check_gc_label = ctx.block_label(check_gc_idx);
+            let fast_label = ctx.block_label(fast_idx);
+            let slow_label = ctx.block_label(slow_idx);
+            let merge_label = ctx.block_label(merge_idx);
+            ctx.block().cond_br(&handle_ok, &check_gc_label, &slow_label);
+
+            ctx.current_block = check_gc_idx;
+            let gc_type_addr = ctx.block().sub(I64, &recv_handle, "8");
+            let gc_type_ptr = ctx.block().inttoptr(I64, &gc_type_addr);
+            let gc_type = ctx.block().load(I8, &gc_type_ptr);
+            let is_array = ctx.block().icmp_eq(I8, &gc_type, "1"); // GC_TYPE_ARRAY
+            let is_string = ctx.block().icmp_eq(I8, &gc_type, "3"); // GC_TYPE_STRING
+            let has_length = ctx.block().or(I1, &is_array, &is_string);
+            ctx.block().cond_br(&has_length, &fast_label, &slow_label);
+
+            ctx.current_block = fast_idx;
+            let fast_len_i32 = ctx.block().safe_load_i32_from_ptr(&recv_handle);
+            let fast_len = ctx.block().sitofp(I32, &fast_len_i32, DOUBLE);
+            let fast_pred_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+
+            // Runtime slow path: handles Buffer / TypedArray via side-
+            // table registries, returns 0 for non-length-bearing
+            // receivers (Closure / BigInt / Promise / Error / plain
+            // Object) and for non-pointer NaN-boxes.
+            ctx.current_block = slow_idx;
+            let slow_len = ctx.block().call(
+                DOUBLE,
+                "js_value_length_f64",
+                &[(DOUBLE, &recv_box)],
+            );
+            let slow_pred_label = ctx.block().label.clone();
+            ctx.block().br(&merge_label);
+
+            ctx.current_block = merge_idx;
+            Ok(ctx.block().phi(
+                DOUBLE,
+                &[
+                    (&fast_len, &fast_pred_label),
+                    (&slow_len, &slow_pred_label),
+                ],
+            ))
         }
 
         // `set.size` / `map.size` — route to runtime helpers. The HIR

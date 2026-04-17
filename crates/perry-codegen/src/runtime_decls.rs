@@ -829,6 +829,10 @@ pub fn declare_phase_b_arrays(module: &mut LlModule) {
     // caller must write back to the local slot.
     module.declare_function("js_array_set_f64_extend", I64, &[I64, I32, DOUBLE]);
     module.declare_function("js_array_length", I32, &[I64]);
+    // Issue #73: safe `.length` dispatch by runtime type. Fallback
+    // for the inline PropertyGet length path when the GC-type check
+    // can't prove the receiver is an Array/String.
+    module.declare_function("js_value_length_f64", DOUBLE, &[DOUBLE]);
 
     // Array methods (Phase B.12).
     // - js_array_pop_f64(arr) -> f64    (last element, NaN if empty)

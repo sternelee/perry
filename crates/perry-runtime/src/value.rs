@@ -1486,6 +1486,73 @@ pub extern "C" fn js_dynamic_array_length(arr_value: f64) -> i32 {
     crate::array::js_array_length(ptr as *const crate::array::ArrayHeader) as i32
 }
 
+/// Issue #73: safe `.length` lookup by runtime type. Called from the
+/// inline PropertyGet length path when the GC-type-byte check at
+/// `handle-8` doesn't prove the receiver is a GC_TYPE_ARRAY or
+/// GC_TYPE_STRING. Routes by runtime registry / GC header so that a
+/// Named-typed receiver that turns out to hold a Buffer, TypedArray,
+/// Closure, Error, number, etc. at runtime returns a sensible length
+/// instead of dereferencing garbage at `recv & 0xFFFFFFFFFFFF`.
+///
+/// Returns a double so the inline caller can phi the fast and slow
+/// results without another conversion.
+#[no_mangle]
+pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+
+    // STRING_TAG — length is code-unit count from js_string_length.
+    if top16 == 0x7FFF {
+        let ptr = (bits & POINTER_MASK) as *const crate::string::StringHeader;
+        if ptr.is_null() || (ptr as usize) < 0x10000 {
+            return 0.0;
+        }
+        return crate::string::js_string_length(ptr) as f64;
+    }
+
+    // POINTER_TAG — Buffer / TypedArray via registries first (they
+    // don't have GC headers — `buffer_alloc` + `typed_array_alloc`
+    // use `std::alloc` directly). Falling through to the GC-header
+    // path would read mimalloc bookkeeping as obj_type and return
+    // nonsense.
+    if top16 == 0x7FFD {
+        let handle = (bits & POINTER_MASK) as usize;
+        // Constrain to the macOS ARM64 userspace heap window
+        // (4GB < h < 128TB). Anything outside isn't a real heap
+        // pointer — corrupted NaN-boxes in the __PAGEZERO region or
+        // above the 47-bit cap would otherwise segfault the GC-header
+        // read at `handle - 8`.
+        if handle < 0x1_0000_0000 || handle >= 0x8000_0000_0000 {
+            return 0.0;
+        }
+        if crate::buffer::is_registered_buffer(handle) {
+            let buf = handle as *const crate::buffer::BufferHeader;
+            return unsafe { (*buf).length as f64 };
+        }
+        if crate::typedarray::lookup_typed_array_kind(handle).is_some() {
+            let ta = handle as *const crate::typedarray::TypedArrayHeader;
+            return unsafe { (*ta).length as f64 };
+        }
+        let gc_header = (handle - crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+        let obj_type = unsafe { (*gc_header).obj_type };
+        match obj_type {
+            crate::gc::GC_TYPE_ARRAY | crate::gc::GC_TYPE_STRING => {
+                return unsafe { *(handle as *const u32) } as f64;
+            }
+            // Closures, BigInts, Promises, Errors, plain Objects, Maps:
+            // no `.length`. Return 0 to match Perry's existing
+            // fallback for missing fields (JS would produce
+            // `undefined`, but the generic PropertyGet slow path
+            // already degrades to 0 here).
+            _ => return 0.0,
+        }
+    }
+
+    // Everything else — undefined, null, booleans, int32, plain
+    // doubles, BigInt pointers — has no `.length`.
+    0.0
+}
+
 /// Dynamic array find that handles both JS handle arrays and native arrays.
 /// Takes the array as f64 (may be NaN-boxed or JS handle) and a callback closure.
 /// Returns the found element as f64, or NaN (undefined) if not found.
