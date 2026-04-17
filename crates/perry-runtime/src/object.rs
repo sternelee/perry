@@ -2194,8 +2194,22 @@ pub extern "C" fn js_object_get_field_ic_miss(
     // accessors correctly.
     let can_cache = !ACCESSORS_IN_USE.with(|c| c.get());
     unsafe {
+        // Issue #72: validate this really is a GC_TYPE_OBJECT before reading
+        // (*obj).keys_array — otherwise an Array/String/Buffer/etc. receiver
+        // (whose `object_type` byte at offset 0 happens to be 1, matching
+        // OBJECT_TYPE_REGULAR for a length-1 array) would be treated as
+        // cacheable and seed the per-site PIC with garbage from element[1].
+        // The codegen guard funnels non-OBJECT receivers here too, so this
+        // belt-and-braces check keeps the cache from being primed with
+        // values that would survive into the inline hot path.
+        let is_object = (obj as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 && {
+            let gc_header = (obj as *const u8).sub(crate::gc::GC_HEADER_SIZE)
+                as *const crate::gc::GcHeader;
+            (*gc_header).obj_type == crate::gc::GC_TYPE_OBJECT
+        };
         let keys = (*obj).keys_array;
-        let is_regular = (*obj).object_type == crate::error::OBJECT_TYPE_REGULAR;
+        let is_regular = is_object
+            && (*obj).object_type == crate::error::OBJECT_TYPE_REGULAR;
         if can_cache && is_regular && !keys.is_null() && (keys as usize) > 0x10000 {
             let key_count = *(keys as *const u32) as usize;
             let keys_data = (keys as *const u8).add(8) as *const f64;

@@ -2395,6 +2395,34 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             ));
             ctx.ic_globals.push(cache_name.clone());
 
+            // Issue #72: validate the receiver is actually a GC_TYPE_OBJECT
+            // before treating offset 16 as `keys_array`. The v0.5.78 receiver
+            // guard (`obj_handle > 0x100000`) keeps non-pointer NaN-boxes out,
+            // but real heap pointers to Arrays/Strings/Buffers all clear that
+            // threshold. A chained `obj.rowsRaw.length` (whose static type
+            // analysis can't prove `obj.rowsRaw` is an Array — the outer
+            // PropertyGet falls into this generic dispatch) hands the array's
+            // pointer to this PIC. For an Array, offset 16 is element[1]; on
+            // a freshly-allocated array element[1] is zero, the per-site
+            // cache global is zero-initialized, so the keys_val comparison
+            // falsely "hits" and the hit-path loads (obj+24+slot*8) — i.e.
+            // element[2] — as the field value, returning 0 instead of
+            // dispatching `.length`. The slow `js_object_get_field_by_name`
+            // already routes by `gc_type` (handles Array.length, String.length,
+            // Set.size, Buffer.length, Error.message, etc.), so funneling
+            // non-OBJECT receivers through the miss handler fixes correctness
+            // without giving up the PIC for real objects.
+            //
+            // GcHeader sits 8 bytes before the user pointer; obj_type is the
+            // first u8 (GC_TYPE_OBJECT=2). Cost: 1 sub + 1 load i8 + 1 cmp
+            // i8 + 1 and i1 — the cond_br's `is_object` operand is folded
+            // into the existing branch instruction by LLVM. Branch-predicted
+            // taken since real PropertyGet receivers are objects.
+            let gc_type_addr = ctx.block().sub(I64, &obj_handle, "8");
+            let gc_type_ptr = ctx.block().inttoptr(I64, &gc_type_addr);
+            let gc_type = ctx.block().load(I8, &gc_type_ptr);
+            let is_object = ctx.block().icmp_eq(I8, &gc_type, "2");
+
             // Load obj->keys_array at offset 16 of ObjectHeader.
             let keys_addr = ctx.block().add(I64, &obj_handle, "16");
             let keys_ptr_p = ctx.block().inttoptr(I64, &keys_addr);
@@ -2404,7 +2432,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let cache_ref = format!("@{}", cache_name);
             let cache_keys_ptr = ctx.block().gep(I64, &cache_ref, &[(I64, "0")]);
             let cached_keys = ctx.block().load(I64, &cache_keys_ptr);
-            let hit = ctx.block().icmp_eq(I64, &keys_val, &cached_keys);
+            let keys_eq = ctx.block().icmp_eq(I64, &keys_val, &cached_keys);
+            let hit = ctx.block().and(I1, &is_object, &keys_eq);
 
             let hit_idx = ctx.new_block("pic.hit");
             let miss_idx = ctx.new_block("pic.miss");
