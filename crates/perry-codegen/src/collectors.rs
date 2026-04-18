@@ -2502,12 +2502,32 @@ fn check_escapes_in_expr(
             check_escapes_in_expr(else_expr, candidates, escaped);
         }
         Expr::Call { callee, args, .. } => {
+            // Method-call form: `local.method(...)` lowers to
+            // `Call { callee: PropertyGet { LocalGet(id), ... } }`. The
+            // PropertyGet escape check above treats `local.field` reads as
+            // safe, but a method call passes `local` as `this` to a function
+            // that dereferences it as a real object pointer. Scalar
+            // replacement has no pointer to give — mark as escape.
+            if let Expr::PropertyGet { object, .. } = callee.as_ref() {
+                if let Expr::LocalGet(id) = object.as_ref() {
+                    if candidates.contains_key(id) {
+                        escaped.insert(*id);
+                    }
+                }
+            }
             check_escapes_in_expr(callee, candidates, escaped);
             for a in args {
                 check_escapes_in_expr(a, candidates, escaped);
             }
         }
         Expr::CallSpread { callee, args, .. } => {
+            if let Expr::PropertyGet { object, .. } = callee.as_ref() {
+                if let Expr::LocalGet(id) = object.as_ref() {
+                    if candidates.contains_key(id) {
+                        escaped.insert(*id);
+                    }
+                }
+            }
             check_escapes_in_expr(callee, candidates, escaped);
             for a in args {
                 match a {
@@ -3703,6 +3723,7 @@ fn check_object_literal_escapes_in_expr(
         | Expr::ProcessMemoryUsage | Expr::ProcessPid | Expr::ProcessPpid
         | Expr::ProcessVersion | Expr::ProcessVersions | Expr::ProcessHrtimeBigint
         | Expr::ProcessStdin | Expr::ProcessStdout | Expr::ProcessStderr
+        | Expr::ProcessEnv
         // Path / encoding / OS leaf intrinsics
         | Expr::PathSep | Expr::PathDelimiter
         | Expr::TextEncoderNew | Expr::TextDecoderNew

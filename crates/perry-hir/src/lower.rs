@@ -8759,6 +8759,66 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                             "stdin" => return Ok(Expr::ProcessStdin),
                             "stdout" => return Ok(Expr::ProcessStdout),
                             "stderr" => return Ok(Expr::ProcessStderr),
+                            "env" => return Ok(Expr::ProcessEnv),
+                            _ => {}
+                        }
+                    }
+                }
+                // `globalThis.process` returns an object whose `.env`/`.argv`/
+                // etc. should resolve just like bare `process.*`. Without this
+                // shim, `globalThis.process.env` walks through generic
+                // PropertyGet dispatch and hits a 0.0 sentinel. Matches the
+                // static `process.env` fast path above.
+                if obj_ident.sym.as_ref() == "globalThis" {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        if prop_ident.sym.as_ref() == "process" {
+                            // `globalThis.process` on its own — fall through
+                            // to generic handling below (returns 0.0 sentinel,
+                            // which is fine as the outer chain handles env/etc.).
+                        }
+                    }
+                }
+            }
+            // Handle `globalThis.process.X` (and any PropertyGet whose object
+            // resolves to `globalThis.process`): treat the outer `.X` as if
+            // it were a bare `process.X` access. Unwraps transparent TS
+            // wrappers (TsAs, TsNonNull, TsSatisfies, TsTypeAssertion, Paren)
+            // so that `(globalThis as any).process.env` works too.
+            fn unwrap_transparent(e: &ast::Expr) -> &ast::Expr {
+                let mut cur = e;
+                loop {
+                    match cur {
+                        ast::Expr::TsAs(x) => cur = &x.expr,
+                        ast::Expr::TsNonNull(x) => cur = &x.expr,
+                        ast::Expr::TsSatisfies(x) => cur = &x.expr,
+                        ast::Expr::TsTypeAssertion(x) => cur = &x.expr,
+                        ast::Expr::TsConstAssertion(x) => cur = &x.expr,
+                        ast::Expr::Paren(x) => cur = &x.expr,
+                        _ => return cur,
+                    }
+                }
+            }
+            let member_obj_unwrapped = unwrap_transparent(member.obj.as_ref());
+            if let ast::Expr::Member(inner) = member_obj_unwrapped {
+                let inner_obj_unwrapped = unwrap_transparent(inner.obj.as_ref());
+                let inner_is_global_process = matches!(
+                    inner_obj_unwrapped,
+                    ast::Expr::Ident(i) if i.sym.as_ref() == "globalThis"
+                ) && matches!(
+                    &inner.prop,
+                    ast::MemberProp::Ident(p) if p.sym.as_ref() == "process"
+                );
+                if inner_is_global_process {
+                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                        match prop_ident.sym.as_ref() {
+                            "argv" => return Ok(Expr::ProcessArgv),
+                            "platform" => return Ok(Expr::OsPlatform),
+                            "arch" => return Ok(Expr::OsArch),
+                            "pid" => return Ok(Expr::ProcessPid),
+                            "ppid" => return Ok(Expr::ProcessPpid),
+                            "version" => return Ok(Expr::ProcessVersion),
+                            "versions" => return Ok(Expr::ProcessVersions),
+                            "env" => return Ok(Expr::ProcessEnv),
                             _ => {}
                         }
                     }

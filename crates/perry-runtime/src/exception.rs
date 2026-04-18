@@ -81,58 +81,7 @@ pub extern "C" fn js_throw(value: f64) -> ! {
         }
 
         if TRY_DEPTH == 0 {
-            // Print the exception and abort cleanly.
-            // Cannot panic! in extern "C" functions (causes double-panic abort).
-            let bits = value.to_bits();
-            let top16 = bits >> 48;
-            // Check if this is a NaN-boxed pointer (POINTER_TAG = 0x7FFD)
-            if top16 == 0x7FFD {
-                let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
-                if ptr >= 0x10000 {
-                    // Check GcHeader type (at ptr - 8 offset, but GcHeader is prepended)
-                    // ErrorHeader has object_type as first u32
-                    let object_type = unsafe { *(ptr as *const u32) };
-                    if object_type == 2 {
-                        // ErrorHeader: object_type(u32), _padding(u32), message(*mut StringHeader), name(*mut StringHeader)
-                        let name_ptr = unsafe { *((ptr + 16) as *const *const crate::string::StringHeader) };
-                        let msg_ptr = unsafe { *((ptr + 8) as *const *const crate::string::StringHeader) };
-                        let name_str = if !name_ptr.is_null() && (name_ptr as usize) >= 0x10000 {
-                            unsafe {
-                                let name_len = (*name_ptr).byte_len as usize;
-                                let bytes_ptr = (name_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
-                                std::str::from_utf8(std::slice::from_raw_parts(bytes_ptr, name_len)).unwrap_or("?").to_string()
-                            }
-                        } else { "Error".to_string() };
-                        let msg_str = if !msg_ptr.is_null() && (msg_ptr as usize) >= 0x10000 {
-                            unsafe {
-                                let msg_len = (*msg_ptr).byte_len as usize;
-                                let bytes_ptr = (msg_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
-                                std::str::from_utf8(std::slice::from_raw_parts(bytes_ptr, msg_len)).unwrap_or("?").to_string()
-                            }
-                        } else { String::new() };
-                        eprintln!("Uncaught exception: {}: {}", name_str, msg_str);
-                    } else {
-                        eprintln!("Uncaught exception: [object] (type={}, bits=0x{:016X})", object_type, bits);
-                    }
-                } else {
-                    eprintln!("Uncaught exception: [pointer] (bits=0x{:016X})", bits);
-                }
-            } else if top16 == 0x7FFF {
-                // String
-                let str_ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as *const crate::string::StringHeader;
-                if !str_ptr.is_null() && (str_ptr as usize) >= 0x10000 {
-                    let msg_str = unsafe {
-                        let len = (*str_ptr).byte_len as usize;
-                        let bytes_ptr = (str_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
-                        std::str::from_utf8(std::slice::from_raw_parts(bytes_ptr, len)).unwrap_or("?").to_string()
-                    };
-                    eprintln!("Uncaught exception: {}", msg_str);
-                } else {
-                    eprintln!("Uncaught exception: [string] (bits=0x{:016X})", bits);
-                }
-            } else {
-                eprintln!("Uncaught exception: {} (bits=0x{:016X})", value, bits);
-            }
+            print_uncaught(value);
             std::process::exit(1);
         }
 
@@ -173,6 +122,105 @@ pub extern "C" fn js_enter_finally() {
 #[no_mangle]
 pub extern "C" fn js_leave_finally() {
     unsafe { IN_FINALLY = false; }
+}
+
+/// Read a StringHeader into an owned Rust String (empty on null/garbage).
+unsafe fn string_header_to_string(ptr: *const crate::string::StringHeader) -> String {
+    if ptr.is_null() || (ptr as usize) < 0x10000 {
+        return String::new();
+    }
+    let len = (*ptr).byte_len as usize;
+    // Guard against corrupt lengths — StringHeader lengths above ~1GB
+    // indicate a stale/bogus pointer (e.g. misread via a wrong tag).
+    if len > 1 << 30 {
+        return String::new();
+    }
+    let bytes_ptr = (ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
+    std::str::from_utf8(std::slice::from_raw_parts(bytes_ptr, len))
+        .unwrap_or("?")
+        .to_string()
+}
+
+/// Best-effort display of a thrown value for uncaught-exception reporting.
+/// Matches Node semantics roughly: Errors print `name: message` + stack,
+/// regular objects probe for `.message`/`.stack`, everything else goes
+/// through the generic `js_jsvalue_to_string` (which handles strings,
+/// numbers, booleans, arrays, user `[Symbol.toPrimitive]`, etc.).
+fn print_uncaught(value: f64) {
+    let bits = value.to_bits();
+    let top16 = bits >> 48;
+
+    if top16 == 0x7FFD {
+        let ptr = (bits & 0x0000_FFFF_FFFF_FFFF) as usize;
+        if ptr >= 0x10000 {
+            let object_type = unsafe { *(ptr as *const u32) };
+            if object_type == crate::error::OBJECT_TYPE_ERROR {
+                // ErrorHeader: object_type, error_kind, message, name, stack, cause, errors
+                let eh = ptr as *const crate::error::ErrorHeader;
+                let name_str = unsafe { string_header_to_string((*eh).name) };
+                let msg_str = unsafe { string_header_to_string((*eh).message) };
+                let stack_str = unsafe { string_header_to_string((*eh).stack) };
+                let name_display = if name_str.is_empty() { "Error" } else { &name_str };
+                if msg_str.is_empty() {
+                    eprintln!("Uncaught exception: {}", name_display);
+                } else {
+                    eprintln!("Uncaught exception: {}: {}", name_display, msg_str);
+                }
+                if !stack_str.is_empty() {
+                    eprintln!("{}", stack_str);
+                }
+                return;
+            }
+            if object_type == crate::error::OBJECT_TYPE_REGULAR {
+                // Probe for `.message` and `.stack` properties the way
+                // Node does for thrown non-Error objects. Users commonly
+                // throw custom error shapes like `{ message, stack }` or
+                // user-class instances that carry those fields.
+                let msg_key = crate::string::js_string_from_bytes(b"message".as_ptr(), 7);
+                let stack_key = crate::string::js_string_from_bytes(b"stack".as_ptr(), 5);
+                let msg_val = crate::object::js_object_get_field_by_name_f64(
+                    ptr as *const crate::object::ObjectHeader,
+                    msg_key as *const crate::string::StringHeader,
+                );
+                let stack_val = crate::object::js_object_get_field_by_name_f64(
+                    ptr as *const crate::object::ObjectHeader,
+                    stack_key as *const crate::string::StringHeader,
+                );
+                let msg_str_ptr = crate::value::js_jsvalue_to_string(msg_val);
+                let msg_str = unsafe { string_header_to_string(msg_str_ptr) };
+                if !msg_str.is_empty() && msg_str != "undefined" {
+                    eprintln!("Uncaught exception: {}", msg_str);
+                } else {
+                    let obj_str_ptr = crate::value::js_jsvalue_to_string(value);
+                    let obj_str = unsafe { string_header_to_string(obj_str_ptr) };
+                    if obj_str.is_empty() || obj_str == "[object Object]" {
+                        eprintln!(
+                            "Uncaught exception: [object] (bits=0x{:016X})",
+                            bits
+                        );
+                    } else {
+                        eprintln!("Uncaught exception: {}", obj_str);
+                    }
+                }
+                let stack_str_ptr = crate::value::js_jsvalue_to_string(stack_val);
+                let stack_str = unsafe { string_header_to_string(stack_str_ptr) };
+                if !stack_str.is_empty() && stack_str != "undefined" {
+                    eprintln!("{}", stack_str);
+                }
+                return;
+            }
+            // Fall through to generic stringify for arrays, promises,
+            // bigints, maps, etc. — js_jsvalue_to_string handles them all.
+        }
+    }
+
+    let s_ptr = crate::value::js_jsvalue_to_string(value);
+    let s = unsafe { string_header_to_string(s_ptr) };
+    if s.is_empty() {
+        eprintln!("Uncaught exception: (bits=0x{:016X})", bits);
+    } else {
+        eprintln!("Uncaught exception: {}", s);
+    }
 }
 
 /// GC root scanner: mark the current exception value

@@ -360,10 +360,15 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
                 if use_color {
                     println!(
                         "{}",
-                        console::style("✓ Compilation is guaranteed to succeed").green()
+                        console::style("✓ Parsing, HIR lowering, and dependency checks passed").green()
+                    );
+                    println!(
+                        "{}",
+                        console::style("  (codegen not verified — run `perry compile` for end-to-end validation)").dim()
                     );
                 } else {
-                    println!("[OK] Compilation is guaranteed to succeed");
+                    println!("[OK] Parsing, HIR lowering, and dependency checks passed");
+                    println!("     (codegen not verified — run `perry compile` for end-to-end validation)");
                 }
             } else if args.check_deps {
                 println!();
@@ -377,7 +382,7 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
                 }
             } else if errors == 0 {
                 println!();
-                println!("Note: Run with --check-deps to verify dependencies and guarantee compilation.");
+                println!("Note: Run with --check-deps to verify dependencies.");
             }
 
             // Handle fix output
@@ -433,6 +438,11 @@ pub fn run(args: CheckArgs, format: OutputFormat, use_color: bool, verbose: u8) 
 
             let errors = all_diagnostics.error_count();
             let warnings = all_diagnostics.warning_count();
+            // Named "compilation_guaranteed" historically, but the check
+            // does not run codegen — only parse, HIR lowering, and
+            // dependency checks. Kept under the same key for JSON
+            // backcompat, though a more accurate name would be
+            // `frontend_checks_passed`.
             let compilation_guaranteed =
                 args.check_deps && errors == 0 && (warnings == 0 || !args.strict);
 

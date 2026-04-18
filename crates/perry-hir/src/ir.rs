@@ -1003,6 +1003,12 @@ pub enum Expr {
     EnvGet(String),
     // Dynamic environment variable access: process.env[expr]
     EnvGetDynamic(Box<Expr>),
+    // Bare `process.env` as a value (not followed by .KEY) — materializes
+    // the OS environment as a JS object. Used by patterns like
+    // `const e = process.env`, `Object.keys(process.env)`, and indirect
+    // access through `globalThis`/aliases where the static `.KEY` fast
+    // path doesn't fire.
+    ProcessEnv,
     // Process uptime: process.uptime() -> number (seconds)
     ProcessUptime,
     // Process current working directory: process.cwd() -> string

@@ -5862,6 +5862,18 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(nanbox_pointer_inline(blk, &buf_handle))
         }
 
+        // -------- BufferIsBuffer --------
+        // `Buffer.isBuffer(x)`. Runtime returns i32 (0/1); wrap as NaN-boxed
+        // boolean. `js_buffer_is_buffer` already strips NaN-box tags and
+        // checks the BUFFER_REGISTRY, so any value type is safe to pass.
+        Expr::BufferIsBuffer(operand) => {
+            let v_box = lower_expr(ctx, operand)?;
+            let blk = ctx.block();
+            let v_handle = unbox_to_i64(blk, &v_box);
+            let i32_result = blk.call(I32, "js_buffer_is_buffer", &[(I64, &v_handle)]);
+            Ok(i32_bool_to_nanbox(blk, &i32_result))
+        }
+
         // -------- StaticPluginResolve stub --------
         Expr::StaticPluginResolve(_) => Ok(double_literal(0.0)),
 
@@ -5964,6 +5976,14 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let key_handle = unbox_to_i64(blk, &key_box);
             let result = blk.call(I64, "js_getenv", &[(I64, &key_handle)]);
             Ok(nanbox_string_inline(blk, &result))
+        }
+        Expr::ProcessEnv => {
+            // `process.env` (or `globalThis.process.env`) as a value.
+            // The runtime returns an already-NaN-boxed f64 POINTER_TAG
+            // to a cached object populated from the OS environment on
+            // first call. Subsequent PropertyGet dispatch on it works
+            // via the normal object field path.
+            Ok(ctx.block().call(DOUBLE, "js_process_env", &[]))
         }
         Expr::DateToISOString(d) => {
             let v = lower_expr(ctx, d)?;

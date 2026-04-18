@@ -519,7 +519,7 @@ pub fn collect_local_refs_expr(expr: &Expr, refs: &mut Vec<LocalId>, visited: &m
         Expr::Number(_) | Expr::Integer(_) | Expr::String(_) | Expr::Bool(_) | Expr::Null |
         Expr::Undefined | Expr::BigInt(_) | Expr::This | Expr::FuncRef(_) |
         Expr::ClassRef(_) | Expr::ExternFuncRef { .. } | Expr::EnumMember { .. } |
-        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessMemoryUsage | Expr::NativeModuleRef(_) |
+        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessMemoryUsage | Expr::ProcessEnv | Expr::NativeModuleRef(_) |
         Expr::RegExp { .. } => {}
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_local_refs_expr(obj, refs, visited);
@@ -1374,7 +1374,7 @@ pub(crate) fn collect_assigned_locals_expr(expr: &Expr, assigned: &mut Vec<Local
         Expr::Number(_) | Expr::Integer(_) | Expr::Bool(_) | Expr::String(_) | Expr::BigInt(_) |
         Expr::Object(_) | Expr::TypeOf(_) | Expr::InstanceOf { .. } |
         Expr::EnumMember { .. } | Expr::This | Expr::Null | Expr::Undefined |
-        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessMemoryUsage | Expr::NativeModuleRef(_) |
+        Expr::EnvGet(_) | Expr::ProcessUptime | Expr::ProcessCwd | Expr::ProcessMemoryUsage | Expr::ProcessEnv | Expr::NativeModuleRef(_) |
         Expr::RegExp { .. } => {}
         Expr::ObjectKeys(obj) | Expr::ObjectValues(obj) | Expr::ObjectEntries(obj) => {
             collect_assigned_locals_expr(obj, assigned);
