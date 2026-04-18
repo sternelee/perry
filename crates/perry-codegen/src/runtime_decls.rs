@@ -668,6 +668,12 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     // safe to call even when perry-stdlib is not linked (no-op).
     module.declare_function("js_run_stdlib_pump", VOID, &[]);
     module.declare_function("js_sleep_ms", VOID, &[DOUBLE]);
+    // Issue #84: condvar-backed wait for the event loop / await busy-wait.
+    // Replaces fixed-quantum `js_sleep_ms(10.0)` / `js_sleep_ms(1.0)`.
+    // Returns immediately when a tokio worker calls js_notify_main_thread()
+    // after enqueueing onto a queue the pump drains; otherwise sleeps until
+    // the next timer deadline (or 1s safety cap).
+    module.declare_function("js_wait_for_event", VOID, &[]);
     module.declare_function("js_throw", VOID, &[DOUBLE]);
 
     // Exception handling (Phase G): setjmp/longjmp-based try/catch.

@@ -1065,14 +1065,20 @@ fn queue_thread_result(promise_usize: usize, result: SerializedValue) {
     // Thread results are stored in a global Mutex queue. The main thread's
     // pump function (js_thread_process_pending) drains this queue and resolves
     // the promises.
-    let mut pending = match PENDING_THREAD_RESULTS.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    pending.push(PendingThreadResult {
-        promise_ptr: promise_usize,
-        result,
-    });
+    {
+        let mut pending = match PENDING_THREAD_RESULTS.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        pending.push(PendingThreadResult {
+            promise_ptr: promise_usize,
+            result,
+        });
+    }
+    // Issue #84: wake the main thread so spawn()-returned promises
+    // resolve as soon as the OS thread finishes, not at the next
+    // event-loop quantum.
+    crate::event_pump::js_notify_main_thread();
 }
 
 /// A pending thread result waiting to be resolved on the main thread.

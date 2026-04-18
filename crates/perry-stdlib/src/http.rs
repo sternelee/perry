@@ -21,6 +21,15 @@ use crate::common::{register_handle, get_handle_mut, for_each_handle_of, Handle}
 static HTTP_PENDING_EVENTS: once_cell::sync::Lazy<Mutex<Vec<PendingHttpEvent>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Vec::new()));
 
+/// Push an HTTP event and wake the main thread (issue #84).
+/// Every producer is inside an `async move { ... }` running on a tokio
+/// worker — without the notify the event waits for the next event-loop
+/// timeout to be picked up.
+fn push_http_event(ev: PendingHttpEvent) {
+    HTTP_PENDING_EVENTS.lock().unwrap().push(ev);
+    perry_runtime::event_pump::js_notify_main_thread();
+}
+
 static HTTP_GC_REGISTERED: std::sync::Once = std::sync::Once::new();
 
 /// Register the http GC root scanner exactly once. User closures passed
@@ -579,7 +588,7 @@ pub unsafe extern "C" fn js_http_client_request_end(handle: Handle, body_f64: f6
         let client = match client.build() {
             Ok(c) => c,
             Err(e) => {
-                HTTP_PENDING_EVENTS.lock().unwrap().push(PendingHttpEvent::Error {
+                push_http_event(PendingHttpEvent::Error {
                     request_handle: req_handle,
                     error_message: format!("Failed to create HTTP client: {}", e),
                 });
@@ -622,7 +631,7 @@ pub unsafe extern "C" fn js_http_client_request_end(handle: Handle, body_f64: f6
 
                 let body = response.bytes().await.unwrap_or_default().to_vec();
 
-                HTTP_PENDING_EVENTS.lock().unwrap().push(PendingHttpEvent::Response {
+                push_http_event(PendingHttpEvent::Response {
                     request_handle: req_handle,
                     status,
                     status_message,
@@ -631,7 +640,7 @@ pub unsafe extern "C" fn js_http_client_request_end(handle: Handle, body_f64: f6
                 });
             }
             Err(e) => {
-                HTTP_PENDING_EVENTS.lock().unwrap().push(PendingHttpEvent::Error {
+                push_http_event(PendingHttpEvent::Error {
                     request_handle: req_handle,
                     error_message: format!("{}", e),
                 });

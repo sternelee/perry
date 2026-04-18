@@ -93,12 +93,20 @@ where
 /// that don't involve pointer allocations. For complex values like arrays,
 /// objects, or strings, use queue_deferred_resolution instead.
 pub fn queue_promise_resolution(promise_ptr: usize, is_success: bool, result_bits: u64) {
-    let mut pending = PENDING_RESOLUTIONS.lock().unwrap();
-    pending.push(PendingResolution {
-        promise_ptr,
-        is_success,
-        result_bits,
-    });
+    {
+        let mut pending = PENDING_RESOLUTIONS.lock().unwrap();
+        pending.push(PendingResolution {
+            promise_ptr,
+            is_success,
+            result_bits,
+        });
+    }
+    // Issue #84: wake the main-thread event loop / await busy-wait the
+    // instant we enqueue, instead of waiting up to ~10 ms for the next
+    // poll. Drop the queue lock first so the consumer doesn't briefly
+    // block re-acquiring it. Covers all queue_promise_resolution callers
+    // — fetch, ioredis, bcrypt, zlib, spawn_for_promise, etc.
+    perry_runtime::event_pump::js_notify_main_thread();
 }
 
 /// Queue a deferred promise resolution with a conversion callback
@@ -108,12 +116,17 @@ pub fn queue_deferred_resolution<F>(promise_ptr: usize, is_success: bool, conver
 where
     F: FnOnce() -> u64 + Send + 'static,
 {
-    let mut pending = PENDING_DEFERRED.lock().unwrap();
-    pending.push(DeferredResolution {
-        promise_ptr,
-        is_success,
-        converter: Box::new(converter),
-    });
+    {
+        let mut pending = PENDING_DEFERRED.lock().unwrap();
+        pending.push(DeferredResolution {
+            promise_ptr,
+            is_success,
+            converter: Box::new(converter),
+        });
+    }
+    // Issue #84: same as queue_promise_resolution — wake the main thread
+    // immediately so the awaiter doesn't pay the old hard-sleep latency.
+    perry_runtime::event_pump::js_notify_main_thread();
 }
 
 /// Register js_stdlib_process_pending with perry-runtime's pump so that

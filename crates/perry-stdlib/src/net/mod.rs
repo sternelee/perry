@@ -187,6 +187,9 @@ fn next_id() -> i64 {
 
 fn push_event(ev: PendingNetEvent) {
     NET_PENDING_EVENTS.lock().unwrap().push(ev);
+    // Issue #84: wake the main thread so the event is dispatched on the
+    // very next loop iteration instead of after the old 10 ms sleep.
+    perry_runtime::event_pump::js_notify_main_thread();
 }
 
 fn mark_closed(id: i64) {

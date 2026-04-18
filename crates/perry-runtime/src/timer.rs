@@ -239,6 +239,29 @@ pub extern "C" fn js_callback_timer_has_pending() -> i32 {
     if q.iter().any(|t| !t.cleared) { 1 } else { 0 }
 }
 
+/// Get the time until the next callback timer fires (in ms), or -1 if
+/// none pending. Mirrors `js_timer_next_deadline` / `js_interval_timer_next_deadline`
+/// — needed so `js_wait_for_event` can size its wait budget correctly
+/// when the only pending work is a `setTimeout(cb, N)` callback timer
+/// (the most common `setTimeout(r, N)` used inside `new Promise(...)`).
+#[no_mangle]
+pub extern "C" fn js_callback_timer_next_deadline() -> f64 {
+    let now = Instant::now();
+
+    CALLBACK_TIMERS.lock().unwrap()
+        .iter()
+        .filter(|t| !t.cleared)
+        .map(|t| {
+            if t.deadline <= now {
+                0.0
+            } else {
+                (t.deadline - now).as_millis() as f64
+            }
+        })
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(-1.0)
+}
+
 /// Clear a callback timer by ID
 #[no_mangle]
 pub extern "C" fn clearTimeout(timer_id: i64) {

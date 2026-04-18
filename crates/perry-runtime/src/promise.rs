@@ -137,6 +137,12 @@ pub extern "C" fn js_promise_resolve(promise: *mut Promise, value: f64) {
             });
         }
     }
+    // Issue #84: an `await` busy-wait that called `js_timer_tick` (or any
+    // tick fn) which then resolved this promise needs to skip the
+    // following `js_wait_for_event` sleep — otherwise it blocks for the
+    // 1 s idle cap before the loop re-checks promise state. The notify
+    // sets the flag so the immediately-following wait returns at once.
+    crate::event_pump::js_notify_main_thread();
 }
 
 /// Resolve a promise with another promise (Promise chaining/unwrapping)
@@ -225,6 +231,8 @@ pub extern "C" fn js_promise_reject(promise: *mut Promise, reason: f64) {
             });
         }
     }
+    // Issue #84: see js_promise_resolve — same wake reasoning.
+    crate::event_pump::js_notify_main_thread();
 }
 
 /// Register fulfillment callback, returns a new promise for chaining

@@ -2288,8 +2288,11 @@ fn compile_module_entry(
                 let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
                 let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
                 ctx.block().call_void("js_run_stdlib_pump", &[]);
-                let ten_ms = "10.0".to_string();
-                ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &ten_ms)]);
+                // Issue #84: condvar-backed wait. Returns immediately when
+                // a tokio worker (net/ws/http/fetch/redis/spawn) notifies
+                // after pushing to its queue; otherwise blocks until the
+                // next timer/interval deadline or a 1 s safety cap.
+                ctx.block().call_void("js_wait_for_event", &[]);
                 ctx.block().br(&header_label);
 
                 // loop_exit: done

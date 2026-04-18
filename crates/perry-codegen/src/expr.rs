@@ -6130,7 +6130,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         //   wait:
         //     call js_promise_run_microtasks()
         //     call js_stdlib_process_pending()
-        //     call js_sleep_ms(1.0)
+        //     call js_wait_for_event()      ; condvar wait, issue #84
         //     br check
         //   settled:
         //     %state2 = call js_promise_state(%promise)
@@ -6220,8 +6220,11 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let _ = ctx.block().call(I32, "js_timer_tick", &[]);
             let _ = ctx.block().call(I32, "js_callback_timer_tick", &[]);
             let _ = ctx.block().call(I32, "js_interval_timer_tick", &[]);
-            let one_ms = "1.0".to_string();
-            ctx.block().call_void("js_sleep_ms", &[(DOUBLE, &one_ms)]);
+            // Issue #84: condvar wait — wakes the instant the awaited
+            // promise's resolver (or any other tokio queue push) calls
+            // js_notify_main_thread, instead of paying the old 1 ms
+            // hard-sleep quantum per await iteration.
+            ctx.block().call_void("js_wait_for_event", &[]);
             ctx.block().br(&check_label);
 
             // === settled ===
