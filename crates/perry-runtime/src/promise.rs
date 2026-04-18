@@ -350,10 +350,27 @@ pub extern "C" fn js_promise_run_microtasks() -> i32 {
     ran
 }
 
-/// Create a resolved promise with the given value
+/// Create a resolved promise with the given value.
+///
+/// Matches ES spec `Promise.resolve(x)`: when `x` is itself a Promise the
+/// returned promise adopts its state instead of storing the inner Promise
+/// pointer as a plain value. This is the path async-function `return <expr>`
+/// lowers through (see `perry-codegen/src/stmt.rs::Stmt::Return`) — without
+/// the unwrap, `async function produce(): Promise<T> { return new Promise(...) }`
+/// would return a promise whose `value` is a NaN-boxed pointer to the inner
+/// Promise struct, so `await produce()` would see `typeof = 'object'` with all
+/// user fields undefined (the Promise struct's layout) before the inner's
+/// `setTimeout`/`resolve` ever fires. Closes #77.
 #[no_mangle]
 pub extern "C" fn js_promise_resolved(value: f64) -> *mut Promise {
     let promise = js_promise_new();
+    if js_value_is_promise(value) != 0 {
+        let inner = crate::value::js_nanbox_get_pointer(value) as *mut Promise;
+        if !inner.is_null() && inner != promise {
+            js_promise_resolve_with_promise(promise, inner);
+            return promise;
+        }
+    }
     js_promise_resolve(promise, value);
     promise
 }
