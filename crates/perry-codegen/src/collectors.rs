@@ -1190,6 +1190,68 @@ fn collect_ref_ids_in_expr(e: &perry_hir::Expr, out: &mut HashSet<u32>) {
             walk(token, out);
         }
         Expr::StaticFieldSet { value, .. } => walk(value, out),
+        // Array methods that aren't covered by the operand-list groups above.
+        // Without these arms the catch-all `_ => {}` returns no refs, so the
+        // array escape analysis mis-classifies `let arr = [...]; arr.at(i)` /
+        // `arr.entries()` / `arr.values()` etc. as non-escaping and scalar-
+        // replaces the literal into per-element allocas. Subsequent
+        // `js_array_at(NULL, i)` then reads garbage and returns undefined
+        // (issue #91 follow-up: gap test_gap_array_methods regression).
+        Expr::ArrayAt { array, index } => {
+            walk(array, out);
+            walk(index, out);
+        }
+        Expr::ArrayEntries(array)
+        | Expr::ArrayKeys(array)
+        | Expr::ArrayValues(array)
+        | Expr::ArrayFlat { array }
+        | Expr::ArrayToReversed { array } => {
+            walk(array, out);
+        }
+        Expr::ArrayUnshift { array_id, value } => {
+            out.insert(*array_id);
+            walk(value, out);
+        }
+        Expr::ArrayPushSpread { array_id, source } => {
+            out.insert(*array_id);
+            walk(source, out);
+        }
+        Expr::ArrayIndexOf { array, value } => {
+            walk(array, out);
+            walk(value, out);
+        }
+        Expr::ArraySome { array, callback }
+        | Expr::ArrayEvery { array, callback } => {
+            walk(array, out);
+            walk(callback, out);
+        }
+        Expr::ArrayToSorted { array, comparator } => {
+            walk(array, out);
+            if let Some(c) = comparator {
+                walk(c, out);
+            }
+        }
+        Expr::ArrayToSpliced { array, start, delete_count, items } => {
+            walk(array, out);
+            walk(start, out);
+            walk(delete_count, out);
+            for it in items {
+                walk(it, out);
+            }
+        }
+        Expr::ArrayWith { array, index, value } => {
+            walk(array, out);
+            walk(index, out);
+            walk(value, out);
+        }
+        Expr::ArrayCopyWithin { array_id, target, start, end } => {
+            out.insert(*array_id);
+            walk(target, out);
+            walk(start, out);
+            if let Some(e) = end {
+                walk(e, out);
+            }
+        }
         _ => {}
     }
 }
