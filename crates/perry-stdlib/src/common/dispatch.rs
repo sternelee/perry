@@ -36,29 +36,69 @@ pub unsafe extern "C" fn js_handle_method_dispatch(
     let _ = args;
     let _ = handle;
 
-    // Try Fastify app dispatch
+    // Each dispatcher below is gated on TWO conditions: (a) its registry
+    // currently holds this handle id, AND (b) the method name is one this
+    // dispatcher actually handles. Both are required because handle id
+    // namespaces are not unified — `net.createConnection` uses its own
+    // `NEXT_NET_ID` counter, separate from the common HANDLES registry that
+    // backs Fastify/ioredis/HashHandle. A net.Socket at id=1 always
+    // collides with the first object created in the common registry. If we
+    // claimed a handle on registry match alone, calling `socket.write(b)` on
+    // a socket whose id collided with a HashHandle would route to
+    // `dispatch_hash` (registry says yes), find no `write` arm, and silently
+    // return undefined — the bytes never reach the wire (#91). Gating on
+    // method-name vocabulary lets the call fall through to the next
+    // dispatcher when a handle id is reused across registries with disjoint
+    // method sets. The proper long-term fix is a single unified id space;
+    // this is the surgical version.
+
+    // Fastify app: routes for HTTP verbs + lifecycle methods.
     #[cfg(feature = "http-server")]
-    if with_handle::<crate::fastify::FastifyApp, bool, _>(handle, |_| true).unwrap_or(false) {
+    if matches!(
+        method_name,
+        "get" | "post" | "put" | "delete" | "patch" | "head" | "options"
+        | "all" | "addHook" | "setErrorHandler" | "register" | "listen"
+    ) && with_handle::<crate::fastify::FastifyApp, bool, _>(handle, |_| true).unwrap_or(false)
+    {
         return dispatch_fastify_app(handle, method_name, args);
     }
 
-    // Try Fastify context dispatch (request/reply)
+    // Fastify request/reply context.
     #[cfg(feature = "http-server")]
-    if with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false) {
+    if matches!(
+        method_name,
+        "send" | "status" | "code" | "header" | "method" | "url"
+        | "body" | "json" | "params" | "headers"
+    ) && with_handle::<crate::fastify::FastifyContext, bool, _>(handle, |_| true).unwrap_or(false)
+    {
         return dispatch_fastify_context(handle, method_name, args);
     }
 
-    // Try ioredis Redis client dispatch
+    // ioredis client.
     #[cfg(feature = "database-redis")]
-    if with_handle::<crate::ioredis::RedisClient, bool, _>(handle, |_| true).unwrap_or(false) {
+    if matches!(
+        method_name,
+        "connect" | "get" | "set" | "setex" | "del" | "exists"
+        | "incr" | "decr" | "expire" | "ping" | "quit" | "disconnect"
+    ) && with_handle::<crate::ioredis::RedisClient, bool, _>(handle, |_| true).unwrap_or(false)
+    {
         return dispatch_ioredis(handle, method_name, args);
     }
 
-    // Try net.Socket dispatch — covers cases where the socket handle is
-    // accessed through a wrapper function, struct field, or Map.get and
-    // the codegen lost type info. The static NATIVE_MODULE_TABLE path is
-    // still preferred when types are visible (zero-overhead direct call),
-    // but this fallback unblocks library code that wraps net.createConnection.
+    // crypto Hash handle: createHash(...).update(...).digest().
+    // The order vs. net (below) does not matter once method-gated, but we
+    // keep hash before net to avoid changing the priority of in-registry
+    // matches relative to the v0.5.98/#88 ordering.
+    #[cfg(feature = "crypto")]
+    if matches!(method_name, "update" | "digest")
+        && with_handle::<crate::crypto::HashHandle, bool, _>(handle, |_| true).unwrap_or(false)
+    {
+        return crate::crypto::dispatch_hash(handle, method_name, args);
+    }
+
+    // net.Socket: covers wrapper-function, struct-field, and Map.get
+    // receivers where codegen lost the static type. Static NATIVE_MODULE_TABLE
+    // path is still preferred when types are visible.
     #[cfg(all(feature = "net", not(target_os = "ios"), not(target_os = "android")))]
     if crate::net::is_net_socket_handle(handle) {
         return dispatch_net_socket(handle, method_name, args);
