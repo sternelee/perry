@@ -6735,17 +6735,38 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                     match method_name {
                                         "push" => {
                                             if args.len() >= 1 {
-                                                // Check if the argument has spread operator
-                                                if call.args.len() >= 1 && call.args[0].spread.is_some() {
-                                                    return Ok(Expr::ArrayPushSpread {
-                                                        array_id,
-                                                        source: Box::new(args.into_iter().next().unwrap()),
-                                                    });
+                                                // Check if any argument has spread operator —
+                                                // when present, route through the spread path.
+                                                // Multi-arg push without spread is desugared to a
+                                                // Sequence of ArrayPush statements (one per arg);
+                                                // JS spec returns the final array length, which is
+                                                // exactly what the last ArrayPush returns.
+                                                let any_spread = call.args.iter().any(|a| a.spread.is_some());
+                                                if any_spread {
+                                                    if args.len() == 1 {
+                                                        return Ok(Expr::ArrayPushSpread {
+                                                            array_id,
+                                                            source: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                    // Mixed regular + spread: bail to generic
+                                                    // dispatch (no current single-IR-shape).
+                                                } else {
+                                                    if args.len() == 1 {
+                                                        return Ok(Expr::ArrayPush {
+                                                            array_id,
+                                                            value: Box::new(args.into_iter().next().unwrap()),
+                                                        });
+                                                    }
+                                                    let mut stmts: Vec<Expr> = Vec::with_capacity(args.len());
+                                                    for a in args.into_iter() {
+                                                        stmts.push(Expr::ArrayPush {
+                                                            array_id,
+                                                            value: Box::new(a),
+                                                        });
+                                                    }
+                                                    return Ok(Expr::Sequence(stmts));
                                                 }
-                                                return Ok(Expr::ArrayPush {
-                                                    array_id,
-                                                    value: Box::new(args.into_iter().next().unwrap()),
-                                                });
                                             }
                                         }
                                         "pop" => {

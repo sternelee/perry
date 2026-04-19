@@ -86,6 +86,13 @@ SKIP_TESTS=(
     "test_net_socket"
     "test_net_upgrade_tls"
     "test_tls_connect"
+    # Timing benchmarks — print Date.now() deltas which differ
+    # run-to-run. Both perry and node produce correct output;
+    # the parity diff is just measurement noise.
+    "test_issue58_object_string"
+    "test_issue63_arr"
+    "test_issue63_escape"
+    # `test_issue63_asm` prints sink.length (deterministic), keep it.
 )
 
 # Function to check if test should be skipped
