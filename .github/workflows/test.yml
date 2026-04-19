@@ -72,7 +72,22 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Run cargo test
-        run: cargo test --workspace --exclude perry-ui-ios
+        # Exclude UI backends that don't build on the macOS-14 CI image:
+        # - perry-ui-ios / perry-ui-tvos / perry-ui-watchos: need their
+        #   respective SDKs (xcrun --sdk iphoneos / appletvos / watchos)
+        #   which are present but not the active SDK.
+        # - perry-ui-gtk4: needs system pango/gtk via pkg-config; runner
+        #   doesn't have them installed.
+        # - perry-ui-android: needs Android NDK.
+        # - perry-ui-windows: needs win32 headers.
+        run: |
+          cargo test --workspace \
+            --exclude perry-ui-ios \
+            --exclude perry-ui-tvos \
+            --exclude perry-ui-watchos \
+            --exclude perry-ui-gtk4 \
+            --exclude perry-ui-android \
+            --exclude perry-ui-windows
 
   # ---------------------------------------------------------------------------
   # Parity tests (Perry output vs Node.js)
