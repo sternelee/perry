@@ -1548,6 +1548,23 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
         }
     }
 
+    // Raw pointer bitcast to f64 (no NaN-box tag — top16 == 0).
+    // TypedArrays are allocated via `std::alloc` and the codegen
+    // sometimes hands their pointer through as `bitcast i64 → double`
+    // without a POINTER_TAG. Without this path, `Int32Array.length`
+    // returned 0 because the value's top16 was 0, not 0x7FFD.
+    if top16 == 0 && bits >= 0x200_0000_0000 && bits < 0x8000_0000_0000 {
+        let handle = bits as usize;
+        if crate::buffer::is_registered_buffer(handle) {
+            let buf = handle as *const crate::buffer::BufferHeader;
+            return unsafe { (*buf).length as f64 };
+        }
+        if crate::typedarray::lookup_typed_array_kind(handle).is_some() {
+            let ta = handle as *const crate::typedarray::TypedArrayHeader;
+            return unsafe { (*ta).length as f64 };
+        }
+    }
+
     // Everything else — undefined, null, booleans, int32, plain
     // doubles, BigInt pointers — has no `.length`.
     0.0
