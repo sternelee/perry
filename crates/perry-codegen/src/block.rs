@@ -400,7 +400,18 @@ impl LlBlock {
             self.emit(format!("{} = select i1 {}, ptr @perry_null_guard_zero, ptr {}", r, is_bad, handle_ptr));
             r
         };
-        self.load_invariant(I32, &safe_ptr)
+        // NOTE: must NOT use `!invariant.load` here. This helper is the
+        // inline `.length` fast path for Arrays/Strings/Buffers, and
+        // `arr.push`/`arr.pop`/`arr.shift`/`arr.unshift` all mutate the
+        // u32 at offset 0. With `!invariant.load`, LLVM would forward an
+        // earlier load past those calls (per LangRef: invariant.load tells
+        // the optimizer the value never changes for the program's
+        // lifetime, so loads after a potentially-modifying call get
+        // replaced with the cached SSA value). User-visible: after
+        // `arr.unshift(x); console.log(arr[0]); arr.shift();
+        // console.log(arr.length)` the second length read returned the
+        // pre-shift value because of this metadata.
+        self.load(I32, &safe_ptr)
     }
 
     pub fn ptrtoint(&mut self, val: &str, to_ty: LlvmType) -> String {

@@ -77,6 +77,15 @@ SKIP_TESTS=(
     "test_fs"               # fs module needs import
     "test_path"             # path module needs import
     "test_integration_app"  # uses fs module
+    # Network tests — require a live TCP/TLS server on the host. CI runners
+    # don't host one, so these consistently fail with `Connection refused`
+    # against any hard-coded address. Skip in environments where the
+    # server isn't available; both Perry and Node hit the same error so
+    # the diff is just network-noise.
+    "test_net_min"
+    "test_net_socket"
+    "test_net_upgrade_tls"
+    "test_tls_connect"
 )
 
 # Function to check if test should be skipped

@@ -3834,6 +3834,8 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 "RegExp" => 0xFFFF0021u32,
                 "Map" => 0xFFFF0022u32,
                 "Set" => 0xFFFF0023u32,
+                // `Array` — runtime detects via GC_TYPE_ARRAY at obj-8.
+                "Array" => 0xFFFF0024u32,
                 _ => ctx.class_ids.get(ty).copied().unwrap_or(0),
             };
             let cid_str = cid.to_string();

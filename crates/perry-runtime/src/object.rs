@@ -2830,6 +2830,28 @@ pub extern "C" fn js_instanceof(value: f64, class_id: u32) -> f64 {
         return false_val;
     }
 
+    // Array — Perry arrays are heap allocations with `GC_TYPE_ARRAY` in
+    // their gc_header (one byte at obj-8). Pointer can arrive NaN-boxed
+    // (POINTER_TAG) or as a raw bitcast f64; handle both.
+    const CLASS_ID_ARRAY: u32 = 0xFFFF0024;
+    if class_id == CLASS_ID_ARRAY {
+        let addr = if jsval.is_pointer() {
+            (bits & 0x0000_FFFF_FFFF_FFFF) as usize
+        } else {
+            let top16 = (bits >> 48) as u16;
+            if top16 == 0 && bits >= 0x1000 { bits as usize } else { 0 }
+        };
+        if addr != 0 && addr >= crate::gc::GC_HEADER_SIZE {
+            let gc_header = (addr - crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            unsafe {
+                if (*gc_header).obj_type == crate::gc::GC_TYPE_ARRAY {
+                    return true_val;
+                }
+            }
+        }
+        return false_val;
+    }
+
     // Typed arrays — Int8Array..Float64Array reserved IDs (0xFFFF0030..37).
     // The pointer can arrive as either a NaN-boxed POINTER_TAG value or a
     // raw bitcast f64, so handle both forms.
