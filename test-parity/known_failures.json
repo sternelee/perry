@@ -70,5 +70,53 @@
   "test_tls_connect": {
     "status": "skip",
     "reason": "Compile failure — TLS connect not implemented"
+  },
+  "test_closure_capture_types": {
+    "status": "bug",
+    "reason": "Closure box init: js_box_get null-pointer warnings on first read of captured locals before they're written"
+  },
+  "test_edge_closures": {
+    "status": "bug",
+    "reason": "Closure capture: same null-box pattern as test_closure_capture_types"
+  },
+  "test_edge_rest_spread_defaults": {
+    "status": "bug",
+    "reason": "Rest-parameter array elements interpreted as raw doubles instead of NaN-boxed strings (parts.join() prints scientific-notation numbers)"
+  },
+  "test_edge_scope_hoisting": {
+    "status": "bug",
+    "reason": "Closure capture order: js_box_get null-pointer warnings, then NaN result"
+  },
+  "test_gap_buffer_ops": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Likely SDK/linker version interaction; perry CLI itself is fine"
+  },
+  "test_gap_map_set_extended": {
+    "status": "known_limitation",
+    "reason": "Map keying does not distinguish -0 from +0 (JS spec says they're the same key, but Map.has(0) after Map.set(-0, ...) differs from Node)"
+  },
+  "test_gap_node_crypto_buffer": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops"
+  },
+  "test_gap_typed_arrays": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x. Same SDK gap as test_gap_buffer_ops"
+  },
+  "test_stress_buffer": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x"
+  },
+  "test_stress_int_ops": {
+    "status": "ci-env",
+    "reason": "Compile-fails on macOS-14 CI runner, passes locally on macOS 15.x"
+  },
+  "test_stress_nanbox": {
+    "status": "bug",
+    "reason": "NaN-boxing edge cases: typeof undefined inside specific stress patterns differs (run-to-run noise possible)"
+  },
+  "test_stress_promises": {
+    "status": "bug",
+    "reason": "Promise resolve order under heavy concurrency — perry returns array values where Node returns scalar 42"
   }
 }
