@@ -2713,15 +2713,22 @@ function perry_ui_stack_set_distribution(h) { /* no-op in web */ }
 function perry_ui_widget_set_context_menu(widgetH, menuH) { /* simplified stub */ }
 
 // ---------- Animations ----------
-function perry_ui_animate_opacity(h, from, to, duration) {
+// Canonical API: animateOpacity(target, durationSecs), animatePosition(dx, dy, durationSecs).
+function perry_ui_animate_opacity(h, target, durationSecs) {
   const el = uiGet(h); if (!el) return;
-  el.style.opacity = from; el.style.transition = `opacity ${duration}ms ease`;
-  requestAnimationFrame(() => { el.style.opacity = to; });
+  const cur = el.style.opacity === "" ? "1" : el.style.opacity;
+  el.style.opacity = cur;
+  el.style.transition = `opacity ${durationSecs}s ease`;
+  requestAnimationFrame(() => { el.style.opacity = target; });
 }
-function perry_ui_animate_position(h, fromX, fromY, toX, toY, duration) {
+function perry_ui_animate_position(h, dx, dy, durationSecs) {
   const el = uiGet(h); if (!el) return;
-  el.style.transform = `translate(${fromX}px, ${fromY}px)`; el.style.transition = `transform ${duration}ms ease`;
-  requestAnimationFrame(() => { el.style.transform = `translate(${toX}px, ${toY}px)`; });
+  const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(el.style.transform || "");
+  const curX = m ? parseFloat(m[1]) : 0;
+  const curY = m ? parseFloat(m[2]) : 0;
+  el.style.transform = `translate(${curX}px, ${curY}px)`;
+  el.style.transition = `transform ${durationSecs}s ease`;
+  requestAnimationFrame(() => { el.style.transform = `translate(${curX + dx}px, ${curY + dy}px)`; });
 }
 
 // ---------- Events ----------

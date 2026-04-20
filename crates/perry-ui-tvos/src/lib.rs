@@ -858,16 +858,16 @@ pub extern "C" fn perry_ui_widget_set_on_double_click(handle: i64, callback: f64
     widgets::set_on_double_click(handle, callback);
 }
 
-/// Animate the opacity of a widget.
+/// Animate the opacity of a widget. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_ms: f64) {
-    widgets::animate_opacity(handle, target, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_opacity(handle: i64, target: f64, duration_secs: f64) {
+    widgets::animate_opacity(handle, target, duration_secs);
 }
 
-/// Animate the position of a widget by delta.
+/// Animate the position of a widget by delta. `duration_secs` is in seconds.
 #[no_mangle]
-pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
-    widgets::animate_position(handle, dx, dy, duration_ms);
+pub extern "C" fn perry_ui_widget_animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
+    widgets::animate_position(handle, dx, dy, duration_secs);
 }
 
 /// Register an onChange callback for a state cell.

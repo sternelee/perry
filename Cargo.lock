@@ -4037,7 +4037,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "atty",
@@ -4081,7 +4081,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "log",
@@ -4092,7 +4092,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-glance"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4100,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-js"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4109,7 +4109,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-swiftui"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4118,7 +4118,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-wasm"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "base64",
@@ -4130,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-wear-tiles"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4138,7 +4138,7 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "serde",
  "serde_json",
@@ -4146,7 +4146,7 @@ dependencies = [
 
 [[package]]
 name = "perry-hir"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4158,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -4177,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4189,7 +4189,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "base64",
@@ -4210,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4274,7 +4274,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4284,7 +4284,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",
@@ -4292,11 +4292,11 @@ dependencies = [
 
 [[package]]
 name = "perry-ui"
-version = "0.5.115"
+version = "0.5.116"
 
 [[package]]
 name = "perry-ui-android"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "itoa",
  "jni",
@@ -4310,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-geisterhand"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -4320,7 +4320,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-gtk4"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "cairo-rs",
  "gtk4",
@@ -4331,7 +4331,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-ios"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "block2",
  "libc",
@@ -4345,7 +4345,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-macos"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "block2",
  "libc",
@@ -4362,7 +4362,7 @@ version = "0.1.0"
 
 [[package]]
 name = "perry-ui-tvos"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "block2",
  "libc",
@@ -4376,7 +4376,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-watchos"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "block2",
  "libc",
@@ -4388,7 +4388,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-windows"
-version = "0.5.115"
+version = "0.5.116"
 dependencies = [
  "libc",
  "perry-runtime",

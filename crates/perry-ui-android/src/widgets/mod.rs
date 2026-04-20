@@ -407,30 +407,32 @@ pub fn set_on_double_click(_handle: i64, _callback: f64) {
     // No-op for now
 }
 
-/// Animate opacity.
-pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
+/// Animate opacity. `duration_secs` is in seconds.
+pub fn animate_opacity(handle: i64, target: f64, duration_secs: f64) {
     if let Some(view_ref) = get_widget(handle) {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(8);
         let animator = env.call_method(view_ref.as_obj(), "animate", "()Landroid/view/ViewPropertyAnimator;", &[])
             .expect("animate").l().expect("animator");
+        let dur_ms = (duration_secs * 1000.0) as i64;
         let _ = env.call_method(&animator, "alpha", "(F)Landroid/view/ViewPropertyAnimator;", &[JValue::Float(target as f32)]);
-        let _ = env.call_method(&animator, "setDuration", "(J)Landroid/view/ViewPropertyAnimator;", &[JValue::Long(duration_ms as i64)]);
+        let _ = env.call_method(&animator, "setDuration", "(J)Landroid/view/ViewPropertyAnimator;", &[JValue::Long(dur_ms)]);
         let _ = env.call_method(&animator, "start", "()V", &[]);
         unsafe { env.pop_local_frame(&JObject::null()); }
     }
 }
 
-/// Animate position.
-pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
+/// Animate position. `duration_secs` is in seconds.
+pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
     if let Some(view_ref) = get_widget(handle) {
         let mut env = jni_bridge::get_env();
         let _ = env.push_local_frame(8);
         let animator = env.call_method(view_ref.as_obj(), "animate", "()Landroid/view/ViewPropertyAnimator;", &[])
             .expect("animate").l().expect("animator");
+        let dur_ms = (duration_secs * 1000.0) as i64;
         let _ = env.call_method(&animator, "translationXBy", "(F)Landroid/view/ViewPropertyAnimator;", &[JValue::Float(dx as f32)]);
         let _ = env.call_method(&animator, "translationYBy", "(F)Landroid/view/ViewPropertyAnimator;", &[JValue::Float(dy as f32)]);
-        let _ = env.call_method(&animator, "setDuration", "(J)Landroid/view/ViewPropertyAnimator;", &[JValue::Long(duration_ms as i64)]);
+        let _ = env.call_method(&animator, "setDuration", "(J)Landroid/view/ViewPropertyAnimator;", &[JValue::Long(dur_ms)]);
         let _ = env.call_method(&animator, "start", "()V", &[]);
         unsafe { env.pop_local_frame(&JObject::null()); }
     }

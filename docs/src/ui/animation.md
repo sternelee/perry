@@ -9,8 +9,8 @@ import { Text } from "perry/ui";
 
 const label = Text("Fading text");
 
-// Animate opacity from current to target over duration
-label.animateOpacity(0.0, 1.0); // targetOpacity, durationSeconds
+// Animate from the widget's current opacity to `target` over `durationSecs`.
+label.animateOpacity(1.0, 0.3); // target, durationSeconds
 ```
 
 ## Position Animation
@@ -20,11 +20,14 @@ import { Button } from "perry/ui";
 
 const btn = Button("Moving", () => {});
 
-// Animate position
-btn.animatePosition(100, 200, 0.5); // targetX, targetY, durationSeconds
+// Animate by a delta (dx, dy) relative to the widget's current position.
+btn.animatePosition(100, 200, 0.5); // dx, dy, durationSeconds
 ```
 
 ## Example: Fade-In Effect
+
+When the first argument reads from a `State.value`, Perry auto-subscribes
+the call to the state — toggling `visible` re-runs the animation.
 
 ```typescript
 import { App, Text, Button, VStack, State } from "perry/ui";

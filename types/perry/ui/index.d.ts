@@ -3,8 +3,27 @@
 // and tsc can resolve `import { ... } from "perry/ui"`.
 
 declare const __widget: unique symbol;
+
+/**
+ * Instance methods available on every Widget handle. The handle itself is
+ * a NaN-boxed number at runtime; the compiler lowers these method calls to
+ * `perry_ui_widget_*` FFI entries.
+ */
+export interface WidgetMethods {
+    /**
+     * Animate the widget's opacity to `target` over `durationSecs` seconds.
+     * The animation starts from the widget's current opacity.
+     */
+    animateOpacity(target: number, durationSecs: number): void;
+    /**
+     * Animate the widget's position by `(dx, dy)` pixels over `durationSecs`
+     * seconds, relative to its current position.
+     */
+    animatePosition(dx: number, dy: number, durationSecs: number): void;
+}
+
 /** Opaque handle to a native UI widget. */
-export type Widget = number & { readonly [__widget]: void };
+export type Widget = number & WidgetMethods & { readonly [__widget]: void };
 
 /** Reactive state container. Generic over the value type it holds. */
 export interface State<T = number> {
@@ -182,8 +201,10 @@ export function widgetSetOverlayFrame(widget: Widget, x: number, y: number, widt
 export function widgetSetOnClick(widget: Widget, callback: () => void): void;
 export function widgetSetOnHover(widget: Widget, callback: () => void): void;
 export function widgetSetOnDoubleClick(widget: Widget, callback: () => void): void;
-export function widgetAnimateOpacity(widget: Widget, duration: number, opacity: number): void;
-export function widgetAnimatePosition(widget: Widget, duration: number, x: number, y: number): void;
+/** Animate opacity to `target` over `durationSecs` seconds. */
+export function widgetAnimateOpacity(widget: Widget, target: number, durationSecs: number): void;
+/** Animate position by `(dx, dy)` pixels over `durationSecs` seconds. */
+export function widgetAnimatePosition(widget: Widget, dx: number, dy: number, durationSecs: number): void;
 
 /** Set padding (edge insets) on a widget. */
 export function setPadding(widget: Widget, top: number, left: number, bottom: number, right: number): void;

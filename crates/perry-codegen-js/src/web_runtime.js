@@ -47,8 +47,8 @@ function wrapWidget(h) {
         setEnabled(e) { perry_ui_set_enabled(h, e); },
         setTooltip(t) { perry_ui_set_tooltip(h, t); },
         setControlSize(s) { perry_ui_set_control_size(h, s); },
-        animateOpacity(from, to, dur) { perry_ui_animate_opacity(h, from, to, dur); },
-        animatePosition(fx, fy, tx, ty, dur) { perry_ui_animate_position(h, fx, fy, tx, ty, dur); },
+        animateOpacity(target, durationSecs) { perry_ui_animate_opacity(h, target, durationSecs); },
+        animatePosition(dx, dy, durationSecs) { perry_ui_animate_position(h, dx, dy, durationSecs); },
         setOnClick(cb) { perry_ui_set_on_click(h, cb); },
         setOnHover(cb) { perry_ui_set_on_hover(h, cb); },
         setOnDoubleClick(cb) { perry_ui_set_on_double_click(h, cb); },
@@ -470,22 +470,29 @@ function perry_ui_set_control_size(h, size) {
 }
 
 // --- Animations ---
-function perry_ui_animate_opacity(h, from, to, duration) {
+// Canonical API: animateOpacity(target, durationSecs).
+// The animation runs from the element's *current* opacity to `target`.
+function perry_ui_animate_opacity(h, target, durationSecs) {
     const el = getHandle(h);
     if (!el) return;
-    el.style.opacity = from;
-    el.style.transition = `opacity ${duration}s ease`;
-    requestAnimationFrame(() => { el.style.opacity = to; });
+    const cur = el.style.opacity === "" ? "1" : el.style.opacity;
+    el.style.opacity = cur;
+    el.style.transition = `opacity ${durationSecs}s ease`;
+    requestAnimationFrame(() => { el.style.opacity = target; });
 }
 
-function perry_ui_animate_position(h, fromX, fromY, toX, toY, duration) {
+// animatePosition(dx, dy, durationSecs) — delta relative to current position.
+function perry_ui_animate_position(h, dx, dy, durationSecs) {
     const el = getHandle(h);
     if (!el) return;
-    el.style.position = "relative";
-    el.style.left = fromX + "px";
-    el.style.top = fromY + "px";
-    el.style.transition = `left ${duration}s ease, top ${duration}s ease`;
-    requestAnimationFrame(() => { el.style.left = toX + "px"; el.style.top = toY + "px"; });
+    if (!el.style.position || el.style.position === "static") el.style.position = "relative";
+    const curLeft = parseFloat(el.style.left) || 0;
+    const curTop = parseFloat(el.style.top) || 0;
+    el.style.transition = `left ${durationSecs}s ease, top ${durationSecs}s ease`;
+    requestAnimationFrame(() => {
+        el.style.left = (curLeft + dx) + "px";
+        el.style.top = (curTop + dy) + "px";
+    });
 }
 
 // --- Event Handlers ---

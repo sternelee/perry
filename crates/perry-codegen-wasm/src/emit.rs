@@ -350,6 +350,9 @@ fn map_ui_method(method: &str, class_name: Option<&str>) -> &'static str {
         // Animations
         "animateOpacity" | "animate_opacity" => "perry_ui_animate_opacity",
         "animatePosition" | "animate_position" => "perry_ui_animate_position",
+        // widget-prefixed free-function forms (used by HIR reactive desugar)
+        "widgetAnimateOpacity" => "perry_ui_animate_opacity",
+        "widgetAnimatePosition" => "perry_ui_animate_position",
         // Events
         "setOnClick" | "set_on_click" => "perry_ui_set_on_click",
         "setOnHover" | "set_on_hover" => "perry_ui_set_on_hover",

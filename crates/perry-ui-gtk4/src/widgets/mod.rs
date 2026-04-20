@@ -320,12 +320,12 @@ pub fn set_on_double_click(handle: i64, callback: f64) {
     }
 }
 
-/// Animate the opacity of a widget.
-pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
+/// Animate the opacity of a widget. `duration_secs` is in seconds.
+pub fn animate_opacity(handle: i64, target: f64, duration_secs: f64) {
     use gtk4::glib;
     if let Some(widget) = get_widget(handle) {
         let start = widget.opacity();
-        let steps = (duration_ms / 16.0).max(1.0) as i32;
+        let steps = ((duration_secs * 1000.0) / 16.0).max(1.0) as i32;
         let delta = (target - start) / steps as f64;
         let step_count = std::cell::Cell::new(0);
         glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
@@ -448,13 +448,13 @@ pub fn set_alignment(handle: i64, alignment: i64) {
     }
 }
 
-/// Animate the position of a widget (via margin offset).
-pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
+/// Animate the position of a widget (via margin offset). `duration_secs` is in seconds.
+pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
     use gtk4::glib;
     if let Some(widget) = get_widget(handle) {
         let start_x = widget.margin_start() as f64;
         let start_y = widget.margin_top() as f64;
-        let steps = (duration_ms / 16.0).max(1.0) as i32;
+        let steps = ((duration_secs * 1000.0) / 16.0).max(1.0) as i32;
         let step_count = std::cell::Cell::new(0);
         glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
             let i = step_count.get() + 1;

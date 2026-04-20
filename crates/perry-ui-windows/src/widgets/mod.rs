@@ -1081,15 +1081,15 @@ pub fn set_on_double_click(handle: i64, callback: f64) {
     }
 }
 
-/// Animate the opacity of a widget.
-pub fn animate_opacity(handle: i64, _target: f64, _duration_ms: f64) {
+/// Animate the opacity of a widget. `duration_secs` is in seconds.
+pub fn animate_opacity(handle: i64, _target: f64, _duration_secs: f64) {
     // Win32 opacity animation requires WS_EX_LAYERED + SetLayeredWindowAttributes + SetTimer.
     // Best-effort no-op.
     let _ = handle;
 }
 
-/// Animate the position of a widget.
-pub fn animate_position(handle: i64, _dx: f64, _dy: f64, _duration_ms: f64) {
+/// Animate the position of a widget. `duration_secs` is in seconds.
+pub fn animate_position(handle: i64, _dx: f64, _dy: f64, _duration_secs: f64) {
     // Win32 position animation requires SetTimer + incremental SetWindowPos.
     // Best-effort no-op.
     let _ = handle;

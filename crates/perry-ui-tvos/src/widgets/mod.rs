@@ -497,11 +497,10 @@ pub fn set_tooltip(_handle: i64, _text: &str) {}
 /// Set control size variant (no-op on iOS).
 pub fn set_control_size(_handle: i64, _size: i64) {}
 
-/// Animate the opacity of a widget.
-pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
+/// Animate the opacity of a widget. `duration_secs` is in seconds.
+pub fn animate_opacity(handle: i64, target: f64, duration_secs: f64) {
     if let Some(view) = get_widget(handle) {
         unsafe {
-            let duration_secs = duration_ms / 1000.0;
             let layer: *mut AnyObject = objc2::msg_send![&*view, layer];
             let anim_cls = AnyClass::get(c"CABasicAnimation").unwrap();
             let key = objc2_foundation::NSString::from_str("opacity");
@@ -520,8 +519,8 @@ pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
     }
 }
 
-/// Animate the position of a widget by delta.
-pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
+/// Animate the position of a widget by delta. `duration_secs` is in seconds.
+pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
     if let Some(view) = get_widget(handle) {
         unsafe {
             let frame: objc2_core_foundation::CGRect = objc2::msg_send![&*view, frame];
@@ -533,7 +532,7 @@ pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
             let anim_cls = AnyClass::get(c"CABasicAnimation").unwrap();
             let key = objc2_foundation::NSString::from_str("position");
             let anim: *mut AnyObject = objc2::msg_send![anim_cls, animationWithKeyPath: &*key];
-            let _: () = objc2::msg_send![anim, setDuration: duration_ms / 1000.0];
+            let _: () = objc2::msg_send![anim, setDuration: duration_secs];
             let _: () = objc2::msg_send![layer, addAnimation: anim, forKey: &*key];
             let _: () = objc2::msg_send![&*view, setFrame: new_frame];
         }

@@ -955,12 +955,11 @@ pub fn set_control_size(handle: i64, size: i64) {
     }
 }
 
-/// Animate the opacity of a widget.
-pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
+/// Animate the opacity of a widget. `duration_secs` is in seconds.
+pub fn animate_opacity(handle: i64, target: f64, duration_secs: f64) {
     if let Some(view) = get_widget(handle) {
         unsafe {
             let _: () = objc2::msg_send![&*view, setWantsLayer: true];
-            let duration_secs = duration_ms / 1000.0;
             // Use NSAnimationContext
             let ctx_cls = AnyClass::get(c"NSAnimationContext").unwrap();
             let _: () = objc2::msg_send![ctx_cls, beginGrouping];
@@ -973,11 +972,10 @@ pub fn animate_opacity(handle: i64, target: f64, duration_ms: f64) {
     }
 }
 
-/// Animate the position of a widget by delta.
-pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_ms: f64) {
+/// Animate the position of a widget by delta. `duration_secs` is in seconds.
+pub fn animate_position(handle: i64, dx: f64, dy: f64, duration_secs: f64) {
     if let Some(view) = get_widget(handle) {
         unsafe {
-            let duration_secs = duration_ms / 1000.0;
             let frame: objc2_core_foundation::CGRect = objc2::msg_send![&*view, frame];
             let new_origin = objc2_core_foundation::CGPoint::new(
                 frame.origin.x + dx,
