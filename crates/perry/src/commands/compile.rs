@@ -1138,7 +1138,18 @@ fn build_optimized_libs(
         );
     }
 
+    // Tier-3 Apple targets (tvOS, watchOS) aren't shipped with a prebuilt
+    // libstd; cargo needs `+nightly -Zbuild-std` to synthesize core/alloc/std
+    // from source for the cross-compile.
+    let is_tier3 = matches!(
+        target,
+        Some("tvos") | Some("tvos-simulator") | Some("watchos") | Some("watchos-simulator")
+    );
+
     let mut cargo_cmd = Command::new("cargo");
+    if is_tier3 {
+        cargo_cmd.arg("+nightly");
+    }
     cargo_cmd
         .current_dir(&workspace_root)
         .env("CARGO_TARGET_DIR", &target_dir)
@@ -1147,6 +1158,9 @@ fn build_optimized_libs(
         .arg("-p").arg("perry-runtime")
         .arg("-p").arg("perry-stdlib")
         .arg("--no-default-features");
+    if is_tier3 {
+        cargo_cmd.arg("-Zbuild-std=std,panic_abort");
+    }
     // Both perry-runtime and perry-stdlib accept their own feature lists.
     // Cargo's `--features` takes `crate/feature` syntax for cross-crate
     // selection — we always enable perry-stdlib's stdlib-side bridge so
@@ -5166,7 +5180,15 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         // Rename _main to _perry_main_init in the entry object file so it doesn't
         // conflict with the SwiftUI @main entry point in PerryWatchApp.swift.
         // The Swift runtime calls perry_main_init() to initialize the compiled TS code.
-        if let Some(entry_obj) = obj_paths.iter().find(|f| f.to_string_lossy().contains("main_ts")) {
+        // The entry object is the one whose stem matches the user's input file stem
+        // (e.g. `test_ui_counter.ts` → `test_ui_counter_ts.o`).
+        let input_stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| format!("{}_ts", s))
+            .unwrap_or_else(|| "main_ts".to_string());
+        if let Some(entry_obj) = obj_paths.iter().find(|f| {
+            f.file_stem().and_then(|s| s.to_str()) == Some(input_stem.as_str())
+        }) {
             // Use rust-objcopy (newer Rust) or llvm-objcopy (older) to rename _main
             let objcopy = std::env::var("HOME").ok()
                 .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
