@@ -5388,7 +5388,14 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             })
         };
         let mut c = Command::new(linker);
-        c.arg("/SUBSYSTEM:WINDOWS")
+        // CONSOLE for CLI programs so the loader attaches stdin/stdout/stderr
+        // before main() runs — otherwise println!() in js_console_log writes
+        // to a detached handle and nothing appears in the terminal (#108).
+        // WINDOWS for UI programs so no console flashes alongside the window.
+        // /ENTRY:mainCRTStartup works for both: Perry emits `int main()` and
+        // the MSVC CRT invokes it regardless of subsystem.
+        let subsystem = if ctx.needs_ui { "/SUBSYSTEM:WINDOWS" } else { "/SUBSYSTEM:CONSOLE" };
+        c.arg(subsystem)
          .arg("/ENTRY:mainCRTStartup")
          .arg("/NOLOGO")
          // Perry generates large init functions for TS modules (one function
