@@ -26,6 +26,8 @@ members = [
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
     "crates/perry-ui-test",
+    "crates/perry-ui-testkit",
+    "crates/perry-doc-tests",
 ]
 # Only build platform-independent crates by default.
 # Platform-specific UI crates (perry-ui-macos, perry-ui-ios, etc.) must be built
@@ -102,7 +104,7 @@ opt-level = "s"       # Optimize for size in stdlib
 opt-level = 3
 
 [workspace.package]
-version = "0.5.122"
+version = "0.5.123"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/PerryTS/perry"
@@ -176,3 +178,4 @@ perry-codegen-swiftui = { path = "crates/perry-codegen-swiftui" }
 perry-codegen-glance = { path = "crates/perry-codegen-glance" }
 perry-codegen-wear-tiles = { path = "crates/perry-codegen-wear-tiles" }
 perry-codegen-wasm = { path = "crates/perry-codegen-wasm" }
+perry-ui-testkit = { path = "crates/perry-ui-testkit" }

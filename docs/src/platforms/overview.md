@@ -35,7 +35,7 @@ perry app.ts -o app --target android
 
 Use the `__platform__` compile-time constant to branch by platform:
 
-```typescript
+```typescript,no-test
 declare const __platform__: number;
 
 // Platform constants:

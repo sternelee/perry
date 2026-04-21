@@ -32,7 +32,7 @@ my-app/
 
 ### 2. Use in your app
 
-```typescript
+```typescript,no-test
 import { requestReview } from "perry-appstore-review";
 
 // Show the review prompt when the user completes a meaningful action
@@ -55,7 +55,7 @@ The `--bundle-extensions` flag tells Perry to discover, compile, and link all na
 
 Opens the native app store review prompt. Returns a promise that resolves when the prompt has been presented (or skipped by the OS).
 
-```typescript
+```typescript,no-test
 import { requestReview } from "perry-appstore-review";
 
 await requestReview();
@@ -129,7 +129,7 @@ On unsupported platforms (Linux, Windows, Web), `requestReview()` resolves immed
 
 **Don't ask too often.** Even though iOS throttles automatically, Android does not have the same strict limits. Implement your own logic to track when you last asked:
 
-```typescript
+```typescript,no-test
 import { requestReview } from "perry-appstore-review";
 import { preferencesGet, preferencesSet } from "perry/system";
 

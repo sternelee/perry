@@ -4,7 +4,7 @@ Perry compiles a practical subset of TypeScript to native code. This page lists 
 
 ## Primitive Types
 
-```typescript
+```typescript,no-test
 const n: number = 42;
 const s: string = "hello";
 const b: boolean = true;
@@ -16,7 +16,7 @@ All primitives are represented as 64-bit NaN-boxed values at runtime.
 
 ## Variables and Constants
 
-```typescript
+```typescript,no-test
 let x = 10;
 const y = "immutable";
 var z = true; // var is supported but let/const preferred
@@ -26,7 +26,7 @@ Perry infers types from initializers — `let x = 5` is inferred as `number` wit
 
 ## Functions
 
-```typescript
+```typescript,no-test
 function add(a: number, b: number): number {
   return a + b;
 }
@@ -47,7 +47,7 @@ const double = (x: number) => x * 2;
 
 ## Classes
 
-```typescript
+```typescript,no-test
 class Animal {
   name: string;
 
@@ -91,7 +91,7 @@ Supported class features:
 
 ## Enums
 
-```typescript
+```typescript,no-test
 // Numeric enums
 enum Direction {
   Up,
@@ -115,7 +115,7 @@ Enums are compiled to constants and work across modules.
 
 ## Interfaces and Type Aliases
 
-```typescript
+```typescript,no-test
 interface User {
   name: string;
   age: number;
@@ -131,7 +131,7 @@ Interfaces and type aliases are erased at compile time (like `tsc`). They exist 
 
 ## Arrays
 
-```typescript
+```typescript,no-test
 const nums: number[] = [1, 2, 3];
 
 // Array methods
@@ -170,7 +170,7 @@ for (const item of nums) {
 
 ## Objects
 
-```typescript
+```typescript,no-test
 const obj = { name: "Perry", version: 1 };
 obj.name = "Perry 2";
 
@@ -192,7 +192,7 @@ delete obj[key];
 
 ## Destructuring
 
-```typescript
+```typescript,no-test
 // Array destructuring
 const [a, b, ...rest] = [1, 2, 3, 4, 5];
 
@@ -213,7 +213,7 @@ function process({ name, age }: User) {
 
 ## Template Literals
 
-```typescript
+```typescript,no-test
 const name = "world";
 const greeting = `Hello, ${name}!`;
 const multiline = `
@@ -225,7 +225,7 @@ const expr = `Result: ${1 + 2}`;
 
 ## Spread and Rest
 
-```typescript
+```typescript,no-test
 // Array spread
 const combined = [...arr1, ...arr2];
 
@@ -238,7 +238,7 @@ function log(...args: any[]) { /* ... */ }
 
 ## Closures
 
-```typescript
+```typescript,no-test
 function makeCounter() {
   let count = 0;
   return {
@@ -256,7 +256,7 @@ Perry performs closure conversion — captured variables are stored in heap-allo
 
 ## Async/Await
 
-```typescript
+```typescript,no-test
 async function fetchUser(id: number): Promise<User> {
   const response = await fetch(`/api/users/${id}`);
   return await response.json();
@@ -270,7 +270,7 @@ Perry compiles async functions to a state machine backed by Tokio's async runtim
 
 ## Promises
 
-```typescript
+```typescript,no-test
 const p = new Promise<number>((resolve, reject) => {
   resolve(42);
 });
@@ -283,7 +283,7 @@ const results = await Promise.all([fetch(url1), fetch(url2)]);
 
 ## Generators
 
-```typescript
+```typescript,no-test
 function* range(start: number, end: number) {
   for (let i = start; i < end; i++) {
     yield i;
@@ -297,7 +297,7 @@ for (const n of range(0, 10)) {
 
 ## Map and Set
 
-```typescript
+```typescript,no-test
 const map = new Map<string, number>();
 map.set("a", 1);
 map.get("a");
@@ -314,7 +314,7 @@ set.size;
 
 ## Regular Expressions
 
-```typescript
+```typescript,no-test
 const re = /hello\s+(\w+)/;
 const match = "hello world".match(re);
 
@@ -327,7 +327,7 @@ const replaced = "hello world".replace(/world/, "perry");
 
 ## Error Handling
 
-```typescript
+```typescript,no-test
 try {
   throw new Error("something went wrong");
 } catch (e) {
@@ -339,7 +339,7 @@ try {
 
 ## JSON
 
-```typescript
+```typescript,no-test
 const obj = JSON.parse('{"key": "value"}');
 const str = JSON.stringify(obj);
 const pretty = JSON.stringify(obj, null, 2);
@@ -347,7 +347,7 @@ const pretty = JSON.stringify(obj, null, 2);
 
 ## typeof and instanceof
 
-```typescript
+```typescript,no-test
 if (typeof x === "string") {
   console.log(x.length);
 }
@@ -361,7 +361,7 @@ if (obj instanceof Dog) {
 
 ## Modules
 
-```typescript
+```typescript,no-test
 // Named exports
 export function helper() { /* ... */ }
 export const VALUE = 42;
@@ -379,7 +379,7 @@ export { helper } from "./module";
 
 ## BigInt
 
-```typescript
+```typescript,no-test
 const big = BigInt(9007199254740991);
 const result = big + BigInt(1);
 
@@ -394,7 +394,7 @@ const not = ~big;
 
 ## String Methods
 
-```typescript
+```typescript,no-test
 const s = "Hello, World!";
 s.length;
 s.toUpperCase();
@@ -416,7 +416,7 @@ s.padEnd(20);
 
 ## Math
 
-```typescript
+```typescript,no-test
 Math.floor(3.7);
 Math.ceil(3.2);
 Math.round(3.5);
@@ -435,7 +435,7 @@ Math.cos(0);
 
 ## Date
 
-```typescript
+```typescript,no-test
 const now = Date.now();
 const d = new Date();
 d.getTime();
@@ -444,7 +444,7 @@ d.toISOString();
 
 ## Console
 
-```typescript
+```typescript,no-test
 console.log("message");
 console.error("error");
 console.warn("warning");
@@ -456,7 +456,7 @@ console.timeEnd("label");
 
 Perry includes a mark-sweep garbage collector. It runs automatically when memory pressure is detected (~8MB arena blocks), but you can also trigger it manually:
 
-```typescript
+```typescript,no-test
 gc(); // Explicit garbage collection
 ```
 
@@ -466,7 +466,7 @@ The GC uses conservative stack scanning to find roots and supports arena-allocat
 
 Perry supports JSX syntax for UI component composition:
 
-```typescript
+```typescript,no-test
 // Component functions
 function Greeting({ name }: { name: string }) {
   return <Text>{`Hello, ${name}!`}</Text>;

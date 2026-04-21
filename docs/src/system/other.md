@@ -6,7 +6,7 @@ Additional platform-level APIs.
 
 Open a URL in the default browser or application:
 
-```typescript
+```typescript,no-test
 import { openURL } from "perry/system";
 
 openURL("https://example.com");
@@ -24,7 +24,7 @@ openURL("mailto:user@example.com");
 
 ## Dark Mode Detection
 
-```typescript
+```typescript,no-test
 import { isDarkMode } from "perry/system";
 
 if (isDarkMode()) {
@@ -43,7 +43,7 @@ if (isDarkMode()) {
 
 ## Clipboard
 
-```typescript
+```typescript,no-test
 import { clipboardGet, clipboardSet } from "perry/system";
 
 clipboardSet("Copied text!");
@@ -54,7 +54,7 @@ const text = clipboardGet();
 
 Get the device's language as a 2-letter ISO 639-1 code:
 
-```typescript
+```typescript,no-test
 import { getLocale } from "perry/system";
 
 const lang = getLocale(); // "de", "en", "fr", "es", etc.
@@ -78,7 +78,7 @@ if (lang === "de") {
 
 Get the icon for an application or file as a native Image widget. Useful for building app launchers, file browsers, and search UIs:
 
-```typescript
+```typescript,no-test
 import { getAppIcon } from "perry/system";
 import { VStack, HStack, Text, Image } from "perry/ui";
 

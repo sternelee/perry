@@ -4,7 +4,7 @@ Perry supports animating widget properties for smooth transitions.
 
 ## Opacity Animation
 
-```typescript
+```typescript,no-test
 import { Text } from "perry/ui";
 
 const label = Text("Fading text");
@@ -15,7 +15,7 @@ label.animateOpacity(1.0, 0.3); // target, durationSeconds
 
 ## Position Animation
 
-```typescript
+```typescript,no-test
 import { Button } from "perry/ui";
 
 const btn = Button("Moving", () => {});
@@ -30,24 +30,7 @@ When the first argument reads from a `State.value`, Perry auto-subscribes
 the call to the state — toggling `visible` re-runs the animation.
 
 ```typescript
-import { App, Text, Button, VStack, State } from "perry/ui";
-
-const visible = State(false);
-
-const label = Text("Hello!");
-label.animateOpacity(visible.value ? 1.0 : 0.0, 0.3);
-
-App({
-  title: "Animation Demo",
-  width: 400,
-  height: 300,
-  body: VStack(16, [
-    Button("Toggle", () => {
-      visible.set(!visible.value);
-    }),
-    label,
-  ]),
-});
+{{#include ../../examples/ui/animation/fade_in.ts}}
 ```
 
 ## Platform Notes

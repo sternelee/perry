@@ -2,7 +2,7 @@
 
 Perry's i18n system lets you write natural English strings and have them automatically translated at compile time. Zero ceremony, near-zero runtime cost.
 
-```typescript
+```typescript,no-test
 import { Button, Text } from "perry/ui";
 
 Button("Next")                              // Automatically localized

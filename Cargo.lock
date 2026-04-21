@@ -1514,6 +1514,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
+name = "dssim-core"
+version = "3.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3c601412450ff29a9258b2f85b18b38f658caf70fad1692f40ca863d86cb753"
+dependencies = [
+ "imgref",
+ "itertools 0.14.0",
+ "rayon",
+ "rgb",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4037,7 +4049,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perry"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "atty",
@@ -4081,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "log",
@@ -4092,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-glance"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4100,7 +4112,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-js"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4109,7 +4121,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-swiftui"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4118,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-wasm"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "base64",
@@ -4130,7 +4142,7 @@ dependencies = [
 
 [[package]]
 name = "perry-codegen-wear-tiles"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4138,15 +4150,29 @@ dependencies = [
 
 [[package]]
 name = "perry-diagnostics"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "perry-doc-tests"
+version = "0.5.124"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dssim-core",
+ "image",
+ "rgb",
+ "serde",
+ "serde_json",
+ "walkdir",
+]
+
+[[package]]
 name = "perry-hir"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4158,7 +4184,7 @@ dependencies = [
 
 [[package]]
 name = "perry-jsruntime"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "deno_core",
@@ -4177,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "perry-parser"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "perry-diagnostics",
@@ -4189,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "perry-runtime"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "base64",
@@ -4210,7 +4236,7 @@ dependencies = [
 
 [[package]]
 name = "perry-stdlib"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4274,7 +4300,7 @@ dependencies = [
 
 [[package]]
 name = "perry-transform"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "perry-hir",
@@ -4284,7 +4310,7 @@ dependencies = [
 
 [[package]]
 name = "perry-types"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "anyhow",
  "thiserror 1.0.69",
@@ -4292,11 +4318,11 @@ dependencies = [
 
 [[package]]
 name = "perry-ui"
-version = "0.5.119"
+version = "0.5.124"
 
 [[package]]
 name = "perry-ui-android"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "itoa",
  "jni",
@@ -4310,7 +4336,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-geisterhand"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -4320,18 +4346,19 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-gtk4"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "cairo-rs",
  "gtk4",
  "libc",
  "perry-runtime",
  "perry-ui",
+ "perry-ui-testkit",
 ]
 
 [[package]]
 name = "perry-ui-ios"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "block2",
  "libc",
@@ -4345,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-macos"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "block2",
  "libc",
@@ -4354,6 +4381,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "perry-ui",
+ "perry-ui-testkit",
 ]
 
 [[package]]
@@ -4361,8 +4389,12 @@ name = "perry-ui-test"
 version = "0.1.0"
 
 [[package]]
+name = "perry-ui-testkit"
+version = "0.5.124"
+
+[[package]]
 name = "perry-ui-tvos"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "block2",
  "libc",
@@ -4376,7 +4408,7 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-watchos"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "block2",
  "libc",
@@ -4388,11 +4420,12 @@ dependencies = [
 
 [[package]]
 name = "perry-ui-windows"
-version = "0.5.119"
+version = "0.5.124"
 dependencies = [
  "libc",
  "perry-runtime",
  "perry-ui",
+ "perry-ui-testkit",
  "windows",
 ]
 
@@ -5147,6 +5180,9 @@ name = "rgb"
 version = "0.8.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "ring"

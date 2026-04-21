@@ -10,7 +10,7 @@ Hooks support three execution modes:
 
 Each plugin receives data and returns (possibly modified) data. The output of one plugin becomes the input of the next:
 
-```typescript
+```typescript,no-test
 api.registerHook("transform", (data) => {
   data.content = data.content.toUpperCase();
   return data; // Returned data goes to next plugin
@@ -21,7 +21,7 @@ api.registerHook("transform", (data) => {
 
 Plugins receive data but return value is ignored. Used for side effects:
 
-```typescript
+```typescript,no-test
 api.registerHook("onSave", (data) => {
   console.log(`Saved: ${data.path}`);
   // Return value ignored
@@ -32,7 +32,7 @@ api.registerHook("onSave", (data) => {
 
 Like filter mode, but specifically for accumulating/building up a result through the chain:
 
-```typescript
+```typescript,no-test
 api.registerHook("buildMenu", (items) => {
   items.push({ label: "My Plugin Action", action: () => {} });
   return items;
@@ -43,7 +43,7 @@ api.registerHook("buildMenu", (items) => {
 
 Lower priority numbers run first:
 
-```typescript
+```typescript,no-test
 api.registerHook("beforeSave", validate, 10);   // Runs first
 api.registerHook("beforeSave", transform, 20);   // Runs second
 api.registerHook("beforeSave", log, 100);         // Runs last
@@ -57,7 +57,7 @@ Plugins can communicate with each other through events:
 
 ### Emitting Events
 
-```typescript
+```typescript,no-test
 // From a plugin
 api.emit("dataUpdated", { source: "my-plugin", records: 42 });
 
@@ -68,7 +68,7 @@ emitEvent("dataUpdated", { source: "host", records: 100 });
 
 ### Listening for Events
 
-```typescript
+```typescript,no-test
 api.on("dataUpdated", (data) => {
   console.log(`${data.source} updated ${data.records} records`);
 });
@@ -78,14 +78,14 @@ api.on("dataUpdated", (data) => {
 
 Plugins register callable tools:
 
-```typescript
+```typescript,no-test
 // Plugin registers a tool
 api.registerTool("formatCode", (args) => {
   return formatSource(args.code, args.language);
 });
 ```
 
-```typescript
+```typescript,no-test
 // Host invokes the tool
 import { invokeTool } from "perry/plugin";
 
@@ -99,14 +99,14 @@ const formatted = invokeTool("formatCode", {
 
 Hosts can pass configuration to plugins:
 
-```typescript
+```typescript,no-test
 // Host sets config
 import { setConfig } from "perry/plugin";
 setConfig("theme", "dark");
 setConfig("maxRetries", "3");
 ```
 
-```typescript
+```typescript,no-test
 // Plugin reads config
 export function activate(api: PluginAPI) {
   const theme = api.getConfig("theme");     // "dark"
@@ -118,7 +118,7 @@ export function activate(api: PluginAPI) {
 
 Query loaded plugins and their registrations:
 
-```typescript
+```typescript,no-test
 import { listPlugins, listHooks, listTools } from "perry/plugin";
 
 const plugins = listPlugins();  // [{ name, version, description }]

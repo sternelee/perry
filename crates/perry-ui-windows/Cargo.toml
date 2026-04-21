@@ -8,6 +8,7 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 perry-ui = { path = "../perry-ui" }
+perry-ui-testkit = { workspace = true }
 perry-runtime = { path = "../perry-runtime", default-features = false, features = ["stdlib"] }
 libc = "0.2"
 

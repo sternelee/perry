@@ -1,6 +1,6 @@
 # parallelMap
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 function parallelMap<T, U>(data: T[], fn: (item: T) => U): U[];
@@ -10,7 +10,7 @@ Processes every element of an array in parallel across all available CPU cores. 
 
 ## Basic Usage
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 const numbers = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -37,7 +37,7 @@ Perry automatically detects the number of CPU cores and splits the array into eq
 
 The mapping function can reference variables from the outer scope. Captured values are deep-copied to each worker thread automatically:
 
-```typescript
+```typescript,no-test
 const exchangeRate = 1.12;
 const fees = [0.01, 0.02, 0.015];
 
@@ -63,7 +63,7 @@ const converted = parallelMap(prices, (price) => {
 
 Mutable variables — variables that are reassigned anywhere in the enclosing scope — are rejected at compile time:
 
-```typescript
+```typescript,no-test
 let total = 0;
 
 // COMPILE ERROR: Cannot capture mutable variable 'total'
@@ -75,7 +75,7 @@ parallelMap(data, (item) => {
 
 Instead, return values and reduce:
 
-```typescript
+```typescript,no-test
 const results = parallelMap(data, (item) => item * 2);
 const total = results.reduce((sum, x) => sum + x, 0);
 ```
@@ -87,7 +87,7 @@ const total = results.reduce((sum, x) => sum + x, 0);
 Use `parallelMap` when the computation per element is **significantly heavier** than the cost of copying the element across threads.
 
 **Good candidates** (CPU-bound work per element):
-```typescript
+```typescript,no-test
 // Heavy math
 parallelMap(data, (x) => expensiveComputation(x));
 
@@ -99,7 +99,7 @@ parallelMap(inputs, (input) => computeHash(input));
 ```
 
 **Poor candidates** (trivial work per element):
-```typescript
+```typescript,no-test
 // Too simple — threading overhead outweighs the gain
 parallelMap(numbers, (x) => x + 1);
 
@@ -119,7 +119,7 @@ When elements are pure numbers (no strings, objects, or arrays), Perry transfers
 
 ### Matrix Row Processing
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 // Process each row of a matrix independently
@@ -134,7 +134,7 @@ const rowSums = parallelMap(rows, (row) => {
 
 ### Batch Validation
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 const users = [
@@ -152,7 +152,7 @@ const validationResults = parallelMap(users, (user) => {
 
 ### Financial Calculations
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 const portfolios = getPortfolioData(); // thousands of portfolios

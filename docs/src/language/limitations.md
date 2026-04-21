@@ -6,7 +6,7 @@ Perry compiles a practical subset of TypeScript. This page documents what's not 
 
 Types are erased at compile time. There is no runtime type system — Perry doesn't generate type guards or runtime type metadata.
 
-```typescript
+```typescript,no-test
 // These annotations are erased — no runtime effect
 const x: number = someFunction(); // No runtime check that result is actually a number
 ```
@@ -17,7 +17,7 @@ Use explicit `typeof` checks where runtime type discrimination is needed.
 
 Perry compiles to native code ahead of time. Dynamic code execution is not possible:
 
-```typescript
+```typescript,no-test
 // Not supported
 eval("console.log('hi')");
 new Function("return 42");
@@ -27,7 +27,7 @@ new Function("return 42");
 
 TypeScript decorators are not currently supported:
 
-```typescript
+```typescript,no-test
 // Not supported
 @Component
 class MyClass {}
@@ -37,7 +37,7 @@ class MyClass {}
 
 There is no `Reflect` API or runtime type metadata:
 
-```typescript
+```typescript,no-test
 // Not supported
 Reflect.getMetadata("design:type", target, key);
 ```
@@ -46,7 +46,7 @@ Reflect.getMetadata("design:type", target, key);
 
 Only static imports are supported:
 
-```typescript
+```typescript,no-test
 // Supported
 import { foo } from "./module";
 
@@ -59,7 +59,7 @@ const mod = await import("./module");
 
 Perry compiles classes to fixed structures. Dynamic prototype modification is not supported:
 
-```typescript
+```typescript,no-test
 // Not supported
 MyClass.prototype.newMethod = function() {};
 Object.setPrototypeOf(obj, proto);
@@ -69,7 +69,7 @@ Object.setPrototypeOf(obj, proto);
 
 The `Symbol` primitive type is not currently supported:
 
-```typescript
+```typescript,no-test
 // Not supported
 const sym = Symbol("description");
 ```
@@ -78,7 +78,7 @@ const sym = Symbol("description");
 
 Weak references are not implemented:
 
-```typescript
+```typescript,no-test
 // Not supported
 const wm = new WeakMap();
 const wr = new WeakRef(obj);
@@ -88,7 +88,7 @@ const wr = new WeakRef(obj);
 
 The `Proxy` object is not supported:
 
-```typescript
+```typescript,no-test
 // Not supported
 const proxy = new Proxy(target, handler);
 ```
@@ -97,7 +97,7 @@ const proxy = new Proxy(target, handler);
 
 `Error` and basic `throw`/`catch` work, but custom error subclasses have limited support:
 
-```typescript
+```typescript,no-test
 // Works
 throw new Error("message");
 
@@ -121,7 +121,7 @@ Threads do not share mutable state — closures passed to thread primitives cann
 
 Dynamic property keys in object literals are limited:
 
-```typescript
+```typescript,no-test
 // Supported
 const key = "name";
 obj[key] = "value";
@@ -144,7 +144,7 @@ Not all npm packages work with Perry:
 
 For cases where you need dynamic behavior, use the JavaScript runtime fallback:
 
-```typescript
+```typescript,no-test
 import { jsEval } from "perry/jsruntime";
 // Routes specific code through QuickJS for dynamic evaluation
 ```
@@ -153,7 +153,7 @@ import { jsEval } from "perry/jsruntime";
 
 Since there's no runtime type checking, use explicit checks:
 
-```typescript
+```typescript,no-test
 // Instead of relying on type narrowing from generics
 if (typeof value === "string") {
   // String path

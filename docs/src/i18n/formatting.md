@@ -2,7 +2,7 @@
 
 Perry provides format wrapper functions that automatically format values according to the current locale. Import them from `perry/i18n`:
 
-```typescript
+```typescript,no-test
 import { Currency, Percent, ShortDate, LongDate, FormatNumber, FormatTime, Raw } from "perry/i18n";
 ```
 
@@ -12,7 +12,7 @@ import { Currency, Percent, ShortDate, LongDate, FormatNumber, FormatTime, Raw }
 
 Formats a number as currency with the locale's symbol, decimal separator, and symbol placement:
 
-```typescript
+```typescript,no-test
 Text("Total: {price}", { price: Currency(23.10) })
 // en: "Total: $23.10"
 // de: "Total: 23,10 €"
@@ -24,7 +24,7 @@ Text("Total: {price}", { price: Currency(23.10) })
 
 Formats a decimal as a percentage (value is multiplied by 100):
 
-```typescript
+```typescript,no-test
 Text("Discount: {rate}", { rate: Percent(0.15) })
 // en: "Discount: 15%"
 // de: "Discount: 15 %"
@@ -35,7 +35,7 @@ Text("Discount: {rate}", { rate: Percent(0.15) })
 
 Formats a number with locale-appropriate grouping and decimal separators:
 
-```typescript
+```typescript,no-test
 Text("Population: {n}", { n: FormatNumber(1234567.89) })
 // en: "Population: 1,234,567.89"
 // de: "Population: 1.234.567,89"
@@ -46,7 +46,7 @@ Text("Population: {n}", { n: FormatNumber(1234567.89) })
 
 Formats a timestamp (milliseconds since epoch) as a date:
 
-```typescript
+```typescript,no-test
 const now = Date.now();
 
 Text("Due: {d}", { d: ShortDate(now) })
@@ -64,7 +64,7 @@ Text("Event: {d}", { d: LongDate(now) })
 
 Formats a timestamp as time (12h vs 24h based on locale):
 
-```typescript
+```typescript,no-test
 Text("At: {t}", { t: FormatTime(timestamp) })
 // en: "At: 3:45 PM"
 // de: "At: 15:45"
@@ -75,7 +75,7 @@ Text("At: {t}", { t: FormatTime(timestamp) })
 
 Pass-through — prevents any automatic formatting. Use when a parameter name might trigger auto-formatting but you want the raw value:
 
-```typescript
+```typescript,no-test
 Text("Code: {amount}", { amount: Raw(12345) })
 // All locales: "Code: 12345" (no currency formatting despite the name)
 ```

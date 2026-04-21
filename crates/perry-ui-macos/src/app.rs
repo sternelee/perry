@@ -507,7 +507,66 @@ pub fn app_run(_app_handle: i64) {
         }
     }
 
+    install_test_mode_exit_timer();
+
     app.run();
+}
+
+/// If `PERRY_UI_TEST_MODE=1`, schedule an NSTimer that captures a screenshot
+/// (when `PERRY_UI_SCREENSHOT_PATH` is set) and exits the process cleanly.
+/// This lets doc-example programs be verified in CI without a human.
+fn install_test_mode_exit_timer() {
+    if !perry_ui_testkit::is_test_mode() {
+        return;
+    }
+    let delay_secs = perry_ui_testkit::exit_delay_ms() as f64 / 1000.0;
+    unsafe {
+        let target = PerryTestExitTarget::new();
+        let sel = Sel::register(c"testExit:");
+        let _: Retained<AnyObject> = msg_send![
+            objc2::class!(NSTimer),
+            scheduledTimerWithTimeInterval: delay_secs,
+            target: &*target,
+            selector: sel,
+            userInfo: std::ptr::null::<AnyObject>(),
+            repeats: false
+        ];
+        std::mem::forget(target);
+    }
+}
+
+pub struct PerryTestExitTargetIvars;
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "PerryTestExitTarget"]
+    #[ivars = PerryTestExitTargetIvars]
+    pub struct PerryTestExitTarget;
+
+    impl PerryTestExitTarget {
+        #[unsafe(method(testExit:))]
+        fn test_exit(&self, _sender: &AnyObject) {
+            if let Some(path) = perry_ui_testkit::screenshot_path() {
+                let mut len: usize = 0;
+                let ptr = crate::screenshot::perry_ui_screenshot_capture(&mut len as *mut usize);
+                if !ptr.is_null() && len > 0 {
+                    perry_ui_testkit::write_screenshot_bytes(&path, ptr, len);
+                    unsafe { libc::free(ptr as *mut libc::c_void); }
+                }
+            }
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+            std::process::exit(0);
+        }
+    }
+);
+
+impl PerryTestExitTarget {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(PerryTestExitTargetIvars);
+        unsafe { msg_send![super(this), init] }
+    }
 }
 
 /// Set the minimum window size.

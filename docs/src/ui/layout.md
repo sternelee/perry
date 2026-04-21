@@ -6,7 +6,7 @@ Perry provides layout containers that arrange child widgets using the platform's
 
 Arranges children vertically (top to bottom).
 
-```typescript
+```typescript,no-test
 import { VStack, Text, Button } from "perry/ui";
 
 VStack(16, [
@@ -26,7 +26,7 @@ VStack(16, [
 
 Arranges children horizontally (left to right).
 
-```typescript
+```typescript,no-test
 import { HStack, Text, Button, Spacer } from "perry/ui";
 
 HStack(8, [
@@ -42,7 +42,7 @@ HStack(8, [
 
 Layers children on top of each other (back to front).
 
-```typescript
+```typescript,no-test
 import { ZStack, Text, Image } from "perry/ui";
 
 ZStack(0, [
@@ -55,7 +55,7 @@ ZStack(0, [
 
 A scrollable container.
 
-```typescript
+```typescript,no-test
 import { ScrollView, VStack, Text } from "perry/ui";
 
 ScrollView(
@@ -74,7 +74,7 @@ ScrollView(
 
 A vertically scrolling list that lazily renders items. More efficient than `ScrollView` + `VStack` for large lists.
 
-```typescript
+```typescript,no-test
 import { LazyVStack, Text } from "perry/ui";
 
 LazyVStack(1000, (index) => {
@@ -86,7 +86,7 @@ LazyVStack(1000, (index) => {
 
 A navigation container that supports push/pop navigation.
 
-```typescript
+```typescript,no-test
 import { NavigationStack, VStack, Text, Button } from "perry/ui";
 
 NavigationStack(
@@ -103,7 +103,7 @@ NavigationStack(
 
 A flexible space that expands to fill available room.
 
-```typescript
+```typescript,no-test
 import { HStack, Text, Spacer } from "perry/ui";
 
 HStack(8, [
@@ -119,7 +119,7 @@ Use `Spacer()` inside `HStack` or `VStack` to push widgets apart.
 
 A visual separator line.
 
-```typescript
+```typescript,no-test
 import { VStack, Text, Divider } from "perry/ui";
 
 VStack(12, [
@@ -133,7 +133,7 @@ VStack(12, [
 
 Layouts can be nested freely:
 
-```typescript
+```typescript,no-test
 import { App, VStack, HStack, Text, Button, Spacer, Divider } from "perry/ui";
 
 App({
@@ -167,7 +167,7 @@ App({
 
 Containers support dynamic child management:
 
-```typescript
+```typescript,no-test
 const stack = VStack(16, []);
 // Add children dynamically
 stack.addChild(Text("New child"));
@@ -188,7 +188,7 @@ stack.clearChildren();
 
 Control how children are aligned within a stack using `stackSetAlignment`:
 
-```typescript
+```typescript,no-test
 import { VStack, Text, stackSetAlignment } from "perry/ui";
 
 const centered = VStack(16, [
@@ -218,7 +218,7 @@ stackSetAlignment(centered, 9); // CenterX
 
 Control how children share space within a stack using `stackSetDistribution`:
 
-```typescript
+```typescript,no-test
 import { HStack, Button, stackSetDistribution } from "perry/ui";
 
 const buttons = HStack(8, [
@@ -240,7 +240,7 @@ stackSetDistribution(buttons, 1); // FillEqually — both buttons get equal widt
 
 Pin a child's edges to its parent container:
 
-```typescript
+```typescript,no-test
 import { VStack, Text, widgetMatchParentWidth } from "perry/ui";
 
 const banner = Text("Full width banner");
@@ -256,7 +256,7 @@ VStack(16, [banner, Text("Normal width")]);
 
 Control whether a widget resists being stretched beyond its intrinsic size:
 
-```typescript
+```typescript,no-test
 import { VStack, Text, widgetSetHugging } from "perry/ui";
 
 const label = Text("I stay small");
@@ -273,7 +273,7 @@ widgetSetHugging(filler, 1); // Low priority — stretch to fill
 
 For absolute positioning, add overlay children to any container:
 
-```typescript
+```typescript,no-test
 import { VStack, Text, widgetAddOverlay, widgetSetOverlayFrame } from "perry/ui";
 
 const container = VStack(16, [Text("Main content")]);
@@ -292,7 +292,7 @@ Overlay children are positioned absolutely relative to their parent — similar 
 
 Create resizable split panes for sidebar layouts:
 
-```typescript
+```typescript,no-test
 import { SplitView, splitViewAddChild, VStack, Text } from "perry/ui";
 
 const split = SplitView();
@@ -310,7 +310,7 @@ The user can drag the divider to resize panes. On macOS this maps to `NSSplitVie
 
 Create a stack with padding in a single call:
 
-```typescript
+```typescript,no-test
 import { VStackWithInsets, HStackWithInsets, Text, widgetAddChild } from "perry/ui";
 
 // VStackWithInsets(spacing, top, right, bottom, left)
@@ -325,7 +325,7 @@ Equivalent to creating a stack and then calling `setEdgeInsets`, but more concis
 
 By default, hidden children still occupy space in a stack. To collapse them:
 
-```typescript
+```typescript,no-test
 import { VStack, Text, widgetSetHidden, stackSetDetachesHidden } from "perry/ui";
 
 const stack = VStack(8, [Text("Always visible"), Text("Sometimes hidden")]);
@@ -336,14 +336,14 @@ stackSetDetachesHidden(stack, 1); // Hidden children leave no gap
 
 ### Centered content
 
-```typescript
+```typescript,no-test
 const page = VStack(16, [Text("Title"), Text("Subtitle")]);
 stackSetAlignment(page, 9); // CenterX
 ```
 
 ### Sidebar + content
 
-```typescript
+```typescript,no-test
 const split = SplitView();
 splitViewAddChild(split, sidebar);
 splitViewAddChild(split, content);
@@ -351,14 +351,14 @@ splitViewAddChild(split, content);
 
 ### Equal-width button row
 
-```typescript
+```typescript,no-test
 const row = HStack(8, [Button("Cancel", onCancel), Button("OK", onOK)]);
 stackSetDistribution(row, 1); // FillEqually
 ```
 
 ### Full-width child in a stack
 
-```typescript
+```typescript,no-test
 const input = TextField("Search...", onChange);
 widgetMatchParentWidth(input);
 VStack(12, [input, results]);
@@ -366,7 +366,7 @@ VStack(12, [input, results]);
 
 ### Floating badge / overlay
 
-```typescript
+```typescript,no-test
 const icon = Image("bell.png");
 const badge = Text("3");
 widgetAddOverlay(icon, badge);
@@ -375,7 +375,7 @@ widgetSetOverlayFrame(badge, 20, -5, 16, 16);
 
 ### Toolbar with spacer
 
-```typescript
+```typescript,no-test
 HStack(8, [
   Button("Back", goBack),
   Spacer(),

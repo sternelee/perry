@@ -4,7 +4,7 @@
 
 Use `{param}` placeholders in your strings and pass values as a second argument:
 
-```typescript
+```typescript,no-test
 import { Text } from "perry/ui";
 
 Text("Hello, {name}!", { name: user.name })
@@ -71,7 +71,7 @@ Plural forms use dot-suffix keys based on CLDR plural categories: `.zero`, `.one
 
 Reference the base key without any suffix. Perry detects the plural variants automatically:
 
-```typescript
+```typescript,no-test
 Text("You have {count} items", { count: cart.items.length })
 ```
 
@@ -104,7 +104,7 @@ Perry includes hand-rolled CLDR plural rules for 30+ locales:
 
 For strings outside UI components (API responses, notifications, etc.), use `t()`:
 
-```typescript
+```typescript,no-test
 import { t } from "perry/i18n";
 
 const message = t("Your order has been shipped.");

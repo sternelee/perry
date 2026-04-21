@@ -4,7 +4,7 @@ The `Canvas` widget provides a 2D drawing surface for custom graphics.
 
 ## Creating a Canvas
 
-```typescript
+```typescript,no-test
 import { Canvas } from "perry/ui";
 
 const canvas = Canvas(400, 300, (ctx) => {
@@ -19,7 +19,7 @@ const canvas = Canvas(400, 300, (ctx) => {
 
 ### Rectangles
 
-```typescript
+```typescript,no-test
 Canvas(400, 300, (ctx) => {
   // Filled rectangle
   ctx.setFillColor("#FF0000");
@@ -34,7 +34,7 @@ Canvas(400, 300, (ctx) => {
 
 ### Lines
 
-```typescript
+```typescript,no-test
 Canvas(400, 300, (ctx) => {
   ctx.setStrokeColor("#000000");
   ctx.setLineWidth(1);
@@ -47,7 +47,7 @@ Canvas(400, 300, (ctx) => {
 
 ### Circles and Arcs
 
-```typescript
+```typescript,no-test
 Canvas(400, 300, (ctx) => {
   ctx.setFillColor("#00FF00");
   ctx.beginPath();
@@ -58,7 +58,7 @@ Canvas(400, 300, (ctx) => {
 
 ## Colors
 
-```typescript
+```typescript,no-test
 Canvas(400, 300, (ctx) => {
   ctx.setFillColor("#FF6600");    // Hex color
   ctx.setStrokeColor("#333333");
@@ -68,7 +68,7 @@ Canvas(400, 300, (ctx) => {
 
 ## Gradients
 
-```typescript
+```typescript,no-test
 Canvas(400, 300, (ctx) => {
   ctx.setGradient("#FF0000", "#0000FF"); // Start color, end color
   ctx.fillRect(0, 0, 400, 300);
@@ -77,7 +77,7 @@ Canvas(400, 300, (ctx) => {
 
 ## Text on Canvas
 
-```typescript
+```typescript,no-test
 Canvas(400, 300, (ctx) => {
   ctx.setFillColor("#000000");
   ctx.fillText("Hello Canvas!", 50, 50);
@@ -97,7 +97,7 @@ Canvas(400, 300, (ctx) => {
 
 ## Complete Example
 
-```typescript
+```typescript,no-test
 import { App, Canvas, VStack } from "perry/ui";
 
 App({

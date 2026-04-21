@@ -2,7 +2,7 @@
 
 Perry gives you real OS threads with a one-line API. No worker setup, no message ports, no structured clone overhead. Just `parallelMap`, `parallelFilter`, and `spawn`.
 
-```typescript
+```typescript,no-test
 import { parallelMap, parallelFilter, spawn } from "perry/thread";
 
 // Process a million items across all CPU cores
@@ -38,7 +38,7 @@ Perry doesn't have this limitation. It compiles TypeScript to native machine cod
 
 Split an array across all CPU cores. Each element is processed independently. Results are collected in order.
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 const prices = [100, 200, 300, 400, 500, 600, 700, 800];
@@ -65,7 +65,7 @@ For small arrays, Perry skips threading entirely and processes inline — no ove
 
 Filter a large array across all CPU cores. Like `.filter()` but parallel:
 
-```typescript
+```typescript,no-test
 import { parallelFilter } from "perry/thread";
 
 const users = getMillionUsers();
@@ -82,7 +82,7 @@ Same rules as `parallelMap`: closures cannot capture mutable variables (compile-
 
 Run any computation in the background and get a Promise back. The main thread continues immediately.
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 // Start heavy work in the background
@@ -108,7 +108,7 @@ console.log("Done:", result);
 
 ### Parallel Image Processing
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 // Each pixel processed on a separate core
@@ -122,7 +122,7 @@ const processed = parallelMap(pixels, (pixel) => {
 
 ### Parallel Cryptographic Hashing
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 // Hash thousands of items across all cores
@@ -134,7 +134,7 @@ const hashed = parallelMap(passwords, (password) => {
 
 ### Multiple Independent Computations
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 // Three independent tasks run simultaneously on three OS threads
@@ -148,7 +148,7 @@ const [result1, result2, result3] = await Promise.all([task1, task2, task3]);
 
 ### Keeping UI Responsive
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 import { Text, Button } from "perry/ui";
 
@@ -173,7 +173,7 @@ Text(statusText);
 
 Closures can capture outer variables. Captured values are automatically deep-copied to each worker thread:
 
-```typescript
+```typescript,no-test
 import { parallelMap } from "perry/thread";
 
 const taxRate = 0.08;
@@ -196,7 +196,7 @@ Perry enforces thread safety **at compile time**. You don't need to think about 
 
 Closures passed to `parallelMap` and `spawn` **cannot capture mutable variables**. The compiler rejects this:
 
-```typescript
+```typescript,no-test
 let counter = 0;
 
 // COMPILE ERROR: Closures passed to parallelMap cannot
@@ -209,7 +209,7 @@ parallelMap(data, (item) => {
 
 This eliminates data races by design. If you need to aggregate results, use the return values:
 
-```typescript
+```typescript,no-test
 // Instead of mutating a shared counter, return values and reduce
 const results = parallelMap(data, (item) => processItem(item));
 const total = results.reduce((sum, r) => sum + r, 0);

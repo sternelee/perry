@@ -4,7 +4,7 @@ The `Table` widget displays tabular data with columns, headers, and row selectio
 
 ## Creating a Table
 
-```typescript
+```typescript,no-test
 import { Table } from "perry/ui";
 
 const table = Table(10, 3, (row, col) => {
@@ -16,7 +16,7 @@ const table = Table(10, 3, (row, col) => {
 
 ## Column Headers
 
-```typescript
+```typescript,no-test
 const table = Table(100, 3, (row, col) => {
   const data = [
     ["Alice", "alice@example.com", "Admin"],
@@ -33,7 +33,7 @@ table.setColumnHeader(2, "Role");
 
 ## Column Widths
 
-```typescript
+```typescript,no-test
 table.setColumnWidth(0, 150);  // Name column
 table.setColumnWidth(1, 250);  // Email column
 table.setColumnWidth(2, 100);  // Role column
@@ -41,7 +41,7 @@ table.setColumnWidth(2, 100);  // Role column
 
 ## Row Selection
 
-```typescript
+```typescript,no-test
 table.setOnRowSelect((row) => {
   console.log(`Selected row: ${row}`);
 });
@@ -54,7 +54,7 @@ const selected = table.getSelectedRow();
 
 Update the number of rows after creation:
 
-```typescript
+```typescript,no-test
 table.updateRowCount(newCount);
 ```
 
@@ -68,7 +68,7 @@ table.updateRowCount(newCount);
 
 ## Complete Example
 
-```typescript
+```typescript,no-test
 import { App, Table, Text, VStack, State } from "perry/ui";
 
 const selectedName = State("None");

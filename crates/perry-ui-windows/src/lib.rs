@@ -77,7 +77,6 @@ pub mod widgets;
 pub mod window;
 pub mod layout;
 
-#[cfg(feature = "geisterhand")]
 pub mod screenshot;
 
 // =============================================================================

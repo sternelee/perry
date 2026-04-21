@@ -4,7 +4,7 @@ Perry supports creating multiple native windows and controlling their appearance
 
 ## Creating Windows
 
-```typescript
+```typescript,no-test
 import { App, Window, Text, Button, VStack } from "perry/ui";
 
 const win = Window("Settings", 500, 400);
@@ -28,7 +28,7 @@ App({
 
 ## Window Instance Methods
 
-```typescript
+```typescript,no-test
 const win = Window("My Window", 600, 400);
 
 win.setBody(widget);     // Set the root widget
@@ -44,7 +44,7 @@ win.onFocusLost(() => {  // Called when window loses focus
 
 The main `App({})` config object supports several window properties for building launcher-style, overlay, or utility apps:
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack } from "perry/ui";
 
 App({
@@ -131,7 +131,7 @@ Controls whether the app appears in the dock/taskbar.
 
 Window management is also available as standalone functions for use with window handles:
 
-```typescript
+```typescript,no-test
 import { Window, windowHide, windowSetSize, onWindowFocusLost } from "perry/ui";
 
 const win = Window("Panel", 400, 300);

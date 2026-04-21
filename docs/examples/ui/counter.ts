@@ -1,3 +1,7 @@
+// demonstrates: minimal stateful UI — label + increment button
+// docs: docs/src/ui/state.md
+// platforms: macos, linux, windows
+
 import { App, VStack, Text, Button, State } from "perry/ui"
 
 const count = State(0)
@@ -9,5 +13,5 @@ App({
     body: VStack(16, [
         Text(`Count: ${count.value}`),
         Button("Increment", () => count.set(count.value + 1)),
-    ])
+    ]),
 })

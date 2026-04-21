@@ -1,6 +1,6 @@
 # spawn
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 function spawn<T>(fn: () => T): Promise<T>;
@@ -10,7 +10,7 @@ Runs a closure on a new OS thread and returns a Promise that resolves when the t
 
 ## Basic Usage
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 const result = await spawn(() => {
@@ -29,7 +29,7 @@ console.log(result); // 4999999950000000
 
 `spawn` returns immediately. The main thread doesn't wait:
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 console.log("1. Starting background work");
@@ -56,7 +56,7 @@ Output:
 
 Spawn multiple tasks and they run truly concurrently — one OS thread per `spawn` call:
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 const t1 = spawn(() => analyzeCustomers(regionA));
@@ -77,7 +77,7 @@ Unlike Node.js `worker_threads`, each `spawn` is a lightweight OS thread (~8MB s
 
 Like `parallelMap`, `spawn` closures can capture outer variables. They are deep-copied to the background thread:
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 const config = { iterations: 1000, seed: 42 };
@@ -95,7 +95,7 @@ Mutable variables cannot be captured — this is enforced at compile time.
 
 `spawn` can return any value type. Complex values (objects, arrays, strings) are serialized back to the main thread automatically:
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 const stats = await spawn(() => {
@@ -115,7 +115,7 @@ console.log(stats.mean, stats.median);
 
 `spawn` is ideal for keeping native UIs responsive during heavy computation:
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 import { Text, Button, VStack } from "perry/ui";
 
@@ -143,7 +143,7 @@ Without `spawn`, the analysis would freeze the UI. With `spawn`, the user can st
 
 ## Compared to Node.js worker_threads
 
-```typescript
+```typescript,no-test
 // ── Node.js: ~15 lines, separate file needed ──────────
 // worker.js
 const { parentPort, workerData } = require("worker_threads");
@@ -171,7 +171,7 @@ No separate files. No message ports. No event handlers. No structured clone. One
 
 ### Background File Processing
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 import { readFileSync } from "fs";
 
@@ -184,7 +184,7 @@ const analysis = await spawn(() => {
 
 ### Parallel API Calls with Processing
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 // Fetch data, then process it on a background thread
@@ -198,7 +198,7 @@ const processed = await spawn(() => {
 
 ### Deferred Computation
 
-```typescript
+```typescript,no-test
 import { spawn } from "perry/thread";
 
 // Start computation early, use result later

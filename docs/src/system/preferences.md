@@ -4,7 +4,7 @@ Store and retrieve user preferences using the platform's native storage.
 
 ## Usage
 
-```typescript
+```typescript,no-test
 import { preferencesSet, preferencesGet } from "perry/system";
 
 // Store a preference
@@ -19,7 +19,7 @@ const fontSize = preferencesGet("fontSize");  // "14"
 
 Values are stored as strings. Convert numbers and booleans as needed:
 
-```typescript
+```typescript,no-test
 preferencesSet("count", String(42));
 const count = Number(preferencesGet("count"));
 ```

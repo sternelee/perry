@@ -6,7 +6,7 @@ Perry can compile TypeScript widget declarations to native widget extensions acr
 
 Home screen widgets display glanceable information outside your app. Perry's `perry/widget` module lets you define widgets in TypeScript that compile to each platform's native widget system.
 
-```typescript
+```typescript,no-test
 import { Widget, Text, VStack } from "perry/widget";
 
 Widget({

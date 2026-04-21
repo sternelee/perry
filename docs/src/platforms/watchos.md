@@ -81,7 +81,7 @@ All widgets support these styling modifiers:
 
 watchOS apps use SwiftUI's `@main App` pattern. Perry's PerryWatchApp.swift runtime handles the app lifecycle automatically:
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack, Button } from "perry/ui";
 
 App({
@@ -106,7 +106,7 @@ Under the hood:
 
 Reactive state works the same as other platforms:
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack, Button, State } from "perry/ui";
 
 const count = State(0);
@@ -173,7 +173,7 @@ This shares App Store Connect credentials with iOS/macOS (same team, API key, is
 
 Use `__platform__ === 5` to detect watchOS at compile time:
 
-```typescript
+```typescript,no-test
 declare const __platform__: number;
 
 if (__platform__ === 5) {

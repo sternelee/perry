@@ -4,14 +4,14 @@ Available components and modifiers for widgets.
 
 ## Text
 
-```typescript
+```typescript,no-test
 Text("Hello, World!")
 Text(`${entry.name}: ${entry.value}`)
 ```
 
 ### Text Modifiers
 
-```typescript
+```typescript,no-test
 const t = Text("Styled");
 t.font("title");       // .title, .headline, .body, .caption, etc.
 t.color("blue");       // Named color or hex
@@ -22,7 +22,7 @@ t.bold();
 
 ### VStack
 
-```typescript
+```typescript,no-test
 VStack([
   Text("Top"),
   Text("Bottom"),
@@ -31,7 +31,7 @@ VStack([
 
 ### HStack
 
-```typescript
+```typescript,no-test
 HStack([
   Text("Left"),
   Spacer(),
@@ -41,7 +41,7 @@ HStack([
 
 ### ZStack
 
-```typescript
+```typescript,no-test
 ZStack([
   Image("background"),
   Text("Overlay"),
@@ -52,7 +52,7 @@ ZStack([
 
 Flexible space that expands to fill available room:
 
-```typescript
+```typescript,no-test
 HStack([
   Text("Left"),
   Spacer(),
@@ -64,7 +64,7 @@ HStack([
 
 Display SF Symbols or asset images:
 
-```typescript
+```typescript,no-test
 Image("star.fill")           // SF Symbol
 Image("cloud.sun.rain.fill") // SF Symbol
 ```
@@ -73,7 +73,7 @@ Image("cloud.sun.rain.fill") // SF Symbol
 
 Iterate over array entry fields to render a list of components:
 
-```typescript
+```typescript,no-test
 ForEach(entry.items, (item) =>
   HStack([
     Text(item.name),
@@ -87,7 +87,7 @@ ForEach(entry.items, (item) =>
 
 A visual separator line:
 
-```typescript
+```typescript,no-test
 VStack([
   Text("Above"),
   Divider(),
@@ -99,7 +99,7 @@ VStack([
 
 A label with text and an SF Symbol icon:
 
-```typescript
+```typescript,no-test
 Label("Downloads", "arrow.down.circle")
 Label(`${entry.count} items`, "folder.fill")
 ```
@@ -108,7 +108,7 @@ Label(`${entry.count} items`, "folder.fill")
 
 A circular or linear progress indicator:
 
-```typescript
+```typescript,no-test
 Gauge(entry.progress, 0, 100)       // value, min, max
 Gauge(entry.battery, 0, 1.0)
 ```
@@ -119,7 +119,7 @@ Widget components support SwiftUI-style modifiers:
 
 ### Font
 
-```typescript
+```typescript,no-test
 Text("Title").font("title")
 Text("Body").font("body")
 Text("Caption").font("caption")
@@ -127,26 +127,26 @@ Text("Caption").font("caption")
 
 ### Color
 
-```typescript
+```typescript,no-test
 Text("Red text").color("red")
 Text("Custom").color("#FF6600")
 ```
 
 ### Padding
 
-```typescript
+```typescript,no-test
 VStack([...]).padding(16)
 ```
 
 ### Frame
 
-```typescript
+```typescript,no-test
 widget.frame(width, height)
 ```
 
 ### Max Width
 
-```typescript
+```typescript,no-test
 widget.maxWidth("infinity")   // Expand to fill available width
 ```
 
@@ -154,7 +154,7 @@ widget.maxWidth("infinity")   // Expand to fill available width
 
 Allow text to shrink to fit:
 
-```typescript
+```typescript,no-test
 Text("Long text").minimumScaleFactor(0.5)
 ```
 
@@ -162,7 +162,7 @@ Text("Long text").minimumScaleFactor(0.5)
 
 Set background color for the widget container:
 
-```typescript
+```typescript,no-test
 VStack([...]).containerBackground("blue")
 ```
 
@@ -170,7 +170,7 @@ VStack([...]).containerBackground("blue")
 
 Make the widget tappable with a deep link:
 
-```typescript
+```typescript,no-test
 VStack([...]).url("myapp://detail/123")
 ```
 
@@ -178,7 +178,7 @@ VStack([...]).url("myapp://detail/123")
 
 Apply padding to specific edges:
 
-```typescript
+```typescript,no-test
 VStack([...]).paddingEdge("top", 8)
 VStack([...]).paddingEdge("horizontal", 16)
 ```
@@ -187,7 +187,7 @@ VStack([...]).paddingEdge("horizontal", 16)
 
 Render different components based on entry data:
 
-```typescript
+```typescript,no-test
 render: (entry) =>
   VStack([
     entry.isOnline
@@ -198,7 +198,7 @@ render: (entry) =>
 
 ## Complete Example
 
-```typescript
+```typescript,no-test
 import { Widget, Text, VStack, HStack, Image, Spacer } from "perry/widget";
 
 Widget({

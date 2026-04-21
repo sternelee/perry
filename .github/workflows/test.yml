@@ -222,9 +222,7 @@ jobs:
           SKIP_TESTS=" \
             test_ui_comprehensive \
             test_ui_controls \
-            test_ui_counter \
             test_ui_phase4 \
-            test_ui_state_binding \
             test_timer \
             test_gap_buffer_ops \
             test_gap_node_crypto_buffer \
@@ -257,6 +255,97 @@ jobs:
             done
             exit 1
           fi
+
+  # ---------------------------------------------------------------------------
+  # Doc-example tests: compile + run every .ts under docs/examples/.
+  # UI examples launch with PERRY_UI_TEST_MODE=1 so they auto-exit after one
+  # frame. Gallery screenshots are diffed against per-OS baselines (advisory
+  # until Linux/Windows baselines stabilize).
+  # ---------------------------------------------------------------------------
+  doc-tests:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            ui_backend: perry-ui-macos
+            shell: bash
+            cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --filter-exclude ui/gallery.ts"
+            cmd_gallery: "./scripts/run_doc_tests.sh --verbose --filter ui/gallery.ts"
+            # macOS baseline is checked in — gallery is blocking here.
+            gallery_advisory: false
+          - os: ubuntu-24.04
+            ui_backend: perry-ui-gtk4
+            shell: bash
+            cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --filter-exclude ui/gallery.ts"
+            cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --filter ui/gallery.ts"
+            # Linux baseline not yet captured — advisory until a maintainer
+            # blesses it from the uploaded gallery artifact.
+            gallery_advisory: true
+          - os: windows-2022
+            ui_backend: perry-ui-windows
+            shell: pwsh
+            cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --filter-exclude ui/gallery.ts"
+            cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --filter ui/gallery.ts"
+            # Windows baseline not yet captured — same bootstrap flow as Linux.
+            gallery_advisory: true
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install GTK4 + Xvfb (Linux)
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev xvfb pkg-config
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build compiler + UI backend + harness
+        run: cargo build --release -p perry -p perry-runtime -p perry-stdlib -p ${{ matrix.ui_backend }} -p perry-doc-tests
+
+      - name: Lint docs/src markdown fences (repo-wide)
+        if: matrix.os == 'macos-14'
+        run: cargo run --release --quiet -p perry-doc-tests -- --lint docs/src
+
+      - name: Run non-gallery doc-example tests (blocking)
+        run: ${{ matrix.cmd_exclude_gallery }}
+
+      - name: Run gallery screenshot diff
+        id: gallery
+        continue-on-error: ${{ matrix.gallery_advisory }}
+        run: ${{ matrix.cmd_gallery }}
+
+      - name: Upload doc-tests report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: doc-tests-report-${{ matrix.os }}
+          path: docs/examples/_reports/latest.json
+
+      - name: Upload gallery screenshot + diff artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gallery-screenshots-${{ matrix.os }}
+          path: |
+            target/perry-doc-tests/gallery_*.png
+            docs/examples/_baselines/**/gallery.png
 
   # ---------------------------------------------------------------------------
   # Binary size tracking (main branch only)

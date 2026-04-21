@@ -6,7 +6,7 @@ Perry erases types at compile time, similar to how `tsc` removes type annotation
 
 Perry infers types from expressions without requiring annotations:
 
-```typescript
+```typescript,no-test
 let x = 5;           // inferred as number
 let s = "hello";     // inferred as string
 let b = true;        // inferred as boolean
@@ -20,7 +20,7 @@ Inference works through:
 - **Method returns**: `"hello".trim()` → `string`, `[1,2].length` → `number`
 - **Function returns**: user-defined function return types are propagated to callers
 
-```typescript
+```typescript,no-test
 function double(n: number): number {
   return n * 2;
 }
@@ -31,7 +31,7 @@ let result = double(5); // inferred as number
 
 Standard TypeScript annotations work:
 
-```typescript
+```typescript,no-test
 let name: string = "Perry";
 let count: number = 0;
 let items: string[] = [];
@@ -50,7 +50,7 @@ interface Config {
 
 Common TypeScript utility types are erased at compile time (they don't affect code generation):
 
-```typescript
+```typescript,no-test
 type Partial<T> = { [P in keyof T]?: T[P] };
 type Pick<T, K> = { [P in K]: T[P] };
 type Record<K, V> = { [P in K]: V };
@@ -65,7 +65,7 @@ These are all recognized and erased — they won't cause compilation errors.
 
 Generic type parameters are erased:
 
-```typescript
+```typescript,no-test
 function identity<T>(value: T): T {
   return value;
 }
@@ -98,7 +98,7 @@ Without `--type-check`, Perry relies on its own inference engine, which handles 
 
 Union types are recognized syntactically but don't affect code generation:
 
-```typescript
+```typescript,no-test
 type StringOrNumber = string | number;
 
 function process(value: StringOrNumber) {
@@ -114,7 +114,7 @@ Use `typeof` checks for runtime type narrowing.
 
 ## Type Guards
 
-```typescript
+```typescript,no-test
 function isString(value: any): value is string {
   return typeof value === "string";
 }

@@ -5207,7 +5207,9 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             .map(|s| format!("{}_ts", s))
             .unwrap_or_else(|| "main_ts".to_string());
         if let Some(entry_obj) = obj_paths.iter().find(|f| {
-            f.file_stem().and_then(|s| s.to_str()) == Some(input_stem.as_str())
+            f.file_stem().and_then(|s| s.to_str())
+                .map(|s| s == input_stem.as_str() || s.ends_with(&format!("_{}", input_stem)))
+                .unwrap_or(false)
         }) {
             let objcopy = std::env::var("HOME").ok()
                 .map(|h| PathBuf::from(h).join(".rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy"))
@@ -5249,7 +5251,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
             let mut c = Command::new(swiftc);
             c.arg("-target").arg(triple)
              .arg("-sdk").arg(&sysroot)
-             .arg("-parse-as-library");
+             .arg("-parse-as-library")
+             // perry-runtime and the native lib each pull in their own std
+             // rlibs (Cargo's metadata hashing differs across workspaces even
+             // when -Zbuild-std flags match). Tell ld to take first-wins on
+             // duplicates rather than fail the link.
+             .arg("-Xlinker").arg("-ld_classic");
             c
         } else {
             let swiftc = String::from_utf8(
@@ -6005,7 +6012,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         }
     }
 
-    // Build and link external native libraries from perry.nativeLibrary manifests
+    // Build and link external native libraries from perry.nativeLibrary manifests.
+    // Swift sources are deduplicated across the loop — modules sharing the same
+    // package.json all see the same swift_sources entries, but each file should
+    // be compiled + linked once. Without this, swift's mangled symbols for
+    // structs/classes duplicate N times.
+    let mut seen_swift_sources: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for native_lib in &ctx.native_libraries {
         if let Some(ref target_config) = native_lib.target_config {
             match format {
@@ -6033,7 +6045,12 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                 }
 
                 if is_tier3 {
-                    cargo_cmd.arg("-Zbuild-std");
+                    // Match perry-runtime's std build flags exactly so the std
+                    // rlibs are bit-identical and dedupe at link time. Without
+                    // this, native libs pull in a parallel std with different
+                    // metadata hashes and the final Swift-driven link fails
+                    // with hundreds of duplicate-symbol errors.
+                    cargo_cmd.arg("-Zbuild-std=std,panic_abort");
                 }
 
                 // For Android, ensure 16 KB page size alignment (required by Google Play)
@@ -6182,6 +6199,10 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                             swift_src.display(),
                             native_lib.module
                         ));
+                    }
+                    let canonical = swift_src.canonicalize().unwrap_or_else(|_| swift_src.clone());
+                    if !seen_swift_sources.insert(canonical) {
+                        continue;
                     }
                     let stem = swift_src
                         .file_stem()

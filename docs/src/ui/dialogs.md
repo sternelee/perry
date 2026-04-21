@@ -4,7 +4,7 @@ Perry provides native dialog functions for file selection, alerts, and sheets.
 
 ## File Open Dialog
 
-```typescript
+```typescript,no-test
 import { openFileDialog } from "perry/ui";
 
 const filePath = openFileDialog();
@@ -17,7 +17,7 @@ Returns the selected file path, or `null` if cancelled.
 
 ## Folder Selection Dialog
 
-```typescript
+```typescript,no-test
 import { openFolderDialog } from "perry/ui";
 
 const folderPath = openFolderDialog();
@@ -28,7 +28,7 @@ if (folderPath) {
 
 ## Save File Dialog
 
-```typescript
+```typescript,no-test
 import { saveFileDialog } from "perry/ui";
 
 const savePath = saveFileDialog();
@@ -41,7 +41,7 @@ if (savePath) {
 
 Display a native alert dialog:
 
-```typescript
+```typescript,no-test
 import { alert } from "perry/ui";
 
 alert("Operation Complete", "Your file has been saved successfully.");
@@ -53,7 +53,7 @@ alert("Operation Complete", "Your file has been saved successfully.");
 
 Sheets are modal panels attached to a window:
 
-```typescript
+```typescript,no-test
 import { Sheet, Text, Button, VStack } from "perry/ui";
 
 const sheet = Sheet(
@@ -81,7 +81,7 @@ sheet.present();
 
 ## Complete Example
 
-```typescript
+```typescript,no-test
 import { App, Text, Button, TextField, VStack, HStack, State, openFileDialog, saveFileDialog, alert } from "perry/ui";
 import { readFileSync, writeFileSync } from "perry/fs";
 

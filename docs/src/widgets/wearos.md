@@ -23,7 +23,7 @@ Perry widgets can compile to Wear OS Tiles using `--target wearos-tile`. Tiles a
 
 ## Example
 
-```typescript
+```typescript,no-test
 import { Widget, Text, VStack, Gauge } from "perry/widget";
 
 Widget({

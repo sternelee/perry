@@ -569,7 +569,7 @@ jobs:
 
 A complete Perry UI app demonstrating all widget types that geisterhand can interact with:
 
-```typescript
+```typescript,no-test
 import {
   App, VStack, HStack, Text, Button, TextField,
   Slider, Toggle, Picker, State

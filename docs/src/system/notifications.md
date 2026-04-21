@@ -4,7 +4,7 @@ Send local notifications using the platform's notification system.
 
 ## Usage
 
-```typescript
+```typescript,no-test
 import { sendNotification } from "perry/system";
 
 sendNotification("Download Complete", "Your file has been downloaded successfully.");

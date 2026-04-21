@@ -2,13 +2,13 @@
 
 The `perry/system` module provides real-time audio capture from the device microphone, with A-weighted dB(A) level metering and waveform sampling — everything needed to build a sound meter, audio visualizer, or voice-level indicator.
 
-```typescript
+```typescript,no-test
 import { audioStart, audioStop, audioGetLevel, audioGetPeak, audioGetWaveformSamples } from "perry/system";
 ```
 
 ## Quick Example
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack, State, Canvas } from "perry/ui";
 import { audioStart, audioStop, audioGetLevel, audioGetPeak, audioGetWaveformSamples } from "perry/system";
 
@@ -37,7 +37,7 @@ App({
 
 Start capturing audio from the device microphone.
 
-```typescript
+```typescript,no-test
 const ok = audioStart(); // 1 = success, 0 = failure
 ```
 
@@ -47,7 +47,7 @@ On platforms that require permission (iOS, Android, Web), the system permission 
 
 Stop audio capture and release the microphone.
 
-```typescript
+```typescript,no-test
 audioStop();
 ```
 
@@ -55,7 +55,7 @@ audioStop();
 
 Get the current A-weighted sound level in dB(A).
 
-```typescript
+```typescript,no-test
 const db = audioGetLevel(); // e.g. 45.2
 ```
 
@@ -70,7 +70,7 @@ Returns a smoothed dB(A) value (EMA with 125ms time constant). Typical ranges:
 
 Get the current peak sample amplitude.
 
-```typescript
+```typescript,no-test
 const peak = audioGetPeak(); // 0.0 to 1.0
 ```
 
@@ -80,7 +80,7 @@ Returns a normalized amplitude value (0.0 = silence, 1.0 = clipping). Useful for
 
 Get recent dB samples for waveform visualization.
 
-```typescript
+```typescript,no-test
 const samples = audioGetWaveformSamples(64); // array of up to 64 dB values
 ```
 
@@ -90,7 +90,7 @@ Returns an array of recent dB(A) readings from a 256-sample ring buffer. Pass th
 
 Get the device model identifier.
 
-```typescript
+```typescript,no-test
 import { getDeviceModel } from "perry/system";
 
 const model = getDeviceModel(); // e.g. "MacBookPro18,3", "iPhone15,2"

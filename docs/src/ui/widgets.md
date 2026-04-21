@@ -6,7 +6,7 @@ Perry provides native widgets that map to each platform's native controls.
 
 Displays read-only text.
 
-```typescript
+```typescript,no-test
 import { Text } from "perry/ui";
 
 const label = Text("Hello, World!");
@@ -24,7 +24,7 @@ label.setFontFamily("Menlo");
 
 Text widgets inside template literals with `state.value` update automatically:
 
-```typescript
+```typescript,no-test
 const count = State(0);
 Text(`Count: ${count.value}`); // Updates when count changes
 ```
@@ -33,7 +33,7 @@ Text(`Count: ${count.value}`); // Updates when count changes
 
 A clickable button.
 
-```typescript
+```typescript,no-test
 import { Button } from "perry/ui";
 
 const btn = Button("Click Me", () => {
@@ -55,7 +55,7 @@ btn.setBackgroundColor("#007AFF");
 
 An editable text input.
 
-```typescript
+```typescript,no-test
 import { TextField, State, stateBindTextfield } from "perry/ui";
 
 const text = State("");
@@ -71,7 +71,7 @@ updates the visible text) pair it with `stateBindTextfield(state, field)`.
 
 A password input field (text is masked).
 
-```typescript
+```typescript,no-test
 import { SecureField, State } from "perry/ui";
 
 const password = State("");
@@ -84,7 +84,7 @@ Same signature as `TextField` but input is hidden.
 
 A boolean on/off switch.
 
-```typescript
+```typescript,no-test
 import { Toggle, State } from "perry/ui";
 
 const enabled = State(false);
@@ -95,7 +95,7 @@ Toggle("Enable notifications", (on: boolean) => enabled.set(on));
 
 A numeric slider.
 
-```typescript
+```typescript,no-test
 import { Slider, State } from "perry/ui";
 
 const value = State(50);
@@ -106,7 +106,7 @@ Slider(0, 100, (v: number) => value.set(v)); // min, max, onChange
 
 A dropdown selection control. Items are added with `pickerAddItem`.
 
-```typescript
+```typescript,no-test
 import { Picker, State, pickerAddItem } from "perry/ui";
 
 const selected = State(0);
@@ -120,7 +120,7 @@ pickerAddItem(picker, "Option C");
 
 Displays an image.
 
-```typescript
+```typescript,no-test
 import { Image } from "perry/ui";
 
 const img = Image("path/to/image.png");
@@ -130,7 +130,7 @@ img.setHeight(150);
 
 On macOS/iOS, you can also use SF Symbol names:
 
-```typescript
+```typescript,no-test
 Image("star.fill"); // SF Symbol
 ```
 
@@ -138,7 +138,7 @@ Image("star.fill"); // SF Symbol
 
 An indeterminate or determinate progress indicator.
 
-```typescript
+```typescript,no-test
 import { ProgressView } from "perry/ui";
 
 const progress = ProgressView();
@@ -150,7 +150,7 @@ const progress = ProgressView(0.5);
 
 Group controls into a form layout.
 
-```typescript
+```typescript,no-test
 import { Form, Section, TextField, Toggle, State } from "perry/ui";
 
 const name = State("");
@@ -170,7 +170,7 @@ Form([
 
 A data table with rows and columns.
 
-```typescript
+```typescript,no-test
 import { Table } from "perry/ui";
 
 const table = Table(10, 3, (row, col) => {
@@ -199,7 +199,7 @@ table.setOnRowSelect((row) => {
 
 A multi-line text input.
 
-```typescript
+```typescript,no-test
 import { TextArea, State } from "perry/ui";
 
 const content = State("");
@@ -214,7 +214,7 @@ TextArea(content, "Enter text...");
 
 Generates and displays a QR code.
 
-```typescript
+```typescript,no-test
 import { QRCode } from "perry/ui";
 
 const qr = QRCode("https://example.com", 200); // data, size
@@ -225,7 +225,7 @@ qr.setData("https://other-url.com");            // Update data
 
 A drawing surface. See [Canvas](canvas.md) for the full drawing API.
 
-```typescript
+```typescript,no-test
 import { Canvas } from "perry/ui";
 
 const canvas = Canvas(400, 300, (ctx) => {
@@ -238,7 +238,7 @@ const canvas = Canvas(400, 300, (ctx) => {
 
 A live camera preview with color sampling. See [Camera](camera.md) for the full API.
 
-```typescript
+```typescript,no-test
 import { CameraView, cameraStart, cameraSampleColor, cameraSetOnTap } from "perry/ui";
 
 const cam = CameraView();

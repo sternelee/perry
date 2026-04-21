@@ -1,0 +1,8 @@
+{
+  "_comment": "dssim SSIM distance; 0 = identical. Covers run-to-run AA noise + widget animations (ProgressView, focus rings). Linux/Windows slacker because software-rendered AA is noisier than AppKit. Tighten as Phase 2 stabilizes.",
+  "gallery": {
+    "macos": 0.05,
+    "linux": 0.08,
+    "windows": 0.08
+  }
+}

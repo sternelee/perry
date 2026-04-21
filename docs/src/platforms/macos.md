@@ -74,7 +74,7 @@ productbuild --sign "3rd Party Mac Developer Installer: Your Name" --component M
 
 ## System APIs
 
-```typescript
+```typescript,no-test
 import { openURL, isDarkMode, preferencesSet, preferencesGet } from "perry/system";
 
 openURL("https://example.com");          // Opens in default browser

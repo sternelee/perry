@@ -16,7 +16,7 @@ watchOS complications use accessory families instead of system families:
 
 The `Gauge` component is designed for watchOS circular complications:
 
-```typescript
+```typescript,no-test
 import { Widget, Text, VStack, Gauge } from "perry/widget";
 
 Widget({

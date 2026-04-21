@@ -67,7 +67,7 @@ tvOS uses a **focus-based navigation model** instead of direct touch. The Siri R
 
 tvOS is particularly well-suited for game engines. When using a native library like [Bloom](https://bloomengine.dev), the game engine handles its own windowing, rendering, and input:
 
-```typescript
+```typescript,no-test
 import { initWindow, windowShouldClose, beginDrawing, endDrawing,
          clearBackground, isGamepadButtonDown, Colors } from "bloom";
 
@@ -103,7 +103,7 @@ Extended game controllers (MFi, PlayStation, Xbox) are fully supported with all 
 
 tvOS apps use `UIApplicationMain` with the same lifecycle as iOS. When using `perry/ui`:
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack } from "perry/ui";
 
 App({
@@ -132,7 +132,7 @@ deployment_target = "17.0"
 
 Use `__platform__ === 6` to detect tvOS at compile time:
 
-```typescript
+```typescript,no-test
 declare const __platform__: number;
 
 if (__platform__ === 6) {

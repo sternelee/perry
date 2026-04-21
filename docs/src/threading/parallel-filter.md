@@ -1,6 +1,6 @@
 # parallelFilter
 
-```typescript
+```typescript,no-test
 import { parallelFilter } from "perry/thread";
 
 function parallelFilter<T>(data: T[], predicate: (item: T) => boolean): T[];
@@ -10,7 +10,7 @@ Filters an array in parallel across all available CPU cores. Returns a new array
 
 ## Basic Usage
 
-```typescript
+```typescript,no-test
 import { parallelFilter } from "perry/thread";
 
 const numbers = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -37,7 +37,7 @@ Each core independently tests its chunk of elements. Results are merged in the o
 
 Regular `.filter()` runs on a single thread. For large arrays with expensive predicates, `parallelFilter` distributes the work:
 
-```typescript
+```typescript,no-test
 // Single-threaded — one core does all the work
 const results = data.filter((item) => expensivePredicate(item));
 
@@ -52,7 +52,7 @@ The tradeoff: `parallelFilter` has overhead from copying values between threads.
 
 Like `parallelMap`, the predicate can capture outer variables. Captures are deep-copied to each thread:
 
-```typescript
+```typescript,no-test
 import { parallelFilter } from "perry/thread";
 
 const minScore = 85;
@@ -70,7 +70,7 @@ Mutable variables cannot be captured — the compiler rejects this at compile ti
 
 ### Filtering Large Datasets
 
-```typescript
+```typescript,no-test
 import { parallelFilter } from "perry/thread";
 
 const transactions = getTransactionLog(); // millions of records
@@ -84,7 +84,7 @@ const suspicious = parallelFilter(transactions, (tx) => {
 
 ### Combined with parallelMap
 
-```typescript
+```typescript,no-test
 import { parallelMap, parallelFilter } from "perry/thread";
 
 // Step 1: Filter to relevant items (parallel)
@@ -99,7 +99,7 @@ const profiles = parallelMap(active, (u) => ({
 
 ### Predicate with Heavy Computation
 
-```typescript
+```typescript,no-test
 import { parallelFilter } from "perry/thread";
 
 // Each predicate call does significant work — perfect for parallelization

@@ -4,7 +4,7 @@ Build Perry plugins as shared libraries that extend host applications.
 
 ## Step 1: Write the Plugin
 
-```typescript
+```typescript,no-test
 // counter-plugin.ts
 let count = 0;
 
@@ -43,7 +43,7 @@ Perry automatically:
 
 ## Step 3: Load from Host
 
-```typescript
+```typescript,no-test
 // host-app.ts
 import { loadPlugin, emitHook, invokeTool, discoverPlugins } from "perry/plugin";
 
@@ -65,13 +65,13 @@ The `api` object passed to `activate()` provides:
 
 ### Metadata
 
-```typescript
+```typescript,no-test
 api.setMetadata(name: string, version: string, description: string)
 ```
 
 ### Hooks
 
-```typescript
+```typescript,no-test
 api.registerHook(name: string, callback: (data: any) => any, priority?: number)
 ```
 
@@ -79,7 +79,7 @@ Hooks are called in priority order (lower number = called first).
 
 ### Tools
 
-```typescript
+```typescript,no-test
 api.registerTool(name: string, callback: (args: any) => any)
 ```
 
@@ -87,13 +87,13 @@ Tools are invoked by name from the host.
 
 ### Configuration
 
-```typescript
+```typescript,no-test
 const value = api.getConfig(key: string)  // Read host-provided config
 ```
 
 ### Events
 
-```typescript
+```typescript,no-test
 api.on(event: string, handler: (data: any) => void)  // Listen for events
 api.emit(event: string, data: any)                     // Emit to other plugins
 ```

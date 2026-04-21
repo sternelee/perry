@@ -13,6 +13,7 @@ geisterhand = []
 
 [dependencies]
 perry-ui = { path = "../perry-ui" }
+perry-ui-testkit = { workspace = true }
 block2 = "0.6"
 libc = "0.2"
 objc2 = "0.6"

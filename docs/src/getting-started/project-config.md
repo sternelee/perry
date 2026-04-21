@@ -128,7 +128,7 @@ Configure a native splash screen for iOS and Android. The splash screen appears 
 
 Perry natively supports many popular npm packages without any configuration:
 
-```typescript
+```typescript,no-test
 import fastify from "fastify";
 import mysql from "mysql2/promise";
 import Redis from "ioredis";

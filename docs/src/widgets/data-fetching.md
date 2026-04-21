@@ -11,7 +11,7 @@ The `provider` function is the heart of a dynamic widget. It fetches data, trans
 
 ## Basic Provider
 
-```typescript
+```typescript,no-test
 import { Widget, Text, VStack } from "perry/widget";
 
 Widget({
@@ -52,7 +52,7 @@ Widgets run in a separate process and cannot access your app's memory. Use `shar
 
 On Apple platforms, shared storage maps to `UserDefaults(suiteName:)` backed by an App Group container. Set the `appGroup` field in your widget declaration:
 
-```typescript
+```typescript,no-test
 Widget({
   kind: "DashboardWidget",
   displayName: "Dashboard",
@@ -86,7 +86,7 @@ Widget({
 
 Your main app writes the token to the shared container:
 
-```typescript
+```typescript,no-test
 import { preferencesSet } from "perry/system";
 // In your app's login flow:
 preferencesSet("auth_token", token);
@@ -102,7 +102,7 @@ On Android, shared storage maps to `SharedPreferences` with the name `perry_shar
 
 The `reloadPolicy` field controls when the system next calls your provider:
 
-```typescript
+```typescript,no-test
 return {
   entries: [{ ... }],
   reloadPolicy: { after: { minutes: 30 } },
@@ -120,7 +120,7 @@ return {
 
 The provider function receives the parsed JSON directly. Entry field types must match your `entryFields` declaration:
 
-```typescript
+```typescript,no-test
 entryFields: {
   items: { type: "array", items: { type: "object", fields: { name: "string", count: "number" } } },
   total: "number",
@@ -142,7 +142,7 @@ provider: async () => {
 
 If the fetch fails or JSON parsing throws, the widget extension falls back to the placeholder data:
 
-```typescript
+```typescript,no-test
 Widget({
   // ...
   placeholder: { temperature: 0, condition: "Loading..." },
@@ -171,7 +171,7 @@ The `placeholder` field provides data shown in the widget gallery and during loa
 
 Return multiple entries to schedule future content without re-fetching:
 
-```typescript
+```typescript,no-test
 provider: async () => {
   const res = await fetch("https://api.example.com/hourly");
   const hours = await res.json();

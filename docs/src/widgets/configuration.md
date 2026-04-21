@@ -6,7 +6,7 @@ Perry widgets support user-configurable parameters. On iOS/watchOS, these compil
 
 Add a `config` object to your `Widget()` declaration. Each field specifies a type, allowed values, a default, and a display title.
 
-```typescript
+```typescript,no-test
 import { Widget, Text, VStack, HStack, Spacer } from "perry/widget";
 
 Widget({
@@ -67,7 +67,7 @@ Widget({
 
 The `provider` function receives the current config values as its argument. The config object keys match the field names you defined:
 
-```typescript
+```typescript,no-test
 provider: async (config: { sortBy: string; dateRange: string }) => {
   // config.sortBy === "clicks" | "impressions" | "ctr" | "position"
   // config.dateRange === "7d" | "28d" | "90d"
@@ -82,7 +82,7 @@ When the user changes a config value, the system calls your provider again with 
 
 ## Boolean Config Example
 
-```typescript
+```typescript,no-test
 config: {
   showDetails: {
     type: "bool",

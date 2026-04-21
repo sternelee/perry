@@ -64,7 +64,7 @@ Perry maps UI widgets to UIKit controls:
 
 iOS apps use `UIApplicationMain` with a deferred creation pattern:
 
-```typescript
+```typescript,no-test
 import { App, Text, VStack } from "perry/ui";
 
 App({

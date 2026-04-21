@@ -4,7 +4,7 @@ Securely store sensitive data like tokens, passwords, and API keys using the pla
 
 ## Usage
 
-```typescript
+```typescript,no-test
 import { keychainSet, keychainGet } from "perry/system";
 
 // Store a secret

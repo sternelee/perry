@@ -4,7 +4,7 @@ Define home screen widgets using the `Widget()` function.
 
 ## Widget Declaration
 
-```typescript
+```typescript,no-test
 import { Widget, Text, VStack, HStack, Image, Spacer } from "perry/widget";
 
 Widget({
@@ -46,7 +46,7 @@ Widget({
 
 Entry fields define the data your widget displays. Each field has a name and type:
 
-```typescript
+```typescript,no-test
 entryFields: {
   title: "string",
   count: "number",
@@ -58,7 +58,7 @@ entryFields: {
 
 Entry fields support richer types beyond primitives:
 
-```typescript
+```typescript,no-test
 entryFields: {
   items: [{ name: "string", value: "number" }],  // Array of objects
   subtitle: "string?",                             // Optional string
@@ -81,7 +81,7 @@ struct WeatherEntry: TimelineEntry {
 
 Use ternary expressions for conditional rendering:
 
-```typescript
+```typescript,no-test
 render: (entry) =>
   VStack([
     Text(entry.isActive ? "Active" : "Inactive"),
@@ -93,7 +93,7 @@ render: (entry) =>
 
 Template literals in widget text are compiled to Swift string interpolation:
 
-```typescript
+```typescript,no-test
 Text(`${entry.name}: ${entry.score} points`)
 // Compiles to: Text("\(entry.name): \(entry.score) points")
 ```
@@ -102,7 +102,7 @@ Text(`${entry.name}: ${entry.score} points`)
 
 The `config` field defines user-editable parameters that appear in the widget's edit UI:
 
-```typescript
+```typescript,no-test
 Widget({
   kind: "CityWeather",
   displayName: "City Weather",
@@ -120,7 +120,7 @@ Widget({
 
 The `provider` field defines a timeline provider that fetches data for the widget:
 
-```typescript
+```typescript,no-test
 Widget({
   kind: "StockWidget",
   displayName: "Stock Price",
@@ -144,7 +144,7 @@ Widget({
 
 When the widget has no data yet (e.g., first load), the provider can return placeholder data by providing a `placeholder` field:
 
-```typescript
+```typescript,no-test
 Widget({
   kind: "NewsWidget",
   entryFields: { headline: "string", source: "string" },
@@ -157,7 +157,7 @@ Widget({
 
 The render function accepts an optional second parameter for the widget family, allowing different layouts per size:
 
-```typescript
+```typescript,no-test
 render: (entry, family) =>
   family === "systemLarge"
     ? VStack([
@@ -176,7 +176,7 @@ Supported families: `"systemSmall"`, `"systemMedium"`, `"systemLarge"`, `"access
 
 The `appGroup` field specifies a shared container for data exchange between the host app and the widget:
 
-```typescript
+```typescript,no-test
 Widget({
   kind: "AppDataWidget",
   appGroup: "group.com.example.myapp",
@@ -188,7 +188,7 @@ Widget({
 
 Define multiple widgets in a single file. They're bundled into a `WidgetBundle`:
 
-```typescript
+```typescript,no-test
 Widget({
   kind: "SmallWidget",
   // ...

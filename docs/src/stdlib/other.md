@@ -4,7 +4,7 @@ Additional npm packages and Node.js APIs supported by Perry.
 
 ## sharp (Image Processing)
 
-```typescript
+```typescript,no-test
 import sharp from "sharp";
 
 await sharp("input.jpg")
@@ -14,7 +14,7 @@ await sharp("input.jpg")
 
 ## cheerio (HTML Parsing)
 
-```typescript
+```typescript,no-test
 import cheerio from "cheerio";
 
 const html = "<html><body><h1>Hello</h1><p>World</p></body></html>";
@@ -24,7 +24,7 @@ console.log($("h1").text()); // "Hello"
 
 ## nodemailer (Email)
 
-```typescript
+```typescript,no-test
 import nodemailer from "nodemailer";
 
 const transporter = nodemailer.createTransport({
@@ -43,7 +43,7 @@ await transporter.sendMail({
 
 ## zlib (Compression)
 
-```typescript
+```typescript,no-test
 import zlib from "zlib";
 
 const compressed = zlib.gzipSync("Hello, World!");
@@ -52,7 +52,7 @@ const decompressed = zlib.gunzipSync(compressed);
 
 ## cron (Job Scheduling)
 
-```typescript
+```typescript,no-test
 import { CronJob } from "cron";
 
 const job = new CronJob("*/5 * * * *", () => {
@@ -63,7 +63,7 @@ job.start();
 
 ## worker_threads
 
-```typescript
+```typescript,no-test
 import { Worker, parentPort, workerData } from "worker_threads";
 
 if (parentPort) {
@@ -83,7 +83,7 @@ if (parentPort) {
 
 ## commander (CLI Parsing)
 
-```typescript
+```typescript,no-test
 import { Command } from "commander";
 
 const program = new Command();
@@ -102,7 +102,7 @@ program.parse(process.argv);
 
 ## decimal.js (Arbitrary Precision)
 
-```typescript
+```typescript,no-test
 import Decimal from "decimal.js";
 
 const a = new Decimal("0.1");
@@ -119,7 +119,7 @@ a.sqrt();            // 0.316...
 
 ## lru-cache
 
-```typescript
+```typescript,no-test
 import LRUCache from "lru-cache";
 
 const cache = new LRUCache(100); // max 100 entries
@@ -133,7 +133,7 @@ cache.clear();
 
 ## child_process
 
-```typescript
+```typescript,no-test
 import { spawnBackground, getProcessStatus, killProcess } from "child_process";
 
 // Spawn a background process

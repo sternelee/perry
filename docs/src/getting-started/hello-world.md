@@ -5,7 +5,7 @@
 Create a file called `hello.ts`:
 
 ```typescript
-console.log("Hello, Perry!");
+{{#include ../../examples/getting-started/hello.ts}}
 ```
 
 Compile and run it:
@@ -26,17 +26,7 @@ That's it. Perry compiled your TypeScript to a native executable — no Node.js,
 ## A Slightly Bigger Example
 
 ```typescript
-function fibonacci(n: number): number {
-  if (n <= 1) return n;
-  return fibonacci(n - 1) + fibonacci(n - 2);
-}
-
-const start = Date.now();
-const result = fibonacci(40);
-const elapsed = Date.now() - start;
-
-console.log(`fibonacci(40) = ${result}`);
-console.log(`Completed in ${elapsed}ms`);
+{{#include ../../examples/getting-started/fibonacci.ts}}
 ```
 
 ```bash
@@ -48,7 +38,7 @@ This runs about 2x faster than Node.js because Perry compiles to native machine 
 
 ## Using Variables and Functions
 
-```typescript
+```typescript,no-test
 const name: string = "World";
 const items: number[] = [1, 2, 3, 4, 5];
 
@@ -61,7 +51,7 @@ console.log(`Sum of doubled: ${sum}`);
 
 ## Async Code
 
-```typescript
+```typescript,no-test
 async function fetchData(): Promise<string> {
   const response = await fetch("https://httpbin.org/get");
   const data = await response.json();
@@ -83,7 +73,7 @@ Perry compiles async/await to a native async runtime backed by Tokio.
 
 Perry can do something no JavaScript runtime can — run your code on multiple CPU cores:
 
-```typescript
+```typescript,no-test
 import { parallelMap, parallelFilter, spawn } from "perry/thread";
 
 const data = [1, 2, 3, 4, 5, 6, 7, 8];

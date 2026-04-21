@@ -4,7 +4,7 @@ Perry natively implements many popular npm packages and Node.js APIs. When you i
 
 ## How It Works
 
-```typescript
+```typescript,no-test
 import fastify from "fastify";
 import mysql from "mysql2/promise";
 ```
@@ -93,7 +93,7 @@ See [Project Configuration](../getting-started/project-config.md) for details.
 
 For packages that can't be compiled natively (native addons, dynamic code, etc.), Perry includes a QuickJS-based JavaScript runtime as a fallback:
 
-```typescript
+```typescript,no-test
 import { jsEval } from "perry/jsruntime";
 ```
 

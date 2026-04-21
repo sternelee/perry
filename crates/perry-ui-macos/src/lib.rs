@@ -11,7 +11,6 @@ pub mod state;
 pub mod string_header;
 pub mod widgets;
 
-#[cfg(feature = "geisterhand")]
 pub mod screenshot;
 
 /// Run a closure, catching any Rust panics so they don't abort across the FFI boundary.

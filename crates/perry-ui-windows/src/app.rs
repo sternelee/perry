@@ -34,6 +34,10 @@ extern "C" {
 /// Timer ID for periodic tick that processes setTimeout/setInterval queues.
 const TICK_TIMER_ID: usize = 9998;
 
+/// Timer ID fired when `PERRY_UI_TEST_MODE=1` — writes a screenshot (if configured)
+/// and exits cleanly so doc-example programs can be verified in CI without a human.
+const TEST_EXIT_TIMER_ID: usize = 9997;
+
 /// Global DPI scale factor (1.0 at 96 DPI, 1.5 at 144 DPI, 2.0 at 192 DPI).
 static DPI_SCALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -283,6 +287,25 @@ pub fn app_run(app_handle: i64) {
                 unsafe { let _ = SetTimer(apps[idx].hwnd, TICK_TIMER_ID, 50, None); }
             }
         });
+
+        // PERRY_UI_TEST_MODE: schedule a one-shot exit timer so CI can verify
+        // that the app launched without a human keeping it open.
+        if perry_ui_testkit::is_test_mode() {
+            APPS.with(|apps| {
+                let apps = apps.borrow();
+                let idx = (app_handle - 1) as usize;
+                if idx < apps.len() {
+                    unsafe {
+                        let _ = SetTimer(
+                            apps[idx].hwnd,
+                            TEST_EXIT_TIMER_ID,
+                            perry_ui_testkit::exit_delay_ms(),
+                            None,
+                        );
+                    }
+                }
+            });
+        }
 
         // Register UI function pointers for geisterhand dispatch
         #[cfg(feature = "geisterhand")]
@@ -759,6 +782,23 @@ pub fn handle_timer(hwnd: HWND, timer_id: usize) {
     if timer_id == TICK_TIMER_ID {
         TIMER_TICK_NEEDED.with(|t| t.set(true));
         return;
+    }
+
+    // PERRY_UI_TEST_MODE exit: capture screenshot (if configured), then exit.
+    if timer_id == TEST_EXIT_TIMER_ID {
+        unsafe { let _ = KillTimer(hwnd, TEST_EXIT_TIMER_ID); }
+        if let Some(path) = perry_ui_testkit::screenshot_path() {
+            let mut len: usize = 0;
+            let ptr = crate::screenshot::perry_ui_screenshot_capture(&mut len as *mut usize);
+            if !ptr.is_null() && len > 0 {
+                perry_ui_testkit::write_screenshot_bytes(&path, ptr, len);
+                unsafe { libc::free(ptr as *mut libc::c_void); }
+            }
+        }
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        std::process::exit(0);
     }
 
     // Recurring timers (setInterval via Win32 SetTimer / perry_ui_app_set_timer)

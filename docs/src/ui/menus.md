@@ -6,7 +6,7 @@ Perry supports native menu bars, context menus, and toolbar items across all pla
 
 Create a native application menu bar:
 
-```typescript
+```typescript,no-test
 import { App, VStack, Text, menuBarCreate, menuBarAddMenu, menuAddItem, menuAddSeparator, menuAddSubmenu, menuBarAttach } from "perry/ui";
 
 // Build the menu bar before App(...)
@@ -73,7 +73,7 @@ Uppercase letters imply Shift.
 
 Right-click menus on widgets:
 
-```typescript
+```typescript,no-test
 import { Text, contextMenu } from "perry/ui";
 
 const label = Text("Right-click me");
@@ -89,7 +89,7 @@ contextMenu(label, [
 
 Add a toolbar to the window:
 
-```typescript
+```typescript,no-test
 import { App, VStack, Text, toolbarCreate, toolbarAddItem } from "perry/ui";
 
 const toolbar = toolbarCreate();

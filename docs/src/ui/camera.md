@@ -2,7 +2,7 @@
 
 The `perry/ui` module provides a live camera preview widget with color sampling capabilities.
 
-```typescript
+```typescript,no-test
 import { CameraView, cameraStart, cameraStop, cameraFreeze, cameraUnfreeze, cameraSampleColor, cameraSetOnTap } from "perry/ui";
 ```
 
@@ -10,7 +10,7 @@ import { CameraView, cameraStart, cameraStop, cameraFreeze, cameraUnfreeze, came
 
 ## Quick Example
 
-```typescript
+```typescript,no-test
 import { App, VStack, Text, State } from "perry/ui";
 import { CameraView, cameraStart, cameraStop, cameraSampleColor, cameraSetOnTap } from "perry/ui";
 
@@ -46,7 +46,7 @@ App({
 
 Create a live camera preview widget.
 
-```typescript
+```typescript,no-test
 const cam = CameraView();
 ```
 
@@ -56,7 +56,7 @@ Returns a widget handle. The camera does not start automatically — call `camer
 
 Start the live camera feed.
 
-```typescript
+```typescript,no-test
 cameraStart(cam);
 ```
 
@@ -66,7 +66,7 @@ On iOS, the camera permission dialog is shown automatically on first use.
 
 Stop the camera feed and release the capture session.
 
-```typescript
+```typescript,no-test
 cameraStop(cam);
 ```
 
@@ -74,7 +74,7 @@ cameraStop(cam);
 
 Pause the live preview (freeze the current frame).
 
-```typescript
+```typescript,no-test
 cameraFreeze(cam);
 ```
 
@@ -84,7 +84,7 @@ The camera session remains active but the preview stops updating. Useful for "ca
 
 Resume the live preview after a freeze.
 
-```typescript
+```typescript,no-test
 cameraUnfreeze(cam);
 ```
 
@@ -92,7 +92,7 @@ cameraUnfreeze(cam);
 
 Sample the pixel color at normalized coordinates.
 
-```typescript
+```typescript,no-test
 const rgb = cameraSampleColor(0.5, 0.5); // center of frame
 ```
 
@@ -102,7 +102,7 @@ const rgb = cameraSampleColor(0.5, 0.5); // center of frame
 
 To extract individual channels:
 
-```typescript
+```typescript,no-test
 const r = Math.floor(rgb / 65536);
 const g = Math.floor((rgb % 65536) / 256);
 const b = Math.floor(rgb % 256);
@@ -114,7 +114,7 @@ The color is averaged over a 5x5 pixel region around the sample point for noise 
 
 Register a tap handler on the camera view.
 
-```typescript
+```typescript,no-test
 cameraSetOnTap(cam, (x, y) => {
   // x, y are normalized coordinates (0.0-1.0)
   const rgb = cameraSampleColor(x, y);

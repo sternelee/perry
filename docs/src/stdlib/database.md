@@ -4,7 +4,7 @@ Perry natively implements clients for MySQL, PostgreSQL, SQLite, MongoDB, and Re
 
 ## MySQL
 
-```typescript
+```typescript,no-test
 import mysql from "mysql2/promise";
 
 const connection = await mysql.createConnection({
@@ -22,7 +22,7 @@ await connection.end();
 
 ## PostgreSQL
 
-```typescript
+```typescript,no-test
 import { Client } from "pg";
 
 const client = new Client({
@@ -41,7 +41,7 @@ await client.end();
 
 ## SQLite
 
-```typescript
+```typescript,no-test
 import Database from "better-sqlite3";
 
 const db = new Database("mydb.sqlite");
@@ -63,7 +63,7 @@ console.log(users);
 
 ## MongoDB
 
-```typescript
+```typescript,no-test
 import { MongoClient } from "mongodb";
 
 const client = new MongoClient("mongodb://localhost:27017");
@@ -81,7 +81,7 @@ await client.close();
 
 ## Redis
 
-```typescript
+```typescript,no-test
 import Redis from "ioredis";
 
 const redis = new Redis();

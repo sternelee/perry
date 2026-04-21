@@ -4,7 +4,7 @@ Perry implements Node.js file system APIs for reading, writing, and managing fil
 
 ## Reading Files
 
-```typescript
+```typescript,no-test
 import { readFileSync } from "fs";
 
 const content = readFileSync("config.json", "utf-8");
@@ -13,7 +13,7 @@ console.log(content);
 
 ### Binary File Reading
 
-```typescript
+```typescript,no-test
 import { readFileBuffer } from "fs";
 
 const buffer = readFileBuffer("image.png");
@@ -24,7 +24,7 @@ console.log(`Read ${buffer.length} bytes`);
 
 ## Writing Files
 
-```typescript
+```typescript,no-test
 import { writeFileSync } from "fs";
 
 writeFileSync("output.txt", "Hello, World!");
@@ -33,7 +33,7 @@ writeFileSync("data.json", JSON.stringify({ key: "value" }, null, 2));
 
 ## File Information
 
-```typescript
+```typescript,no-test
 import { existsSync, statSync } from "fs";
 
 if (existsSync("config.json")) {
@@ -44,7 +44,7 @@ if (existsSync("config.json")) {
 
 ## Directory Operations
 
-```typescript
+```typescript,no-test
 import { mkdirSync, readdirSync, rmRecursive } from "fs";
 
 // Create directory
@@ -62,7 +62,7 @@ rmRecursive("output"); // Uses fs::remove_dir_all
 
 ## Path Utilities
 
-```typescript
+```typescript,no-test
 import { join, dirname, basename, resolve } from "path";
 import { fileURLToPath } from "url";
 

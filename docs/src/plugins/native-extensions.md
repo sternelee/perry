@@ -37,7 +37,7 @@ Perry discovers every subdirectory with a `package.json`, compiles its native cr
 
 ### 3. Import and use
 
-```typescript
+```typescript,no-test
 import { requestReview } from "perry-appstore-review";
 
 await requestReview();
@@ -133,7 +133,7 @@ perry-appstore-review/
 
 The `src/index.ts` declares native functions and optionally wraps them in a friendlier API:
 
-```typescript
+```typescript,no-test
 // Declare the native function (name must match package.json)
 declare function sb_appreview_request(): number;
 

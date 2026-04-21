@@ -6,7 +6,7 @@ Perry compiles declarative TypeScript UI code to native platform widgets. No Ele
 
 Create `counter.ts`:
 
-```typescript
+```typescript,no-test
 import { App, Text, Button, VStack, State } from "perry/ui";
 
 const count = State(0);
@@ -42,7 +42,7 @@ A native window opens with a label and two buttons. Clicking "Increment" updates
 
 ## A Todo App
 
-```typescript
+```typescript,no-test
 import {
   App, Text, Button, TextField, VStack, HStack, State, ForEach, Spacer,
 } from "perry/ui";
@@ -107,7 +107,7 @@ Each target compiles to the platform's native widget toolkit. See [Platforms](..
 
 ## Adding Styling
 
-```typescript
+```typescript,no-test
 import { App, Text, Button, VStack, State } from "perry/ui";
 
 const count = State(0);

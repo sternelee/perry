@@ -4,7 +4,7 @@ Perry natively implements common utility packages.
 
 ## lodash
 
-```typescript
+```typescript,no-test
 import _ from "lodash";
 
 _.chunk([1, 2, 3, 4, 5], 2);     // [[1,2], [3,4], [5]]
@@ -19,7 +19,7 @@ _.throttle(fn, 100);
 
 ## dayjs
 
-```typescript
+```typescript,no-test
 import dayjs from "dayjs";
 
 const now = dayjs();
@@ -33,7 +33,7 @@ console.log(`${diff} days until end of year`);
 
 ## moment
 
-```typescript
+```typescript,no-test
 import moment from "moment";
 
 const now = moment();
@@ -44,7 +44,7 @@ console.log(moment("2025-01-01").isBefore(now));
 
 ## uuid
 
-```typescript
+```typescript,no-test
 import { v4 as uuidv4 } from "uuid";
 
 const id = uuidv4();
@@ -53,7 +53,7 @@ console.log(id); // e.g., "550e8400-e29b-41d4-a716-446655440000"
 
 ## nanoid
 
-```typescript
+```typescript,no-test
 import { nanoid } from "nanoid";
 
 const id = nanoid();       // Default 21 chars
@@ -63,7 +63,7 @@ console.log(id);
 
 ## slugify
 
-```typescript
+```typescript,no-test
 import slugify from "slugify";
 
 const slug = slugify("Hello World!", { lower: true });
@@ -72,7 +72,7 @@ console.log(slug); // "hello-world"
 
 ## validator
 
-```typescript
+```typescript,no-test
 import validator from "validator";
 
 validator.isEmail("test@example.com");  // true

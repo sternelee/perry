@@ -2,7 +2,7 @@
 
 Perry is a native TypeScript compiler that compiles TypeScript source code directly to native executables. No JavaScript runtime, no JIT warmup, no V8 — your TypeScript compiles to a real binary.
 
-```typescript
+```typescript,no-test
 // hello.ts
 console.log("Hello from Perry!");
 ```
@@ -39,7 +39,7 @@ See [Supported Features](language/supported-features.md) for the complete list.
 
 ## Quick Example: Native App
 
-```typescript
+```typescript,no-test
 import { App, Text, Button, VStack, State } from "perry/ui";
 
 const count = State(0);

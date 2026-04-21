@@ -4,7 +4,7 @@ Perry natively implements password hashing, JWT tokens, and Ethereum cryptograph
 
 ## bcrypt
 
-```typescript
+```typescript,no-test
 import bcrypt from "bcrypt";
 
 const hash = await bcrypt.hash("mypassword", 10);
@@ -14,7 +14,7 @@ console.log(match); // true
 
 ## Argon2
 
-```typescript
+```typescript,no-test
 import argon2 from "argon2";
 
 const hash = await argon2.hash("mypassword");
@@ -24,7 +24,7 @@ console.log(valid); // true
 
 ## JSON Web Tokens
 
-```typescript
+```typescript,no-test
 import jwt from "jsonwebtoken";
 
 const secret = "my-secret-key";
@@ -41,7 +41,7 @@ console.log(decoded.userId); // 123
 
 ## Node.js Crypto
 
-```typescript
+```typescript,no-test
 import crypto from "crypto";
 
 // Hash
@@ -56,7 +56,7 @@ const bytes = crypto.randomBytes(32);
 
 ## Ethers
 
-```typescript
+```typescript,no-test
 import { ethers } from "ethers";
 
 // Create a wallet

@@ -24,7 +24,7 @@ Host
 
 ### Plugin (compiled with `--output-type dylib`)
 
-```typescript
+```typescript,no-test
 // my-plugin.ts
 export function activate(api: PluginAPI) {
   api.setMetadata("my-plugin", "1.0.0", "A sample plugin");
@@ -50,7 +50,7 @@ perry my-plugin.ts --output-type dylib -o my-plugin.dylib
 
 ### Host Application
 
-```typescript
+```typescript,no-test
 import { loadPlugin, emitHook, invokeTool, listPlugins } from "perry/plugin";
 
 loadPlugin("./my-plugin.dylib");

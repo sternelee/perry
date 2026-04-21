@@ -57,7 +57,7 @@ Colors with a `-dark` suffix are used as the dark mode variant. If no dark varia
 
 The codegen produces typed interfaces:
 
-```typescript
+```typescript,no-test
 interface PerryColor {
   r: number; g: number; b: number; a: number; // floats in [0, 1]
 }
@@ -84,7 +84,7 @@ interface ResolvedTheme {
 
 Resolve a theme at runtime based on the system's dark mode setting:
 
-```typescript
+```typescript,no-test
 import { getTheme } from "perry-styling";
 import { theme } from "./theme"; // generated file
 
@@ -98,7 +98,7 @@ const resolved = getTheme(theme);
 
 Ergonomic functions for applying styles to widget handles:
 
-```typescript
+```typescript,no-test
 import { applyBg, applyRadius, applyTextColor, applyFontSize, applyGradient } from "perry-styling";
 
 const label = Text("Hello");
@@ -136,7 +136,7 @@ applyGradient(card, startColor, endColor, 0); // 0=vertical, 1=horizontal
 
 `perry-styling` exports compile-time platform constants based on the `__platform__` built-in:
 
-```typescript
+```typescript,no-test
 import { isMac, isIOS, isAndroid, isWindows, isLinux, isDesktop, isMobile } from "perry-styling";
 
 if (isMobile) {

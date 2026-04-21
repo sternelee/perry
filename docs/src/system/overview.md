@@ -2,7 +2,7 @@
 
 The `perry/system` module provides access to platform-native system features: preferences, secure storage, notifications, URL opening, dark mode detection, and app introspection.
 
-```typescript
+```typescript,no-test
 import { openURL, isDarkMode, preferencesSet, preferencesGet, getAppIcon } from "perry/system";
 ```
 
@@ -30,7 +30,7 @@ import { openURL, isDarkMode, preferencesSet, preferencesGet, getAppIcon } from 
 
 ## Quick Example
 
-```typescript
+```typescript,no-test
 import { isDarkMode, preferencesGet, preferencesSet, openURL } from "perry/system";
 
 // Detect dark mode
