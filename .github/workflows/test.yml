@@ -273,10 +273,11 @@ jobs:
             shell: bash
             cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
-            # `--xcompile-only-target=web,wasm` — the `=` keeps `web,wasm` as
-            # a single token on PowerShell (which otherwise splits bare
-            # `web,wasm` into an array @("web","wasm") and splats it).
-            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web,wasm"
+            # Repeat `--xcompile-only-target=…` per target rather than a
+            # single comma-delimited value because PowerShell splits even
+            # `--foo=a,b` at the comma when unquoted (array literal).
+            # Repetition sidesteps the whole issue on every shell.
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm"
             cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             # Baseline captured from a clean CI run of 24723671119 (900x970).
             gallery_advisory: false
@@ -285,7 +286,7 @@ jobs:
             shell: bash
             cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
-            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web,wasm"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.sh --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm"
             cmd_xcompile_advisory: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
             # Baseline captured under Xvfb (900x1024).
             gallery_advisory: false
@@ -294,7 +295,7 @@ jobs:
             shell: pwsh
             cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter ui/gallery.ts"
-            cmd_xcompile_blocking: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only --xcompile-only-target=web,wasm"
+            cmd_xcompile_blocking: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only --xcompile-only-target=web --xcompile-only-target=wasm"
             cmd_xcompile_advisory: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only"
             # perry-ui-windows/src/widgets/picker.rs:81 panics with
             # HRESULT(0x8007057E) "Cannot create a top-level child window"
