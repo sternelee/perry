@@ -793,8 +793,37 @@ Before tagging a major/minor bump, these must all pass:
 | **Home-screen widgets** | `perry compile --target widgetkit ... && perry publish ios` | No |
 
 For v1.0, expect to spend half a day spinning through the four OS VMs locally.
-Future work: automate Linux + Windows doc-tests into `test.yml` so only the
-mobile/watch/web lanes remain manual (see the doc-tests plan roadmap).
+Linux + Windows doc-tests are automated in `test.yml`; the mobile/watch/web
+lanes remain manual pending tier-2 simulator orchestration.
+
+### 2a. Simulator-run recipe (iOS / tvOS)
+
+`perry-ui-ios` and `perry-ui-tvos` honor `PERRY_UI_TEST_MODE=1` — when set,
+the app renders one frame, optionally writes a screenshot to
+`$PERRY_UI_SCREENSHOT_PATH`, and exits cleanly. Combine with
+`xcrun simctl` to verify a doc-example runs without a human:
+
+```bash
+# Compile for the simulator
+perry compile --target ios-simulator docs/examples/ui/counter.ts -o counter.app
+
+# Boot a device (one-time; reuse the UDID across runs)
+xcrun simctl boot "iPhone 15"
+open -a Simulator
+
+# Install + launch with test mode
+xcrun simctl install booted counter.app
+PERRY_UI_TEST_MODE=1 \
+  PERRY_UI_TEST_EXIT_AFTER_MS=500 \
+  PERRY_UI_SCREENSHOT_PATH="$PWD/counter-ios.png" \
+  xcrun simctl launch --console booted com.example.counter
+
+# App exits 0 after rendering; screenshot lands at counter-ios.png
+```
+
+Same recipe works for `tvos-simulator` + `"Apple TV"` device. On watchOS the
+Rust Tier-3 toolchain requires `+nightly -Zbuild-std` — see the
+`watchos-simulator` row in the matrix above.
 
 ### 3. What CI does on the tag
 

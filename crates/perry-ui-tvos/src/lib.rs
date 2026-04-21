@@ -5,7 +5,6 @@ pub mod crash_log;
 pub mod file_dialog;
 pub mod location;
 pub mod menu;
-#[cfg(feature = "geisterhand")]
 pub mod screenshot;
 pub mod state;
 pub mod websocket;
