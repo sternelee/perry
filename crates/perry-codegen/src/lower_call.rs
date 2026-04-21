@@ -2421,83 +2421,103 @@ pub(crate) fn lower_native_method_call(
         if let Some(sig) = perry_ui_table_lookup(method) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
-        // Warn at compile time so missing methods are visible instead
-        // of silently returning 0.0 (which causes null-pointer crashes
-        // when the caller expects a widget handle).
-        eprintln!("perry/ui warning: method '{}' not in dispatch table (args: {})", method, args.len());
+        // Fail fast at compile time so a missing/misspelled method
+        // surfaces as an error instead of silently returning 0.0 —
+        // which used to compile, link, and run with a zero widget
+        // handle (no window, or null-pointer crash at the caller).
+        bail!(
+            "perry/ui: '{}' is not a known function (args: {}). \
+             Check the spelling and consult types/perry/ui/index.d.ts \
+             for the supported API surface.",
+            method,
+            args.len()
+        );
     }
 
-    if module == "perry/ui" && method == "App" && object.is_none() && args.len() == 1 {
-        if let Expr::Object(props) = &args[0] {
-            let mut title_ptr: String = "0".to_string();
-            let mut width_d: String = "1024.0".to_string();
-            let mut height_d: String = "768.0".to_string();
-            let mut body_handle: String = "0".to_string();
-            let mut icon_ptr: Option<String> = None;
-            for (key, val) in props {
-                match key.as_str() {
-                    "title" => {
-                        let v = lower_expr(ctx, val)?;
-                        let blk = ctx.block();
-                        title_ptr = unbox_to_i64(blk, &v);
-                    }
-                    "width" => {
-                        width_d = lower_expr(ctx, val)?;
-                    }
-                    "height" => {
-                        height_d = lower_expr(ctx, val)?;
-                    }
-                    "body" => {
-                        let v = lower_expr(ctx, val)?;
-                        let blk = ctx.block();
-                        body_handle = unbox_to_i64(blk, &v);
-                    }
-                    "icon" => {
-                        let v = lower_expr(ctx, val)?;
-                        let blk = ctx.block();
-                        icon_ptr = Some(unbox_to_i64(blk, &v));
-                    }
-                    _ => {
-                        let _ = lower_expr(ctx, val)?;
-                    }
+    if module == "perry/ui" && method == "App" && object.is_none() {
+        if args.len() != 1 {
+            bail!(
+                "perry/ui: App(...) takes a single config object literal like \
+                 `App({{ title, width, height, body }})`, got {} argument(s). \
+                 There is no `App(title, builder)` callback form.",
+                args.len()
+            );
+        }
+        let Expr::Object(props) = &args[0] else {
+            bail!(
+                "perry/ui: App(...) requires a config object literal. Use \
+                 `App({{ title: ..., width: ..., height: ..., body: ... }})` \
+                 (see types/perry/ui/index.d.ts)."
+            );
+        };
+        let mut title_ptr: String = "0".to_string();
+        let mut width_d: String = "1024.0".to_string();
+        let mut height_d: String = "768.0".to_string();
+        let mut body_handle: String = "0".to_string();
+        let mut icon_ptr: Option<String> = None;
+        for (key, val) in props {
+            match key.as_str() {
+                "title" => {
+                    let v = lower_expr(ctx, val)?;
+                    let blk = ctx.block();
+                    title_ptr = unbox_to_i64(blk, &v);
+                }
+                "width" => {
+                    width_d = lower_expr(ctx, val)?;
+                }
+                "height" => {
+                    height_d = lower_expr(ctx, val)?;
+                }
+                "body" => {
+                    let v = lower_expr(ctx, val)?;
+                    let blk = ctx.block();
+                    body_handle = unbox_to_i64(blk, &v);
+                }
+                "icon" => {
+                    let v = lower_expr(ctx, val)?;
+                    let blk = ctx.block();
+                    icon_ptr = Some(unbox_to_i64(blk, &v));
+                }
+                _ => {
+                    let _ = lower_expr(ctx, val)?;
                 }
             }
-            ctx.pending_declares.push((
-                "perry_ui_app_create".to_string(),
-                I64,
-                vec![I64, DOUBLE, DOUBLE],
-            ));
-            ctx.pending_declares.push((
-                "perry_ui_app_set_icon".to_string(),
-                crate::types::VOID,
-                vec![I64],
-            ));
-            ctx.pending_declares.push((
-                "perry_ui_app_set_body".to_string(),
-                crate::types::VOID,
-                vec![I64, I64],
-            ));
-            ctx.pending_declares.push((
-                "perry_ui_app_run".to_string(),
-                crate::types::VOID,
-                vec![I64],
-            ));
-            let blk = ctx.block();
-            let app_handle = blk.call(
-                I64,
-                "perry_ui_app_create",
-                &[(I64, &title_ptr), (DOUBLE, &width_d), (DOUBLE, &height_d)],
-            );
-            if let Some(icon) = icon_ptr {
-                blk.call_void("perry_ui_app_set_icon", &[(I64, &icon)]);
-            }
-            blk.call_void(
-                "perry_ui_app_set_body",
-                &[(I64, &app_handle), (I64, &body_handle)],
-            );
-            blk.call_void("perry_ui_app_run", &[(I64, &app_handle)]);
-            return Ok(double_literal(0.0));
         }
+        ctx.pending_declares.push((
+            "perry_ui_app_create".to_string(),
+            I64,
+            vec![I64, DOUBLE, DOUBLE],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_app_set_icon".to_string(),
+            crate::types::VOID,
+            vec![I64],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_app_set_body".to_string(),
+            crate::types::VOID,
+            vec![I64, I64],
+        ));
+        ctx.pending_declares.push((
+            "perry_ui_app_run".to_string(),
+            crate::types::VOID,
+            vec![I64],
+        ));
+        let blk = ctx.block();
+        let app_handle = blk.call(
+            I64,
+            "perry_ui_app_create",
+            &[(I64, &title_ptr), (DOUBLE, &width_d), (DOUBLE, &height_d)],
+        );
+        if let Some(icon) = icon_ptr {
+            blk.call_void("perry_ui_app_set_icon", &[(I64, &icon)]);
+        }
+        blk.call_void(
+            "perry_ui_app_set_body",
+            &[(I64, &app_handle), (I64, &body_handle)],
+        );
+        blk.call_void("perry_ui_app_run", &[(I64, &app_handle)]);
+        return Ok(double_literal(0.0));
     }
 
     // fs module functions: readdirSync, statSync, mkdirSync, etc.
@@ -2647,12 +2667,21 @@ pub(crate) fn lower_native_method_call(
                 }
             };
         }
-        // Unknown instance method — warn and lower args for side effects.
-        eprintln!("perry/ui warning: instance method '{}' not in dispatch table (args: {})", method, args.len());
-        for a in args {
-            let _ = lower_expr(ctx, a)?;
-        }
-        return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+        // Unknown instance method — fail the compile. Previously this
+        // lowered the args for side effects and returned TAG_UNDEFINED,
+        // which silently swallowed styling calls like `label.setColor(...)`
+        // and `btn.setCornerRadius(...)` (see types/perry/ui/index.d.ts
+        // for the real method surface — styling uses the free-function
+        // `textSetColor(widget, r, g, b, a)` / `setCornerRadius(widget, r)`
+        // forms, not instance methods on the widget handle).
+        bail!(
+            "perry/ui: '.{}(...)' is not a known instance method (args: {}). \
+             See types/perry/ui/index.d.ts — widget styling uses free functions \
+             like `textSetFontSize(label, 24)` and `widgetSetBackgroundColor(btn, r, g, b, a)`, \
+             not instance-method setters.",
+            method,
+            args.len()
+        );
     }
 
     if module == "array" && (method == "push_single" || method == "push") {
@@ -3866,6 +3895,16 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     // ---- App extras ----
     UiSig { method: "appSetTimer", runtime: "perry_ui_app_set_timer",
             args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "appSetMinSize", runtime: "perry_ui_app_set_min_size",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
+    UiSig { method: "appSetMaxSize", runtime: "perry_ui_app_set_max_size",
+            args: &[UiArgKind::Widget, UiArgKind::F64, UiArgKind::F64], ret: UiReturnKind::Void },
+
+    // ---- Extra ScrollView alias (lowercase-v spelling matching the runtime FFI
+    // symbol; the runtime takes a single vertical offset, not the x/y pair
+    // declared on `scrollViewSetOffset` in index.d.ts — they coexist for now). ----
+    UiSig { method: "scrollviewSetOffset", runtime: "perry_ui_scrollview_set_offset",
+            args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
 ];
 
 /// Instance method table for perry/ui receiver-based calls.
