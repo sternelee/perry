@@ -274,24 +274,27 @@ jobs:
             cmd_exclude_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
             cmd_xcompile: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
-            # Locally-blessed baseline didn't match the macOS-14 runner's
-            # headless display (dev-box Retina 1800x2864 vs runner 900x970).
-            # Advisory on all OSes until each baseline is captured from a
-            # clean CI run and committed.
-            gallery_advisory: true
+            # Baseline captured from a clean CI run of 24723671119 (900x970).
+            gallery_advisory: false
           - os: ubuntu-24.04
             ui_backend: perry-ui-gtk4
             shell: bash
             cmd_exclude_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "xvfb-run -a ./scripts/run_doc_tests.sh --verbose --skip-xcompile --filter ui/gallery.ts"
             cmd_xcompile: "./scripts/run_doc_tests.sh --verbose --xcompile-only"
-            gallery_advisory: true
+            # Baseline captured under Xvfb (900x1024).
+            gallery_advisory: false
           - os: windows-2022
             ui_backend: perry-ui-windows
             shell: pwsh
             cmd_exclude_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter-exclude ui/gallery.ts"
             cmd_gallery: "./scripts/run_doc_tests.ps1 --verbose --skip-xcompile --filter ui/gallery.ts"
             cmd_xcompile: "./scripts/run_doc_tests.ps1 --verbose --xcompile-only"
+            # perry-ui-windows/src/widgets/picker.rs:81 panics with
+            # HRESULT(0x8007057E) "Cannot create a top-level child window"
+            # when the gallery's Picker widget is created in test mode;
+            # gallery stays advisory on Windows until that pre-existing
+            # perry-ui-windows bug is fixed.
             gallery_advisory: true
     runs-on: ${{ matrix.os }}
     defaults:
