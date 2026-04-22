@@ -174,12 +174,19 @@ while IFS= read -r -d '' src; do
     # examples. We trade "did the app cleanly exit?" for "did the bundle
     # at least launch?" — still a strong tier-2 signal.
     echo "  [+] launch start $(date +%T)"
+    # No run_with_timeout wrapper: without --console-pty simctl returns
+    # in <1s; the bash watchdog fallback in run_with_timeout races its
+    # own `kill -TERM <watcher>` against the watcher's own exit on the
+    # fast path, and set -e turns the losing race into a script abort
+    # (observed as exit 143 at ~2s post-launch in run #24759762125).
+    set +e
     SIMCTL_CHILD_PERRY_UI_TEST_MODE=1 \
     SIMCTL_CHILD_PERRY_UI_TEST_EXIT_AFTER_MS=500 \
-    run_with_timeout "$LAUNCH_TIMEOUT" xcrun simctl launch \
+    xcrun simctl launch \
         --terminate-running-process \
         "$UDID" "$bundle_id" >"$OUT_DIR/$stem.run.log" 2>&1
     rc=$?
+    set -e
     echo "  [+] launch done $(date +%T) rc=$rc"
     if [ "$rc" -ne 0 ]; then
         if [ "$rc" = "124" ]; then
