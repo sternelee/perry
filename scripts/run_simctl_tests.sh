@@ -151,17 +151,27 @@ while IFS= read -r -d '' src; do
     fi
 
     # Launch with PERRY_UI_TEST_MODE so the app self-exits after one frame.
-    # --console-pty captures the app's stdout/stderr; we wait for the launch
-    # command to return (happens when the app calls exit(0)).
     # simctl launch has NO --setenv flag. Env vars reach the spawned app by
     # prefixing them with SIMCTL_CHILD_ in the calling shell's environment
     # (see `xcrun simctl help launch` — the SIMCTL_CHILD_ note at the end).
     # Prior attempts to pass --setenv=KEY=VALUE or --setenv KEY=VALUE both
     # failed with "Invalid device: --setenv..." because simctl parsed the
     # unknown flag as the positional device argument.
+    #
+    # Deliberately NO --console-pty: it blocks simctl until the app's stdio
+    # closes, but when simctl's own stdout is redirected to a file (as here)
+    # the PTY half never reports EOF to simctl even after the app calls
+    # process::exit(0). Result: simctl hangs past our LAUNCH_TIMEOUT and the
+    # whole step stalls without printing PASS before GitHub kills the runner.
+    # Without --console-pty, simctl returns immediately with the child pid;
+    # the launch exit code still catches bundle/arch/signing errors (it's
+    # how we surfaced the v0.5.149 Info.plist mismatch), and the test-mode
+    # exit timer ensures the app doesn't linger on the simulator between
+    # examples. We trade "did the app cleanly exit?" for "did the bundle
+    # at least launch?" — still a strong tier-2 signal.
     SIMCTL_CHILD_PERRY_UI_TEST_MODE=1 \
     SIMCTL_CHILD_PERRY_UI_TEST_EXIT_AFTER_MS=500 \
-    run_with_timeout "$LAUNCH_TIMEOUT" xcrun simctl launch --console-pty \
+    run_with_timeout "$LAUNCH_TIMEOUT" xcrun simctl launch \
         --terminate-running-process \
         "$UDID" "$bundle_id" >"$OUT_DIR/$stem.run.log" 2>&1
     rc=$?
