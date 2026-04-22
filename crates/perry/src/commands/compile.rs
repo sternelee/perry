@@ -19,6 +19,82 @@ pub struct CompileResult {
     pub is_dylib: bool,
 }
 
+/// In-memory TypeScript AST cache used by `perry dev` to skip reparsing
+/// unchanged files across rebuilds in a single dev session.
+///
+/// Keyed by canonical path. Staleness check is a full source byte comparison
+/// — if the bytes match what we parsed last time, reuse the cached `Module`;
+/// otherwise reparse and replace the entry. Content-addressed invalidation
+/// means formatter-on-save that rewrites trivia invalidates us correctly,
+/// and we never get confused by mtime weirdness (git checkout, touch, etc.).
+///
+/// Scope is strictly per-process: this cache lives for the duration of one
+/// `perry dev` invocation. `perry compile` never sees it.
+#[derive(Default)]
+pub struct ParseCache {
+    entries: HashMap<PathBuf, ParseCacheEntry>,
+    hits: usize,
+    misses: usize,
+}
+
+struct ParseCacheEntry {
+    source: String,
+    module: swc_ecma_ast::Module,
+}
+
+impl ParseCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of cache hits since creation (or since `reset_counters`).
+    pub fn hits(&self) -> usize {
+        self.hits
+    }
+
+    /// Number of cache misses (fresh parses) since creation.
+    pub fn misses(&self) -> usize {
+        self.misses
+    }
+
+    /// Reset hit/miss counters. Intended to be called between dev rebuilds
+    /// so the counters reflect a single rebuild rather than cumulative.
+    pub fn reset_counters(&mut self) {
+        self.hits = 0;
+        self.misses = 0;
+    }
+}
+
+/// Parse `source` via the cache: return a borrowed `&Module` from the cache,
+/// reusing the last entry if its source bytes match, else reparsing.
+fn parse_cached<'a>(
+    cache: &'a mut ParseCache,
+    path: &Path,
+    source: &str,
+    filename: &str,
+) -> Result<&'a swc_ecma_ast::Module> {
+    let fresh = cache
+        .entries
+        .get(path)
+        .map_or(false, |e| e.source == source);
+    if fresh {
+        cache.hits += 1;
+    } else {
+        let parsed = perry_parser::parse_typescript(source, filename)
+            .map_err(|e| anyhow!("Failed to parse {}: {}", path.display(), e))?;
+        cache.entries.insert(
+            path.to_path_buf(),
+            ParseCacheEntry {
+                source: source.to_string(),
+                module: parsed,
+            },
+        );
+        cache.misses += 1;
+    }
+    // The entry is guaranteed to exist at this point (we just inserted on miss).
+    Ok(&cache.entries[path].module)
+}
+
 #[derive(Args, Debug)]
 pub struct CompileArgs {
     /// Input TypeScript file
@@ -2160,6 +2236,7 @@ fn collect_modules(
     target: Option<&str>,
     next_class_id: &mut perry_hir::ClassId,
     skip_transforms: bool,
+    mut parse_cache: Option<&mut ParseCache>,
 ) -> Result<()> {
     let canonical = entry_path
         .canonicalize()
@@ -2242,13 +2319,23 @@ fn collect_modules(
         .map(|s| s.to_string())
         .unwrap_or_else(|| filename.to_string());
 
-    let ast_module = perry_parser::parse_typescript(&source, filename)
-        .map_err(|e| anyhow!("Failed to parse {}: {}", canonical.display(), e))?;
+    // Parse via the optional in-memory cache (only populated by `perry dev`).
+    // On a cache hit, we reuse the AST from the previous rebuild — the single
+    // largest time sink in the hot rebuild path on unchanged files.
+    let ast_module_owned: swc_ecma_ast::Module;
+    let ast_module: &swc_ecma_ast::Module = match parse_cache.as_deref_mut() {
+        Some(cache) => parse_cached(cache, &canonical, &source, filename)?,
+        None => {
+            ast_module_owned = perry_parser::parse_typescript(&source, filename)
+                .map_err(|e| anyhow!("Failed to parse {}: {}", canonical.display(), e))?;
+            &ast_module_owned
+        }
+    };
     let source_file_path = canonical.to_string_lossy().to_string();
 
     // If type checking is enabled, resolve types from tsgo before lowering
     let resolved_types = if ctx.type_checker.is_some() {
-        let positions = super::typecheck::collect_untyped_positions(&ast_module);
+        let positions = super::typecheck::collect_untyped_positions(ast_module);
         if !positions.is_empty() {
             let client = ctx.type_checker.as_mut().unwrap();
             match super::typecheck::resolve_types_for_file(client, &source_file_path, &positions) {
@@ -2269,7 +2356,7 @@ fn collect_modules(
     };
 
     let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id_and_types(
-        &ast_module, &module_name, &source_file_path, *next_class_id, resolved_types
+        ast_module, &module_name, &source_file_path, *next_class_id, resolved_types
     )?;
     *next_class_id = new_next_class_id; // Update the global class_id counter
 
@@ -2368,7 +2455,7 @@ fn collect_modules(
                         }
                     }
                     // Recursively collect TypeScript modules
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                 }
                 ModuleKind::Interpreted => {
                     // Perry native extension packages (ioredis, ethers, ws, mysql2, dotenv)
@@ -2417,7 +2504,7 @@ fn collect_modules(
                     }
 
                     // Collect JS module
-                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                    collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                 }
                 ModuleKind::NativeRust => {
                     // Native Rust modules are handled by stdlib
@@ -2448,11 +2535,11 @@ fn collect_modules(
             if let Some((resolved_path, kind)) = cached_resolve_import(src, &canonical, ctx) {
                 match kind {
                     ModuleKind::NativeCompiled => {
-                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                        collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                     }
                     ModuleKind::Interpreted => {
                         if enable_js_runtime {
-                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms)?;
+                            collect_modules(&resolved_path, ctx, visited, enable_js_runtime, format, target, next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
                         }
                     }
                     ModuleKind::NativeRust => {}
@@ -3264,6 +3351,19 @@ fn compile_for_wasm(ctx: &CompilationContext, args: &CompileArgs, format: Output
 }
 
 pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8) -> Result<CompileResult> {
+    run_with_parse_cache(args, None, format, use_color, verbose)
+}
+
+/// Same as [`run`] but accepts an optional in-memory [`ParseCache`] that
+/// `perry dev` uses to reuse parsed ASTs across rebuilds in a single session.
+/// Pass `None` for the batch-compile path.
+pub fn run_with_parse_cache(
+    args: CompileArgs,
+    mut parse_cache: Option<&mut ParseCache>,
+    format: OutputFormat,
+    use_color: bool,
+    verbose: u8,
+) -> Result<CompileResult> {
     match format {
         OutputFormat::Text => println!("Collecting modules..."),
         OutputFormat::Json => {}
@@ -3451,7 +3551,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
     let mut next_class_id: perry_hir::ClassId = 1; // Start at 1, 0 is reserved for "no parent"
     let skip_transforms = matches!(args.target.as_deref(), Some("web") | Some("wasm"));
 
-    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms)?;
+    collect_modules(&args.input, &mut ctx, &mut visited, args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
 
     // Bundle extensions if --bundle-extensions specified
     let mut bundled_extensions: Vec<(PathBuf, String)> = Vec::new();
@@ -3467,7 +3567,7 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
                 OutputFormat::Json => {}
             }
             collect_modules(entry_path, &mut ctx, &mut visited,
-                           args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms)?;
+                           args.enable_js_runtime, format, args.target.as_deref(), &mut next_class_id, skip_transforms, parse_cache.as_deref_mut())?;
             bundled_extensions.push((entry_path.canonicalize()?, plugin_id.clone()));
         }
     }
@@ -7323,4 +7423,119 @@ pub fn run(args: CompileArgs, format: OutputFormat, use_color: bool, verbose: u8
         bundle_id: result_bundle_id,
         is_dylib,
     })
+}
+
+#[cfg(test)]
+mod parse_cache_tests {
+    use super::*;
+
+    const SRC_V1: &str = "export function greet(name: string): string { return `hi ${name}`; }\n";
+    const SRC_V2: &str = "export function greet(name: string): string { return `hello ${name}`; }\n";
+
+    #[test]
+    fn first_call_is_a_miss() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 1);
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn identical_source_is_a_hit() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+    }
+
+    #[test]
+    fn changed_source_is_a_miss_and_replaces_entry() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V2, "greet.ts").unwrap();
+        // Two misses, zero hits; cache still holds one entry (the new version).
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 2);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[&path].source, SRC_V2);
+    }
+
+    #[test]
+    fn reverting_to_previous_source_is_still_a_miss() {
+        // The cache keeps only the last version, not history. Reverting to a
+        // prior source counts as a miss — documented behaviour.
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V2, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 3);
+    }
+
+    #[test]
+    fn distinct_paths_are_independent() {
+        let mut cache = ParseCache::new();
+        let p_a = PathBuf::from("/virtual/a.ts");
+        let p_b = PathBuf::from("/virtual/b.ts");
+        let _ = parse_cached(&mut cache, &p_a, SRC_V1, "a.ts").unwrap();
+        let _ = parse_cached(&mut cache, &p_b, SRC_V1, "b.ts").unwrap();
+        let _ = parse_cached(&mut cache, &p_a, SRC_V1, "a.ts").unwrap();
+        let _ = parse_cached(&mut cache, &p_b, SRC_V1, "b.ts").unwrap();
+        assert_eq!(cache.hits(), 2);
+        assert_eq!(cache.misses(), 2);
+    }
+
+    #[test]
+    fn reset_counters_clears_hit_miss_but_keeps_entries() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        cache.reset_counters();
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 0);
+        // Next lookup for the same source should be a hit, not a miss —
+        // entries survive reset_counters.
+        let _ = parse_cached(&mut cache, &path, SRC_V1, "greet.ts").unwrap();
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 0);
+    }
+
+    #[test]
+    fn hit_returns_equivalent_ast_to_fresh_parse() {
+        // A cache hit must give us the same AST shape as reparsing from
+        // scratch — this is the correctness invariant V2.1 relies on.
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/greet.ts");
+        let first = parse_cached(&mut cache, &path, SRC_V1, "greet.ts")
+            .unwrap()
+            .clone();
+        let cached = parse_cached(&mut cache, &path, SRC_V1, "greet.ts")
+            .unwrap()
+            .clone();
+        let fresh = perry_parser::parse_typescript(SRC_V1, "greet.ts").unwrap();
+        assert_eq!(first.body.len(), fresh.body.len());
+        assert_eq!(cached.body.len(), fresh.body.len());
+    }
+
+    #[test]
+    fn parse_error_propagates_and_does_not_poison_cache() {
+        let mut cache = ParseCache::new();
+        let path = PathBuf::from("/virtual/bad.ts");
+        let err = parse_cached(&mut cache, &path, "let x: number = ;", "bad.ts");
+        assert!(err.is_err());
+        // A later good parse at the same path still works and is a miss.
+        let ok = parse_cached(&mut cache, &path, SRC_V1, "bad.ts");
+        assert!(ok.is_ok());
+        assert_eq!(cache.hits(), 0);
+        assert_eq!(cache.misses(), 1);
+    }
 }
