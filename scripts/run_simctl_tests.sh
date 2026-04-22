@@ -153,10 +153,12 @@ while IFS= read -r -d '' src; do
     # Launch with PERRY_UI_TEST_MODE so the app self-exits after one frame.
     # --console-pty captures the app's stdout/stderr; we wait for the launch
     # command to return (happens when the app calls exit(0)).
+    # simctl launch's --setenv takes `KEY=VALUE` as a *separate* argument —
+    # `--setenv=KEY=VALUE` confuses the parser ("Invalid device").
     run_with_timeout "$LAUNCH_TIMEOUT" xcrun simctl launch --console-pty \
         --terminate-running-process \
-        --setenv=PERRY_UI_TEST_MODE=1 \
-        --setenv=PERRY_UI_TEST_EXIT_AFTER_MS=500 \
+        --setenv PERRY_UI_TEST_MODE=1 \
+        --setenv PERRY_UI_TEST_EXIT_AFTER_MS=500 \
         "$UDID" "$bundle_id" >"$OUT_DIR/$stem.run.log" 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
