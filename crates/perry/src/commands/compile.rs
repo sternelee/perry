@@ -1111,6 +1111,21 @@ fn find_llvm_tool(tool_name: &str) -> Option<PathBuf> {
 /// On Windows, the PATH may contain a GNU `link` utility (e.g. from Git Bash/MSYS2)
 /// which is not the MSVC linker. This function searches for the real MSVC link.exe.
 #[cfg(target_os = "windows")]
+fn msvc_vswhere_installation_path_args() -> [&'static str; 8] {
+    [
+        "-products",
+        "*",
+        // Without the VC tools filter, `-latest` can select Management Studio.
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-latest",
+        "-property",
+        "installationPath",
+        "-nologo",
+    ]
+}
+
+#[cfg(target_os = "windows")]
 fn find_msvc_link_exe() -> Option<PathBuf> {
     // Try vswhere.exe first (most reliable)
     let vswhere_paths = [
@@ -1120,7 +1135,7 @@ fn find_msvc_link_exe() -> Option<PathBuf> {
     for vswhere in &vswhere_paths {
         if vswhere.exists() {
             if let Ok(output) = Command::new(vswhere)
-                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .args(msvc_vswhere_installation_path_args())
                 .output()
             {
                 let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -1163,7 +1178,7 @@ fn find_msvc_lib_paths() -> Option<String> {
     for vswhere in &vswhere_paths {
         if vswhere.exists() {
             if let Ok(output) = Command::new(vswhere)
-                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .args(msvc_vswhere_installation_path_args())
                 .output()
             {
                 let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -8089,6 +8104,28 @@ mod parse_cache_tests {
         assert!(ok.is_ok());
         assert_eq!(cache.hits(), 0);
         assert_eq!(cache.misses(), 1);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_toolchain_tests {
+    use super::msvc_vswhere_installation_path_args;
+
+    #[test]
+    fn vswhere_query_requires_msvc_tools_component() {
+        assert_eq!(
+            msvc_vswhere_installation_path_args(),
+            [
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-latest",
+                "-property",
+                "installationPath",
+                "-nologo",
+            ]
+        );
     }
 }
 

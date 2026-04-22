@@ -152,6 +152,21 @@ fn find_clang() -> Option<PathBuf> {
 /// The "C++ Clang Compiler for Windows" workload component installs it at:
 ///   <VS install>/VC/Tools/Llvm/x64/bin/clang.exe
 #[cfg(windows)]
+fn msvc_vswhere_installation_path_args() -> [&'static str; 8] {
+    [
+        "-products",
+        "*",
+        // Without the VC tools filter, `-latest` can select Management Studio.
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-latest",
+        "-property",
+        "installationPath",
+        "-nologo",
+    ]
+}
+
+#[cfg(windows)]
 fn find_msvc_bundled_clang() -> Option<PathBuf> {
     let vswhere_paths = [
         PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
@@ -160,7 +175,7 @@ fn find_msvc_bundled_clang() -> Option<PathBuf> {
     for vswhere in &vswhere_paths {
         if !vswhere.exists() { continue; }
         let output = std::process::Command::new(vswhere)
-            .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+            .args(msvc_vswhere_installation_path_args())
             .output()
             .ok()?;
         let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();

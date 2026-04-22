@@ -32,6 +32,21 @@ enum CheckStatus {
     Error,
 }
 
+#[cfg(target_os = "windows")]
+fn msvc_vswhere_installation_path_args() -> [&'static str; 8] {
+    [
+        "-products",
+        "*",
+        // Without the VC tools filter, `-latest` can select Management Studio.
+        "-requires",
+        "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+        "-latest",
+        "-property",
+        "installationPath",
+        "-nologo",
+    ]
+}
+
 fn check_perry_version() -> CheckResult {
     CheckResult {
         name: "perry version".to_string(),
@@ -48,7 +63,7 @@ fn check_system_linker() -> CheckResult {
         let vswhere = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
         if vswhere.exists() {
             if let Ok(output) = Command::new(&vswhere)
-                .args(["-products", "*", "-latest", "-property", "installationPath", "-nologo"])
+                .args(msvc_vswhere_installation_path_args())
                 .output()
             {
                 let install_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
