@@ -32,6 +32,7 @@ jobs:
       - name: Wait for Tests + Simulator Tests (iOS) to pass
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           EVENT: ${{ github.event_name }}
         run: |
@@ -41,30 +42,58 @@ jobs:
             exit 0
           fi
           echo "Gating release on commit $SHA"
-          for wf in "Tests" "Simulator Tests (iOS)"; do
-            echo "::group::Waiting for workflow \"$wf\""
+          # Query by workflow *filename* via `gh api`, not by display name via
+          # `gh run list --workflow`. v0.5.155 shipped the latter and watched
+          # both gate workflows succeed while the poller logged "no run found
+          # yet" for 45 straight minutes — the `gh run list` name→id lookup
+          # silently returned [] in the release-event context, and the
+          # `2>/dev/null || echo '[]'` fallback made it look identical to an
+          # empty page. `gh api /repos/{repo}/actions/workflows/<file>/runs`
+          # skips the lookup, and we no longer swallow gh's stderr — a real
+          # API error now gets one retry then fails the gate loudly instead
+          # of burning the 45-min budget.
+          for wf_file in "test.yml" "simctl-tests.yml"; do
+            echo "::group::Waiting for $wf_file"
             deadline=$(( SECONDS + 45 * 60 ))
+            retry_on_error=1
             while :; do
-              run_json=$(gh run list --workflow "$wf" --commit "$SHA" -L 1 \
-                --json status,conclusion,databaseId,url 2>/dev/null || echo '[]')
-              status=$(echo "$run_json" | jq -r '.[0].status // empty')
-              conclusion=$(echo "$run_json" | jq -r '.[0].conclusion // empty')
-              url=$(echo "$run_json" | jq -r '.[0].url // empty')
+              set +e
+              api_out=$(gh api \
+                "/repos/$REPO/actions/workflows/$wf_file/runs?head_sha=$SHA&per_page=1" \
+                2>&1)
+              rc=$?
+              set -e
+              if [ $rc -ne 0 ]; then
+                echo "  gh api failed (rc=$rc):"
+                echo "$api_out" | sed 's/^/    /'
+                if [ $retry_on_error -gt 0 ]; then
+                  retry_on_error=0
+                  echo "  retrying once after 10s"
+                  sleep 10
+                  continue
+                fi
+                echo "  gh api still failing after retry — failing gate."
+                exit 1
+              fi
+              retry_on_error=1
+              status=$(echo "$api_out" | jq -r '.workflow_runs[0].status // empty')
+              conclusion=$(echo "$api_out" | jq -r '.workflow_runs[0].conclusion // empty')
+              url=$(echo "$api_out" | jq -r '.workflow_runs[0].html_url // empty')
               if [ -z "$status" ]; then
-                echo "  no run found yet for \"$wf\" on $SHA — waiting"
+                echo "  no run found yet for $wf_file on $SHA — waiting"
               elif [ "$status" = "completed" ]; then
                 if [ "$conclusion" = "success" ]; then
-                  echo "  OK  \"$wf\" passed: $url"
+                  echo "  OK  $wf_file passed: $url"
                   break
                 else
-                  echo "  FAIL  \"$wf\" $conclusion: $url"
+                  echo "  FAIL  $wf_file $conclusion: $url"
                   exit 1
                 fi
               else
-                echo "  \"$wf\": $status ($url) — waiting"
+                echo "  $wf_file: $status ($url) — waiting"
               fi
               if [ $SECONDS -ge $deadline ]; then
-                echo "  timed out waiting for \"$wf\""
+                echo "  timed out waiting for $wf_file"
                 exit 1
               fi
               sleep 30
