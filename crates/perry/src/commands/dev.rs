@@ -11,8 +11,17 @@
 //! trigger a single rebuild.
 //!
 //! This is the V1 watch mode: it shells out to the existing compile pipeline
-//! and relies on Perry's auto-optimize library cache for speed. A future V2
-//! may add in-memory AST caching and per-module `.o` reuse.
+//! and relies on Perry's auto-optimize library cache for speed.
+//!
+//! V2.1 (this file): an in-memory AST cache keyed by canonical path is held
+//! across rebuilds in a single `perry dev` session. On a rebuild, unchanged
+//! files reuse the previous parsed `swc_ecma_ast::Module` and skip the parse
+//! step entirely. Invalidation is content-addressed (full source byte
+//! comparison), so editor-format-on-save, timestamp-only touches, and git
+//! checkouts all behave correctly. Set `PERRY_DEV_VERBOSE=1` to print the
+//! hit/miss counts per rebuild.
+//!
+//! V2.2 (scoped in issue #131) will add per-module `.o` reuse on disk.
 
 use anyhow::{anyhow, Result};
 use clap::Args;
@@ -23,7 +32,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use super::compile::CompileArgs;
+use super::compile::{CompileArgs, ParseCache};
 use crate::OutputFormat;
 
 /// How long to wait after the first event before triggering a rebuild,
@@ -98,8 +107,13 @@ pub fn run(args: DevArgs, _format: OutputFormat, use_color: bool, verbose: u8) -
 
     print_banner(&project_root, &input, &output_path, &watch_roots, use_color);
 
+    // Per-session parse cache: kept alive across rebuilds so unchanged files
+    // skip parse+lower on the hot path. See module-level docs for details.
+    let mut parse_cache = ParseCache::new();
+    let verbose_cache = std::env::var("PERRY_DEV_VERBOSE").ok().as_deref() == Some("1");
+
     // Initial build + spawn.
-    let mut child: Option<Child> = match build_once(&input, &output_path, verbose) {
+    let mut child: Option<Child> = match build_once(&input, &output_path, verbose, &mut parse_cache, verbose_cache, use_color) {
         Ok(()) => spawn_child(&output_path, &args.child_args, use_color).ok(),
         Err(e) => {
             eprintln!(
@@ -164,7 +178,7 @@ pub fn run(args: DevArgs, _format: OutputFormat, use_color: bool, verbose: u8) -
         cleanup_child(&mut child);
 
         let started = Instant::now();
-        match build_once(&input, &output_path, verbose) {
+        match build_once(&input, &output_path, verbose, &mut parse_cache, verbose_cache, use_color) {
             Ok(()) => {
                 let ms = started.elapsed().as_millis();
                 eprintln!(
@@ -257,7 +271,14 @@ fn is_trigger_path(path: &Path) -> bool {
     }
 }
 
-fn build_once(input: &Path, output: &Path, verbose: u8) -> Result<()> {
+fn build_once(
+    input: &Path,
+    output: &Path,
+    verbose: u8,
+    parse_cache: &mut ParseCache,
+    verbose_cache: bool,
+    use_color: bool,
+) -> Result<()> {
     let args = CompileArgs {
         input: input.to_path_buf(),
         output: Some(output.to_path_buf()),
@@ -277,7 +298,28 @@ fn build_once(input: &Path, output: &Path, verbose: u8) -> Result<()> {
         minimal_stdlib: false,
         no_auto_optimize: false,
     };
-    super::compile::run(args, OutputFormat::Text, true, verbose)?;
+    parse_cache.reset_counters();
+    super::compile::run_with_parse_cache(
+        args,
+        Some(parse_cache),
+        OutputFormat::Text,
+        true,
+        verbose,
+    )?;
+    if verbose_cache {
+        let hits = parse_cache.hits();
+        let misses = parse_cache.misses();
+        let total = hits + misses;
+        if total > 0 {
+            eprintln!(
+                "  {} parse cache: {}/{} hit ({} miss)",
+                paint("•", "dim", use_color),
+                hits,
+                total,
+                misses
+            );
+        }
+    }
     Ok(())
 }
 
