@@ -3799,13 +3799,25 @@ impl<'a> FuncEmitCtx<'a> {
                 func.instruction(&Instruction::End);
             }
             Stmt::Break => {
-                // Branch to the enclosing block (break target)
-                // The break target is 1 level up from the loop
-                func.instruction(&Instruction::Br(1));
+                // Branch out to the enclosing loop's break block. Must compute
+                // relative depth from break_depth/block_depth — a hardcoded Br(1)
+                // miscounts when the break is nested inside an if/switch/try
+                // (each pushes block_depth without a matching break_depth), which
+                // in the worst case turns `break` into `continue` and hangs.
+                if let Some(&target) = self.break_depth.last() {
+                    let rel = self.block_depth.saturating_sub(target);
+                    func.instruction(&Instruction::Br(rel));
+                } else {
+                    func.instruction(&Instruction::Br(1));
+                }
             }
             Stmt::Continue => {
-                // Branch to the enclosing loop (continue target)
-                func.instruction(&Instruction::Br(0));
+                if let Some(&target) = self.loop_depth.last() {
+                    let rel = self.block_depth.saturating_sub(target);
+                    func.instruction(&Instruction::Br(rel));
+                } else {
+                    func.instruction(&Instruction::Br(0));
+                }
             }
             Stmt::LabeledBreak(label) => {
                 // Find the label in the stack and compute the relative depth.
