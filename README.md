@@ -50,7 +50,7 @@ People are building real apps with Perry today. Here are some highlights:
 
 ## Performance
 
-Perry beats Node.js and Bun on every benchmark. Best of 5 runs, macOS ARM64 (Apple Silicon), Node.js v25, Bun 1.3, rerun 2026-04-22 on v0.5.164.
+Perry beats Node.js and Bun on every benchmark below **except `json_roundtrip`**, where Node is ~1.6× faster and Bun ~2.4× faster — tracked as a stdlib JSON perf bug ([#149](https://github.com/PerryTS/perry/issues/146)). Best of 5 runs, macOS ARM64 (Apple Silicon), Node.js v25, Bun 1.3, rerun 2026-04-22 on v0.5.164 (json_roundtrip row rerun 2026-04-23 on v0.5.165).
 
 | Benchmark | Perry | Node.js | Bun | vs Node | What it tests |
 |-----------|-------|---------|-----|---------|---------------|
@@ -69,6 +69,7 @@ Perry beats Node.js and Bun on every benchmark. Best of 5 runs, macOS ARM64 (App
 | prime_sieve | 3ms | 7ms | 7ms | **2.3x faster** | Sieve of Eratosthenes |
 | mandelbrot | 21ms | 24ms | 29ms | **1.1x faster** | Complex f64 iteration (800x800) |
 | matrix_multiply | 19ms | 33ms | 33ms | **1.7x faster** | 256x256 matrix multiply |
+| json_roundtrip | 588ms | 369ms | 245ms | **1.6x slower** | 50× `JSON.parse` + `JSON.stringify` on a ~1MB, 10K-item blob ([#149](https://github.com/PerryTS/perry/issues/146)) |
 
 Perry compiles to native machine code via LLVM — no JIT warmup, no interpreter overhead. Key optimizations: **scalar replacement** of non-escaping objects (escape analysis eliminates heap allocation entirely — object fields become registers), inline bump allocator for objects that do escape, i32 loop counters for bounded array access, `reassoc contract` fast-math flags, integer-modulo fast path (`fptosi → srem → sitofp` instead of `fmod`), elimination of redundant `js_number_coerce` calls on numeric function returns, i64 specialization for pure numeric recursive functions, and `<2 x double>` parallel-accumulator vectorization on pure-fadd reduction loops (restored in v0.5.164 via [#140](https://github.com/PerryTS/perry/issues/140)).
 
