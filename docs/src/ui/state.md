@@ -52,6 +52,10 @@ const field = TextField("Type here...", (value: string) => input.set(value));
 stateBindTextfield(input, field);
 ```
 
+Use `stateBindTextfield` whenever your code needs to clear or replace the field
+programmatically. The fuller TODO example below uses it so pressing **Add** clears
+both the state and the visible input box.
+
 Input control signatures:
 - `TextField(placeholder, onChange)` — text input, `onChange: (value: string) => void`
 - `SecureField(placeholder, onChange)` — password input, `onChange: (value: string) => void`
@@ -94,6 +98,8 @@ VStack(16, [
 ```
 
 > **Note:** `ForEach` iterates by index over a numeric state. Keep a count state in sync with your array, then read the items via `array.value[i]` inside the closure.
+>
+> `ForEach` listens to the count state, not to same-length edits inside the array. Add/remove flows should update both the array and the count; same-length per-row interactions are best handled by the row widgets themselves plus any separate summary state you want to update.
 
 `ForEach` re-renders the list when the count state changes:
 
@@ -158,11 +164,18 @@ todos.set([...items]);
 ## Complete Example
 
 ```typescript
-{{#include ../../examples/ui/state/todo_app.ts}}
+{{#include ../../examples/ui/state/todo_app_complete.ts}}
 ```
+
+This fuller example keeps a separate `count` state for `ForEach`, uses
+`stateBindTextfield` so **Add** visibly clears the field, and uses `Toggle`
+(rather than a checkbox) for cross-platform completion state.
 
 This program is built and run by CI (`scripts/run_doc_tests.sh`), so the
 snippet above always matches the compiled artifact under
+[`docs/examples/ui/state/todo_app_complete.ts`](../../examples/ui/state/todo_app_complete.ts).
+
+If you want the smaller add/delete-only version, see
 [`docs/examples/ui/state/todo_app.ts`](../../examples/ui/state/todo_app.ts).
 
 ## Next Steps

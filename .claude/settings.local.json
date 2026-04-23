@@ -1,0 +1,6 @@
+{
+  "enabledMcpjsonServers": [
+    "mcp_box"
+  ],
+  "enableAllProjectMcpServers": true
+}
