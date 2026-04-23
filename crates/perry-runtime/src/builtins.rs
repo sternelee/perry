@@ -1626,6 +1626,89 @@ pub extern "C" fn js_console_assert_spread(cond: f64, args_arr_handle: i64) {
     }
 }
 
+// === console.trace ===
+//
+// Node writes `Trace: <msg>` + a JS stack trace to **stderr**. Perry can't
+// reproduce Node's TS source positions without a source-map / DWARF pass,
+// but `std::backtrace::Backtrace::force_capture()` gives us the native
+// call stack for free — good enough to see *where* the trace was called
+// from, which is what issue #20 is actually asking for.
+#[no_mangle]
+pub extern "C" fn js_console_trace(value: f64) {
+    let jsval = JSValue::from_bits(value.to_bits());
+    if jsval.is_undefined() {
+        eprintln!("Trace");
+    } else if jsval.is_string() {
+        let ptr = jsval.as_string_ptr();
+        if ptr.is_null() {
+            eprintln!("Trace");
+        } else {
+            unsafe {
+                let len = (*ptr).byte_len as usize;
+                let data = (ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+                let bytes = std::slice::from_raw_parts(data, len);
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => eprintln!("Trace: {}", s),
+                    Err(_) => eprintln!("Trace: [invalid utf8]"),
+                }
+            }
+        }
+    } else {
+        eprintln!("Trace: {}", format_jsvalue(value, 0));
+    }
+    let bt = std::backtrace::Backtrace::force_capture();
+    let rendered = format!("{}", bt);
+    // Parse the Display output into (header, continuation*) frames. The
+    // header looks like "   N: symbol" and each continuation starts with
+    // "at …". Drop frames whose header matches internal noise (the
+    // std::backtrace plumbing itself, plus `js_console_trace` — the user
+    // already sees `Trace:` above). Collapse consecutive identical headers
+    // (what you get on stripped builds, where every frame symbolicates to
+    // `__mh_execute_header`).
+    let noise = ["backtrace", "Backtrace::", "js_console_trace"];
+    let is_header = |t: &str| {
+        t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains(':')
+    };
+    let mut frames: Vec<(String, Vec<String>)> = Vec::new();
+    for line in rendered.lines() {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with("note:") {
+            continue;
+        }
+        if is_header(t) {
+            let sym = t.split_once(':').map(|(_, r)| r.trim()).unwrap_or(t);
+            frames.push((sym.to_string(), Vec::new()));
+        } else if let Some(last) = frames.last_mut() {
+            last.1.push(t.to_string());
+        }
+    }
+    let mut emitted = 0usize;
+    let mut prev_sym: Option<String> = None;
+    let mut dup_run = 0usize;
+    for (sym, cont) in frames {
+        if noise.iter().any(|p| sym.contains(p)) {
+            continue;
+        }
+        if prev_sym.as_deref() == Some(sym.as_str()) {
+            dup_run += 1;
+            continue;
+        }
+        if dup_run > 0 {
+            eprintln!("        (… {} more identical frames)", dup_run);
+            dup_run = 0;
+        }
+        eprintln!("    {}: {}", emitted, sym);
+        for c in cont {
+            eprintln!("             {}", c);
+        }
+        emitted += 1;
+        prev_sym = Some(sym);
+    }
+    if dup_run > 0 {
+        eprintln!("        (… {} more identical frames)", dup_run);
+    }
+}
+
 // === console.clear ===
 //
 // Best-effort: emit ANSI clear sequence on stdout — but ONLY when stdout

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.171
+**Current Version:** 0.5.172
 
 ## TypeScript Parity Status
 
@@ -147,6 +147,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.172** — Fix #20: `console.trace()` now emits a real native backtrace (via `std::backtrace::Backtrace::force_capture`) to stderr after the `Trace: <msg>` line instead of only echoing the message. New `js_console_trace` in `builtins.rs` filters `std::backtrace_rs` / `js_console_trace` noise and collapses duplicate unresolved frames; symbolicated frames require `PERRY_DEBUG_SYMBOLS=1` (without it, LLVM-stripped builds show `__mh_execute_header` frames).
 - **v0.5.170** — Phase 4.1: method-call return-type inference (`lower_types.rs:232`) consults a new `class_method_return_types` registry so `new C().label()` binds with the method's inferred type instead of `Type::Any`. 40 HIR tests green; gap stable 18/28. Inheritance chain lookup not yet implemented.
 - **v0.5.169** — Phase 4 expansion: body-based return-type inference now covers class methods (`lower_decl.rs:1532`), getters, and arrow expressions (`lower_types.rs:210`). Async wraps in `Promise<T>`; generators skipped; annotation wins over inference. Gap 17→18/28.
 - **v0.5.168** — Fix #150: `Object.getOwnPropertyDescriptor` returned `undefined` on Phase 3 anon-shape literals — `mark_all_candidate_refs_in_expr` (`collectors.rs:3353`) catch-all now escapes all candidates on un-enumerated HIR variants, matching the defensive pattern already used elsewhere.

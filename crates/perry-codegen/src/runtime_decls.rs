@@ -256,6 +256,7 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_console_warn_spread", VOID, &[I64]);
     module.declare_function("js_getenv", I64, &[I64]);
     module.declare_function("js_console_table", VOID, &[DOUBLE]);
+    module.declare_function("js_console_trace", VOID, &[DOUBLE]);
     // process.* — see `perry-runtime/src/os.rs` and `perry-runtime/src/process.rs`.
     // Most process accessors return raw pointers (I64) that the call site
     // must NaN-box. The ones that return already-boxed f64 values

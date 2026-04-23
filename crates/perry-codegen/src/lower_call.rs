@@ -1274,26 +1274,16 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 ctx.block().call_void("js_console_group_begin", &[]);
                 return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
-            // console.trace(msg) — print "Trace: <msg>" followed by a
-            // stack trace. Full stack trace requires debug info —
-            // for now print "Trace: " + message on one line.
+            // console.trace([msg]) — `js_console_trace` formats the
+            // optional message and emits a native backtrace to stderr
+            // (issue #20).
             if property == "trace" {
-                let prefix_idx = ctx.strings.intern("Trace: ");
-                let prefix_global = format!("@{}", ctx.strings.entry(prefix_idx).handle_global);
-                let blk = ctx.block();
-                let prefix_box = blk.load(DOUBLE, &prefix_global);
-                let prefix_handle = unbox_to_i64(blk, &prefix_box);
-                // Concat "Trace: " + first arg as string
-                if !args.is_empty() {
-                    let msg = lower_expr(ctx, &args[0])?;
-                    let blk = ctx.block();
-                    let msg_handle = blk.call(I64, "js_jsvalue_to_string", &[(DOUBLE, &msg)]);
-                    let combined = blk.call(I64, "js_string_concat", &[(I64, &prefix_handle), (I64, &msg_handle)]);
-                    let combined_box = nanbox_string_inline(blk, &combined);
-                    ctx.block().call_void("js_console_log_dynamic", &[(DOUBLE, &combined_box)]);
+                let val: String = if args.is_empty() {
+                    double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED))
                 } else {
-                    ctx.block().call_void("js_console_log_dynamic", &[(DOUBLE, &prefix_box)]);
-                }
+                    lower_expr(ctx, &args[0])?
+                };
+                ctx.block().call_void("js_console_trace", &[(DOUBLE, &val)]);
                 return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
             // console.table(data) — dedicated table renderer.
