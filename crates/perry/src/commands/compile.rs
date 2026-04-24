@@ -2959,8 +2959,15 @@ fn collect_modules(
         None
     };
 
-    let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id_and_types(
-        ast_module, &module_name, &source_file_path, *next_class_id, resolved_types
+    // Issue #179 Step 2 follow-up: detect `@perry-lazy` JSDoc pragma
+    // in the source file. When present, every `JSON.parse(...)` call
+    // in this module lowers to the lazy tape path without the user
+    // needing to set `PERRY_JSON_TAPE=1`. The pragma is erased at
+    // `tsc` time (it's inside a JSDoc comment) so Node runs the
+    // source identically.
+    let pragma_lazy_json = perry_hir::detect_lazy_json_pragma(&source);
+    let (mut hir_module, new_next_class_id) = perry_hir::lower_module_with_class_id_types_and_pragmas(
+        ast_module, &module_name, &source_file_path, *next_class_id, resolved_types, pragma_lazy_json,
     )?;
     *next_class_id = new_next_class_id; // Update the global class_id counter
 

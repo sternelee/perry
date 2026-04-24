@@ -4504,6 +4504,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let result_i64 = blk.call(I64, "js_json_parse", &[(I64, &s_handle)]);
             Ok(blk.bitcast_i64_to_double(&result_i64))
         }
+        // Issue #179 Step 2 follow-up: `@perry-lazy` pragma routes
+        // this call site through the lazy tape path without needing
+        // `PERRY_JSON_TAPE=1`. Runtime entry handles the "parse to
+        // LazyArrayHeader for top-level arrays, materialize on
+        // demand" behavior identically to the env-flag variant, so
+        // downstream accessors (`.length`, indexed, stringify) see
+        // the same lazy values the env flag would produce.
+        Expr::JsonParseLazy(text) => {
+            let s_box = lower_expr(ctx, text)?;
+            let blk = ctx.block();
+            let s_handle = unbox_to_i64(blk, &s_box);
+            let result_i64 = blk.call(I64, "js_json_parse_lazy", &[(I64, &s_handle)]);
+            Ok(blk.bitcast_i64_to_double(&result_i64))
+        }
         // Issue #179 typed-parse, Step 1b: when `<T>` is
         // `Array<Object{fields}>`, emit a packed-keys rodata constant
         // and route through `js_json_parse_typed_array`. Any other

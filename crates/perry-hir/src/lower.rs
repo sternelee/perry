@@ -84,6 +84,14 @@ pub struct LoweringContext {
     pub(crate) extern_func_types: Vec<(String, Vec<Type>, Type)>,
     /// Source file path (for import.meta.url)
     pub(crate) source_file_path: String,
+    /// Issue #179 Step 2 follow-up: module-level `@perry-lazy` JSDoc
+    /// pragma was detected in the source file. All `JSON.parse(x)`
+    /// calls in this module lower to `Expr::JsonParseLazy(x)`
+    /// instead of `Expr::JsonParse(x)`, routing through the lazy
+    /// tape path at codegen without needing `PERRY_JSON_TAPE=1`.
+    /// Populated by the driver from a source scan before calling
+    /// `lower_module_with_pragma`; defaults to false.
+    pub(crate) pragma_lazy_json: bool,
     /// Variables that hold closures or other values needing cross-module export globals
     /// (arrow functions, object literals, call expressions, arrays, new expressions)
     pub(crate) exportable_object_vars: HashSet<String>,
@@ -243,6 +251,7 @@ impl LoweringContext {
             current_class: None,
             extern_func_types: Vec::new(),
             source_file_path: source_file_path.into(),
+            pragma_lazy_json: false,
             exportable_object_vars: HashSet::new(),
             pending_functions: Vec::new(),
             func_return_native_instances: Vec::new(),
@@ -1065,6 +1074,19 @@ pub fn lower_module(ast_module: &ast::Module, name: &str, source_file_path: &str
     lower_module_with_class_id(ast_module, name, source_file_path, 1).map(|(module, _)| module)
 }
 
+/// Scan source bytes for the `@perry-lazy` pragma. The pragma MUST be
+/// present in a JSDoc-style comment (the prefix `@perry-lazy` in the
+/// source is enough for this MVP — a full JSDoc parser isn't
+/// necessary because the pragma is otherwise invalid TypeScript). A
+/// match anywhere in the file opts every `JSON.parse(...)` call in
+/// that module into the lazy tape path.
+///
+/// Node compatibility: the pragma lives inside a regular comment, so
+/// `tsc` erases it and Node sees the source as vanilla JS.
+pub fn detect_lazy_json_pragma(source: &str) -> bool {
+    source.contains("@perry-lazy")
+}
+
 /// Try to fold an `Expr::Call { callee: PropertyGet { object, property }, args }`
 /// into an `Expr::Array<Method>` HIR variant for known array methods. Used by
 /// the optional-chain Call lowering, which constructs `Expr::Call` directly
@@ -1405,8 +1427,28 @@ pub fn lower_module_with_class_id(ast_module: &ast::Module, name: &str, source_f
 }
 
 pub fn lower_module_with_class_id_and_types(ast_module: &ast::Module, name: &str, source_file_path: &str, start_class_id: ClassId, resolved_types: Option<std::collections::HashMap<u32, Type>>) -> Result<(Module, ClassId)> {
+    lower_module_with_class_id_types_and_pragmas(
+        ast_module, name, source_file_path, start_class_id, resolved_types, false,
+    )
+}
+
+/// Issue #179 Step 2 follow-up: entry point that accepts a
+/// driver-computed `pragma_lazy_json` flag. The driver passes `true`
+/// when the source file contains the `@perry-lazy` JSDoc pragma (use
+/// `detect_lazy_json_pragma` to compute). The flag propagates into
+/// `LoweringContext::pragma_lazy_json` so `JSON.parse` lowering can
+/// emit the lazy variant.
+pub fn lower_module_with_class_id_types_and_pragmas(
+    ast_module: &ast::Module,
+    name: &str,
+    source_file_path: &str,
+    start_class_id: ClassId,
+    resolved_types: Option<std::collections::HashMap<u32, Type>>,
+    pragma_lazy_json: bool,
+) -> Result<(Module, ClassId)> {
     let mut ctx = LoweringContext::with_class_id_start(source_file_path, start_class_id);
     ctx.resolved_types = resolved_types;
+    ctx.pragma_lazy_json = pragma_lazy_json;
     let mut module = Module::new(name);
 
     // Pre-scan for WeakRef/FinalizationRegistry variable declarations so subsequent
@@ -6074,6 +6116,18 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                                                 return Ok(Expr::JsonParseWithReviver(Box::new(text), Box::new(reviver)));
                                             } else if args.len() >= 1 {
                                                 let text = args.into_iter().next().unwrap();
+                                                // Issue #179 Step 2 follow-up: if the enclosing
+                                                // module has the `@perry-lazy` pragma, opt this
+                                                // JSON.parse call into the lazy tape path. Takes
+                                                // precedence over the typed-parse path below —
+                                                // both are module-scoped opt-ins; if a user
+                                                // wants both, the typed path is still preferred
+                                                // for per-call shape hints, but @perry-lazy is a
+                                                // coarser-grained read-heavy hint and we treat
+                                                // it as "the user explicitly asked for lazy".
+                                                if ctx.pragma_lazy_json {
+                                                    return Ok(Expr::JsonParseLazy(Box::new(text)));
+                                                }
                                                 // Issue #179 typed-parse plan: if the call site
                                                 // provides a TypeScript type argument (e.g.
                                                 // `JSON.parse<Item[]>(blob)`), carry it into HIR

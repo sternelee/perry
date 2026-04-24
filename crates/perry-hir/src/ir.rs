@@ -1141,6 +1141,14 @@ pub enum Expr {
     /// parser transparently if the input doesn't match the declared
     /// shape.
     JsonParseTyped { text: Box<Expr>, ty: Type, ordered_keys: Option<Vec<String>> },
+    /// `JSON.parse(...)` that the source opted into the lazy tape
+    /// path via the `@perry-lazy` JSDoc pragma on the containing
+    /// module. Semantically identical to `JsonParse` at runtime — the
+    /// pragma is an ordinary JSDoc comment, so Node/tsc see it as
+    /// whitespace. Routes through `js_json_parse_lazy` at codegen
+    /// time (always tape path, no env var check). See
+    /// `docs/generational-gc-plan.md` "contextual lazy JSON".
+    JsonParseLazy(Box<Expr>),
     JsonParseReviver { text: Box<Expr>, reviver: Box<Expr> },
     JsonParseWithReviver(Box<Expr>, Box<Expr>),
     JsonStringify(Box<Expr>),            // JSON.stringify(value) -> string
