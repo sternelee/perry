@@ -449,14 +449,18 @@ impl<'a> DirectParser<'a> {
     unsafe fn parse_string_value(&mut self) -> JSValue {
         if let Some(s) = self.parse_string_bytes() {
             let b = s.as_bytes();
-            // SSO infrastructure is available via `JSValue::try_short_string(b)`
-            // — see `docs/sso-migration-plan.md` for the roll-out
-            // sequence. Emitting SSO here without migrating all of
-            // the 30+ stringify arms in this file, object
-            // property-get helpers, symbol dispatchers, and string
-            // methods would produce user-visible `"null"` where
-            // strings should appear. Left on the heap path until
-            // the consumer migration lands.
+            // SSO Step 1 gated behind `PERRY_SSO_FORCE=1`. Lets the
+            // test harness flip on SSO emission to verify every
+            // consumer arm handles both STRING_TAG and
+            // SHORT_STRING_TAG. The env-var check is cached via
+            // `sso_emit_enabled()` so the per-call cost is one
+            // atomic load after the first parse. Default OFF until
+            // Step 2 of `docs/sso-migration-plan.md` lands.
+            if sso_emit_enabled() {
+                if let Some(sso) = JSValue::try_short_string(b) {
+                    return sso;
+                }
+            }
             let ptr = js_string_from_bytes(b.as_ptr(), b.len() as u32);
             JSValue::string_ptr(ptr)
         } else {
@@ -1073,6 +1077,21 @@ enum TapeMode {
     Auto,
     ForceOn,
     ForceOff,
+}
+
+/// SSO Step 1 test gate. `PERRY_SSO_FORCE=1` (or `on`/`true`) flips
+/// `DirectParser::parse_string_value` to emit inline SSO values for
+/// strings of length ≤ 5. Used by the migration test suite to
+/// exercise every stringify / equality / compare consumer arm
+/// across both representations. Cached so the per-parse-call cost
+/// is one relaxed atomic load.
+fn sso_emit_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| matches!(
+        std::env::var("PERRY_SSO_FORCE").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    ))
 }
 
 fn tape_mode_from_env() -> TapeMode {
@@ -2070,6 +2089,15 @@ unsafe fn try_emit_shape_element(
                 } else {
                     buf.push_str("null");
                 }
+            } else if vtag == crate::value::SHORT_STRING_TAG {
+                let jsval = JSValue::from_bits(fb);
+                let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+                let n = jsval.short_string_to_buf(&mut scratch);
+                if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                    write_escaped_string(buf, s);
+                } else {
+                    buf.push_str("null");
+                }
             } else if vtag == POINTER_TAG || is_raw_pointer(fb) {
                 stringify_value_depth(field_val, TYPE_UNKNOWN, buf, depth + 1);
             } else {
@@ -2116,6 +2144,15 @@ unsafe fn try_emit_shape_element(
         } else if vtag == STRING_TAG {
             let str_ptr = (fb & POINTER_MASK) as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if vtag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(fb);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
                 write_escaped_string(buf, s);
             } else {
                 buf.push_str("null");
@@ -2668,6 +2705,17 @@ unsafe fn stringify_value_with_replacer(
         }
         return;
     }
+    if replaced_tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(replaced_bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
 
     // If it's null/bool/number, serialize directly
     if replaced_bits == TAG_NULL {
@@ -2807,6 +2855,15 @@ unsafe fn stringify_object_with_replacer(
             } else {
                 buf.push_str("null");
             }
+        } else if replaced_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(replaced_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
         } else if replaced_bits == TAG_NULL {
             buf.push_str("null");
         } else if replaced_bits == TAG_TRUE {
@@ -2880,6 +2937,15 @@ unsafe fn stringify_array_with_replacer(
         if replaced_tag == STRING_TAG {
             let str_ptr = (replaced_bits & POINTER_MASK) as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if replaced_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(replaced_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
                 write_escaped_string(buf, s);
             } else {
                 buf.push_str("null");
@@ -2974,6 +3040,15 @@ pub unsafe extern "C" fn js_json_stringify_with_replacer(
     if replaced_tag == STRING_TAG {
         let str_ptr = (replaced_bits & POINTER_MASK) as *const StringHeader;
         if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(&mut buf, s);
+        } else {
+            buf.push_str("null");
+        }
+    } else if replaced_tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(replaced_bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
             write_escaped_string(&mut buf, s);
         } else {
             buf.push_str("null");
@@ -3427,6 +3502,17 @@ pub unsafe extern "C" fn js_json_stringify_full(
     } else if spacer_tag == STRING_TAG {
         let sp_ptr = (spacer_bits & POINTER_MASK) as *const StringHeader;
         indent_str = str_from_header(sp_ptr).unwrap_or("").to_string();
+    } else if spacer_tag == crate::value::SHORT_STRING_TAG {
+        // v0.5.213 SSO: spacer passed as inline short string
+        // (e.g. `JSON.stringify(obj, null, "  ")` where "  " is 2
+        // bytes — fits SSO). Decode into scratch, copy into the
+        // indent_str buffer for the formatter.
+        let jsval = JSValue::from_bits(spacer_bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        indent_str = std::str::from_utf8(&scratch[..n])
+            .unwrap_or("")
+            .to_string();
     } else if spacer_bits == TAG_TRUE {
         indent_str = String::new();
     } else {

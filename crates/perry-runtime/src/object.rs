@@ -1793,6 +1793,33 @@ pub extern "C" fn js_object_has_property(obj: f64, key: f64) -> f64 {
 /// Returns the field value or undefined if the key is not found
 #[no_mangle]
 pub extern "C" fn js_object_get_field_by_name(obj: *const ObjectHeader, key: *const crate::StringHeader) -> JSValue {
+    // SSO property access (v0.5.213 Step 1 gate). The codegen inline
+    // `.length` path routes SHORT_STRING_TAG receivers here because
+    // it doesn't yet know about the SSO tag. Handle `.length` by
+    // reading the length byte directly from the NaN-box payload.
+    // Other property accesses on an SSO string (e.g. `.charAt` via
+    // `[0]`, `.slice`) aren't yet routed here — handled by the
+    // string method dispatch in a future migration step; today they
+    // fall through to "undefined" which matches the behavior for
+    // string-valued property access on untyped locals in general.
+    {
+        let obj_bits = obj as u64;
+        if (obj_bits & crate::value::TAG_MASK) == crate::value::SHORT_STRING_TAG {
+            if !key.is_null() {
+                unsafe {
+                    let key_ptr = (key as *const u8).add(std::mem::size_of::<crate::StringHeader>());
+                    let key_len = (*key).byte_len as usize;
+                    let key_bytes = std::slice::from_raw_parts(key_ptr, key_len);
+                    if key_bytes == b"length" {
+                        let len = (obj_bits & crate::value::SHORT_STRING_LEN_MASK)
+                            >> crate::value::SHORT_STRING_LEN_SHIFT;
+                        return JSValue::number(len as f64);
+                    }
+                }
+            }
+            return JSValue::undefined();
+        }
+    }
     // Strip NaN-boxing tags if present (defensive: handle POINTER_TAG, UNDEFINED, NULL, etc.)
     let obj = {
         let bits = obj as u64;
@@ -2219,6 +2246,16 @@ pub extern "C" fn js_object_get_field_ic_miss(
     key: *const crate::StringHeader,
     cache: *mut [i64; 2],
 ) -> f64 {
+    // SSO receiver — never cacheable. Route through the SSO-aware
+    // `js_object_get_field_by_name` which handles `.length` inline
+    // and returns undefined for other keys.
+    if !key.is_null() {
+        let obj_bits = obj as u64;
+        if (obj_bits & crate::value::TAG_MASK) == crate::value::SHORT_STRING_TAG {
+            let v = js_object_get_field_by_name(obj, key);
+            return f64::from_bits(v.bits());
+        }
+    }
     if obj.is_null() || (obj as usize) < 0x10000 || key.is_null() {
         return f64::from_bits(crate::value::TAG_UNDEFINED);
     }

@@ -86,23 +86,69 @@ Each step is self-contained: it picks one consumer cluster, adds
 SSO-aware dispatch to every site in that cluster, tests against the
 full regression suite + targeted new tests, then ships.
 
-### Step 1 — stringify consumers (json.rs)
+### Step 1 — stringify consumers (json.rs) ✅ mostly landed
 
-Add SSO arm parallel to every `== STRING_TAG` dispatch in:
+**Landed in v0.5.214** (on top of v0.5.213 infrastructure):
+- Every `== STRING_TAG` dispatch in `json.rs` now has a parallel
+  `== SHORT_STRING_TAG` arm. Coverage:
+  - `stringify_value` (v0.5.213)
+  - `stringify_value_depth` (v0.5.213)
+  - `stringify_object_inner` inline field dispatch + replacer block
+  - `stringify_array_depth` inline element dispatch
+  - `extract_string_array`
+  - Replacer spacer paths (3 sites)
+  - `js_json_stringify_full` top-level replacer arm
+  - Spacer tag check (when user passes short string like `"  "` as indent)
+- New `PERRY_SSO_FORCE=1` test gate — forces
+  `DirectParser::parse_string_value` to emit SSO for strings ≤ 5
+  bytes. Cached via OnceLock like `PERRY_JSON_TAPE`.
+- `js_jsvalue_to_string` materializes SSO → heap for callers that
+  need `*mut StringHeader`.
+- `js_object_get_field_by_name` handles `.length` on SSO
+  receivers (returns the length byte directly).
 
-- `stringify_value` (done in v0.5.213)
-- `stringify_value_depth`
-- `stringify_object_inner` — both the "inline value dispatch" block
-  at ~line 1866 and the replacer path at ~line 2060.
-- `stringify_array_depth` — inline value dispatch at ~line 2180.
-- `extract_string_array` at ~line 3320.
-- Spacer / replacer / toJSON paths: lines 2660, 2752, 2801, 2878,
-  2972, 3266.
-- Top-level `js_json_stringify_full` inline string-handle paths at
-  ~line 3425.
+**Test result (v0.5.214):** 8 out of 10 `test_json_*.ts` tests match
+Node byte-for-byte under `PERRY_SSO_FORCE=1`. Default mode (SSO off)
+stays 10/10 — no user-visible regressions from the infrastructure
+landing.
 
-Tests: rerun `test_json_*` suite under forced-on SSO (to be added as
-`PERRY_SSO_FORCE=1` env var) — all must match Node byte-for-byte.
+**Remaining 2 failures** are both caused by Step 1.5 (below), not
+by missed stringify arms. They fail under SSO_FORCE because the
+codegen's PropertyGet receiver guard filters out SSO values before
+they reach any runtime path — so property access on SSO strings
+other than `.length` (e.g. `.indexOf`, `.slice`) returns
+`undefined` instead of dispatching correctly.
+
+### Step 1.5 — codegen PropertyGet SSO dispatch
+
+**Why needed:** `crates/perry-codegen/src/expr.rs` PropertyGet has a
+receiver-validity guard at ~line 2647 that masks `tag & 0xFFFD` and
+checks `== 0x7FFD`. This accepts POINTER_TAG (0x7FFD) + STRING_TAG
+(0x7FFF) but rejects SHORT_STRING_TAG (0x7FF9). SSO receivers fall
+to the "invalid" branch → return `undefined`.
+
+Widening the mask to `0xFFF9` accepts SSO but the PIC fast path's
+subsequent `*(obj_handle + 16)` read lands in arbitrary userspace
+memory for SSO values (the low 48 bits are SSO data, not a heap
+pointer). On some systems this reads garbage, on others it
+crashes. Verified: widening without further guarding crashed 2
+tests under SSO_FORCE.
+
+**Safe fix:** emit a three-way branch in the receiver guard:
+1. `tag_masked == 0x7FFD` → PIC fast path (existing).
+2. `tag == 0x7FF9` → call `js_object_get_field_by_name_f64` directly
+   (skip PIC, no memory read).
+3. Otherwise → invalid, return `undefined`.
+
+The `js_object_get_field_by_name` runtime entry already has an SSO
+arm (v0.5.214) that returns `.length` and dispatches other keys to
+`undefined`. Extending its dispatch to string methods is a Step 4
+concern — this step just wires the codegen to route SSO receivers
+into that entry.
+
+Estimated effort: ~2 hours, one codegen site, ~20 lines of new IR
+emission. Ship criterion: 10/10 `test_json_*.ts` tests match Node
+under `PERRY_SSO_FORCE=1`.
 
 ### Step 2 — DirectParser emits SSO
 

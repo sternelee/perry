@@ -2115,6 +2115,15 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let recv_tag = blk.lshr(I64, &recv_bits, "48");
             let recv_tag_masked = blk.and(I64, &recv_tag, "65533"); // 0xFFFD
             let handle_ok = blk.icmp_eq(I64, &recv_tag_masked, "32765"); // 0x7FFD
+            // SSO receivers fail this guard → route to slow path
+            // `js_value_length_f64` which has an SSO branch (reads
+            // length from the tag byte, no heap access). Accepting
+            // SSO here is safe because the fast path's
+            // `safe_load_i32_from_ptr(&recv_handle)` would read
+            // arbitrary bytes at the SSO "pointer" address, but
+            // the subsequent phi feeds the slow-path result when
+            // handle_ok is false — so SSO flow is correct via the
+            // slow path already, no widening needed.
 
             let check_gc_idx = ctx.new_block("plen.check_gc");
             let fast_idx = ctx.new_block("plen.fast");
@@ -2647,6 +2656,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let obj_tag = ctx.block().lshr(I64, &obj_bits, "48");
             let obj_tag_masked = ctx.block().and(I64, &obj_tag, "65533"); // 0xFFFD
             let is_valid = ctx.block().icmp_eq(I64, &obj_tag_masked, "32765"); // 0x7FFD
+            // NOTE: SSO (SHORT_STRING_TAG = 0x7FF9) intentionally
+            // fails this guard for now — the PIC fast path's
+            // subsequent `*(obj_handle + 16)` read would deref into
+            // arbitrary userspace memory and can crash. Property
+            // access on SSO values returns `undefined` from the
+            // invalid branch, which is correct for string-valued
+            // property access (JS `"x".foo === undefined`) EXCEPT
+            // `.length`. Full SSO-aware PIC dispatch is Step 1.5 of
+            // the SSO migration plan and requires emitting a
+            // dedicated `is_sso` branch that skips the PIC and calls
+            // the SSO-aware miss handler directly.
             let pic_idx = ctx.new_block("pget.recv_ok");
             let invalid_idx = ctx.new_block("pget.recv_bad");
             let final_merge_idx = ctx.new_block("pget.recv_merge");
