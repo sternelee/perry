@@ -744,18 +744,37 @@ pub fn arena_reset_empty_blocks(block_has_live: &[bool]) {
                 continue;
             }
             // Recent block — skip this cycle's reset decision.
+            // The `keep_low..=current` window matches
+            // `BLOCK_PERSIST_WINDOW` on the GC side: these are the
+            // blocks where LLVM caller-saved registers might still
+            // hold a freshly-allocated handle the conservative scan
+            // couldn't capture (issues #43 / #44). Resetting them
+            // overwrites those handles' backing stores on the very
+            // next allocation.
             if i >= keep_low && i <= current {
                 block.dead_cycles = 0;
                 continue;
             }
-            // Two-cycle grace on older blocks too, so a sudden scan
-            // miss doesn't immediately cost us the block.
-            block.dead_cycles = block.dead_cycles.saturating_add(1);
-            if block.dead_cycles >= 2 {
-                reset_block_ranges.push((block.data as usize, block.size));
-                block.offset = 0;
-                block.dead_cycles = 0;
-            }
+            // Issue #179: reset OLD observed-dead blocks immediately.
+            // The two-cycle grace that used to live here (issue #73)
+            // was a blanket safety margin, but for blocks outside the
+            // `keep_low..=current` window the register-miss risk has
+            // already closed — any allocation whose handle was in a
+            // caller-saved reg has been re-loaded from a stable slot
+            // (or the register has been repurposed and the handle is
+            // gone entirely) by the time 1+ GC cycles have passed.
+            // Holding these blocks for an extra cycle just delayed
+            // RSS reclaim by a full GC step on memory-pressured
+            // workloads like `bench_json_roundtrip`, where the first
+            // time a middle block surfaces as dead is often the last
+            // time GC fires before the benchmark ends (total bytes
+            // allocated ÷ adaptive step ≈ 3-4 cycles). Recent blocks
+            // (`keep_low..=current`) still get the full "never reset"
+            // protection above, which is where the scan-miss risk
+            // actually lives.
+            reset_block_ranges.push((block.data as usize, block.size));
+            block.offset = 0;
+            block.dead_cycles = 0;
         }
         if reset_block_ranges.is_empty() {
             return;

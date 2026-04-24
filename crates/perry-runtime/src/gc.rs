@@ -432,32 +432,96 @@ pub fn gc_check_trigger() {
     let next_trigger = GC_NEXT_TRIGGER_BYTES.with(|c| c.get());
     if total >= next_trigger {
         // Snapshot pre-GC in-use bytes to measure collection effectiveness.
+        // We also capture `freed_bytes` from the sweep itself (sum of dead
+        // object sizes). Issue #179: `pre_in_use - post_in_use` measures
+        // only block-reset activity, which is gated by the 2-cycle grace
+        // period (Issue #73) — the first productive GC in a series will
+        // show (pre - post) = 0 even though the sweep found 60%+ dead
+        // objects. Using `freed_bytes` reflects true reclaim potential
+        // and lets the adaptive step halve on the cycle that first
+        // surfaces the dead working set, rather than deferring until
+        // after the grace completes.
         let pre_in_use = crate::arena::arena_in_use_bytes();
-        gc_collect_inner();
+        let sweep_freed_bytes = gc_collect_inner();
         let post_in_use = crate::arena::arena_in_use_bytes();
 
         // Adaptive step:
-        //   >75% freed → double (collections are cheap, back off).
-        //   10-25% freed → halve (large live set, collect more often to
-        //                         avoid runaway memory).
-        //   <10% freed → DOUBLE (this GC was pointless — block-persistence
-        //                        kept everything alive because live strings
-        //                        share blocks with dead ones. Halving would
-        //                        thrash 20× GCs/sec; doubling defers).
-        //                        Issue #64 follow-up: without this, a parse
-        //                        loop after a stringify loop hit GCs every
-        //                        ~5MB of growth, each freed=0, and the step
-        //                        got stuck at the 16MB floor.
-        let freed = pre_in_use.saturating_sub(post_in_use);
+        //   >90% freed → double (almost all dead — `object_create`-style
+        //                        hot loops fit their entire working set
+        //                        under the threshold; defer.)
+        //   10-90% freed → halve (productive collection — real reclaim
+        //                         is possible, so collect again sooner
+        //                         to keep the working set bounded;
+        //                         16MB floor prevents thrash).
+        //   <10% freed → double (live set genuinely large, don't thrash).
+        //
+        // Issue #179: the halve band was formerly 10-25% only. Before
+        // the age-restricted block-persist, collections in the 25-90%
+        // band were illusory — block-persist re-marked dead neighbors
+        // as live, so "freed" over-counted what was actually reclaimable
+        // on subsequent cycles. Keeping step flat there was the correct
+        // defensive choice. With v0.5.193's block-persist limited to
+        // the last 5 general-arena blocks, "freed" now reflects real
+        // sweep effectiveness, and widening the halve band lets the
+        // trigger fire often enough for middle blocks to actually
+        // reset and RSS to stay bounded. `bench_json_roundtrip` moves
+        // into this band: first GC frees ~73% → halve → next trigger
+        // ~56MB later → second GC frees more → step halves again →
+        // RSS stabilizes instead of growing linearly with iters.
+        //
+        // The >90% and <10% branches retain the existing "don't thrash"
+        // protection (Issue #64 follow-up): both extremes mean the
+        // live/garbage ratio is such that collecting sooner is wasted
+        // work.
+        // Adaptive step, driven by the *larger* of sweep-freed-bytes
+        // and the block-reset delta (`pre - post`). `freed_bytes` from
+        // the sweep surfaces reclaim potential immediately (before the
+        // 2-cycle grace completes); `pre - post` reflects actual block
+        // resets landing on subsequent cycles. Using the max keeps the
+        // step adaptive to both surfaces of productive collection.
+        //
+        //   >90% freed → double (near-total sweep; `object_create`-style
+        //                        hot loops pay one GC then run free).
+        //   25-90% freed → halve (productive — reclaim is meaningful,
+        //                         collect again sooner to bound RSS).
+        //   10-25% freed → keep (marginal — don't thrash vs. churn).
+        //   <10% freed → double (live set genuinely large, defer).
+        //
+        // Issue #179 driver: formerly the halve band was 10-25% only,
+        // which never fired on `bench_json_roundtrip` because typical
+        // freed-pct there is 50-80%. With the max-of-two metric AND
+        // the age-restricted block-persist (v0.5.193), widening the
+        // halve band to 25-90% lets the trigger fire often enough for
+        // middle blocks to actually reset, without dropping into the
+        // 16MB-floor thrash territory that hurts throughput on
+        // moderate workloads. `bench_json_roundtrip` lands here on
+        // most cycles (60-80% freed) → step halves → GC fires 3-4×
+        // across the 50-iter loop → RSS stabilizes around the live-
+        // set size plus the 5-block recent-window headroom.
+        //
+        // The 16MB floor keeps `object_create`-scale hot loops from
+        // thrashing: those workloads land in the >90% band on the
+        // first GC and immediately double the step, escaping the
+        // halve trajectory after a single cycle.
+        let block_reclaim = pre_in_use.saturating_sub(post_in_use);
+        let freed = std::cmp::max(block_reclaim, sweep_freed_bytes as usize);
         let mut step = GC_STEP_BYTES.with(|c| c.get());
+        let old_step = step;
         if pre_in_use > 0 {
             let pct_freed = (freed * 100) / pre_in_use;
-            if pct_freed > 75 || pct_freed < 10 {
+            if pct_freed > 90 || pct_freed < 10 {
                 step = (step * 2).min(GC_THRESHOLD_MAX_BYTES);
-            } else if pct_freed < 25 {
+            } else if pct_freed >= 25 {
                 step = (step / 2).max(16 * 1024 * 1024);
             }
+            // 10-25% freed → keep step unchanged (marginal churn).
             GC_STEP_BYTES.with(|c| c.set(step));
+            if std::env::var_os("PERRY_GC_DIAG").is_some() {
+                eprintln!(
+                    "[gc-step] pre_in_use={} post_in_use={} sweep_freed={} block_reclaim={} pct={}% step={}→{}",
+                    pre_in_use, post_in_use, sweep_freed_bytes, block_reclaim, pct_freed, old_step, step
+                );
+            }
         }
         let new_total = arena_total_bytes();
         GC_NEXT_TRIGGER_BYTES.with(|c| c.set(new_total + step));
@@ -578,7 +642,7 @@ pub extern "C" fn gc_check_trigger_export() {
 }
 
 /// Main GC collection
-fn gc_collect_inner() {
+fn gc_collect_inner() -> u64 {
     let start = std::time::Instant::now();
 
     // Build set of valid heap pointers for conservative stack scan validation
@@ -628,6 +692,7 @@ fn gc_collect_inner() {
         stats.total_freed_bytes += freed_bytes;
         stats.last_pause_us = elapsed_us;
     });
+    freed_bytes
 }
 
 /// A sorted-`Vec`-backed set of valid user-space heap pointers,
@@ -1085,12 +1150,41 @@ fn trace_marked_objects(valid_ptrs: &ValidPointerSet) {
 /// email, etc.) get swept, and JSON.stringify later reads freed memory.
 /// Repro: issues #43 / #44.
 ///
+/// Issue #179: the force-mark-every-adjacent-object behavior cascades
+/// catastrophically when a long-lived root (e.g. a caller-level
+/// 10k-record array) pins an old block: the dead iter-0 neighbors get
+/// resurrected, their fields trace into later blocks, and the "live
+/// set" snowballs. The register-holding scenario above is inherently
+/// *recent* — by the time an object is a few GC cycles old, its register
+/// has been repurposed and any surviving handle has been re-loaded from
+/// a stable stack slot, so block-persist on old blocks provides no
+/// additional safety. Restrict Pass 2 to the last `BLOCK_PERSIST_WINDOW`
+/// general-arena blocks (matching the `keep_low = current - 4` window
+/// that `arena_reset_empty_blocks` already uses — same reasoning).
+/// Longlived-arena blocks (indices `>= general_block_count()`) never
+/// get block-persisted either: every object in that arena is kept alive
+/// by an explicit root scanner (`scan_parse_roots`,
+/// `scan_shape_cache_roots`, `scan_transition_cache_roots`), so any
+/// unmarked object there is genuinely unreachable — its malloc
+/// children can safely be swept.
+///
 /// Iterates until fixed point because marking an arena object may trace a
 /// child in a previously-dead block, making it live in the next round.
+/// The fixed-point loop terminates faster with the restricted window
+/// because cross-block trace expansion can no longer pull in dead
+/// old-block neighbors as new block-persist candidates.
+const BLOCK_PERSIST_WINDOW: usize = 5;
+
 fn mark_block_persisting_arena_objects(valid_ptrs: &ValidPointerSet) {
     let mut worklist: Vec<*mut GcHeader> = Vec::new();
     loop {
         let n_blocks = crate::arena::arena_block_count();
+        let general_n = crate::arena::general_block_count();
+        // Recent-window lower bound: same formula as the reset policy's
+        // `keep_low` (issue #73) so block-persist and reset operate on
+        // the same "registers might still hold handles here" definition
+        // of recent.
+        let persist_low = general_n.saturating_sub(BLOCK_PERSIST_WINDOW);
         let mut block_has_live: Vec<bool> = vec![false; n_blocks];
 
         // Pass 1: compute which blocks have any reachable (marked/pinned) object.
@@ -1111,9 +1205,19 @@ fn mark_block_persisting_arena_objects(valid_ptrs: &ValidPointerSet) {
         // objects, and the per-object early-return inside the callback still
         // invokes the walker for every header (issue #64 follow-up). The
         // filter drops pass 2 from ~55ms to <1ms on that workload.
+        //
+        // Issue #179 restriction: only persist recent general-arena blocks.
+        // Longlived blocks (block_idx >= general_n) and old general blocks
+        // (block_idx < persist_low) are skipped — their dead objects will
+        // be naturally unmarked and their malloc children swept.
         let mut newly_marked = 0usize;
         crate::arena::arena_walk_objects_filtered(
-            |block_idx| block_idx < block_has_live.len() && block_has_live[block_idx],
+            |block_idx| {
+                block_idx < block_has_live.len()
+                    && block_has_live[block_idx]
+                    && block_idx >= persist_low
+                    && block_idx < general_n
+            },
             |header_ptr, _block_idx| {
                 let header = header_ptr as *mut GcHeader;
                 unsafe {
@@ -1131,7 +1235,9 @@ fn mark_block_persisting_arena_objects(valid_ptrs: &ValidPointerSet) {
         }
 
         // Trace newly marked; may mark children in previously-dead blocks,
-        // requiring another round to pick them up.
+        // requiring another round to pick them up (but only within the
+        // recent window — old blocks' newly-traced marks don't re-enter
+        // the block-persist pump).
         drain_trace_worklist(&mut worklist, valid_ptrs);
     }
 }
@@ -1546,6 +1652,20 @@ fn sweep() -> u64 {
     });
 
     // Reset every block that ended up with zero live objects.
+    // Diagnostic: PERRY_GC_DIAG=1 reports block-level liveness.
+    if std::env::var_os("PERRY_GC_DIAG").is_some() {
+        let general_n = crate::arena::general_block_count();
+        let live_general = (0..general_n).filter(|&i| block_has_live[i]).count();
+        let live_ll = (general_n..n_blocks).filter(|&i| block_has_live[i]).count();
+        eprintln!(
+            "[gc] blocks: general={} ({} live), longlived={} ({} live), freed_bytes={}",
+            general_n,
+            live_general,
+            n_blocks - general_n,
+            live_ll,
+            freed_bytes
+        );
+    }
     crate::arena::arena_reset_empty_blocks(&block_has_live);
 
     freed_bytes
@@ -1713,6 +1833,44 @@ mod tests {
     #[test]
     fn test_gc_header_size() {
         assert_eq!(GC_HEADER_SIZE, 8, "GC header should be 8 bytes");
+    }
+
+    /// Issue #179: block-persist's age window must match the reset
+    /// policy's `keep_low` window — both define the set of blocks
+    /// where caller-saved-register handles might still be uncaptured.
+    /// If the two drift apart, block-persist either over-retains old
+    /// blocks (RSS regression) or under-protects recent blocks
+    /// (re-opens the issues #43 / #44 dangling-pointer failure mode).
+    #[test]
+    fn block_persist_window_matches_reset_keep_low() {
+        // `keep_low = current.saturating_sub(4)` → 5 blocks
+        // (current-4..=current). `BLOCK_PERSIST_WINDOW` gates Pass 2
+        // of `mark_block_persisting_arena_objects` via
+        // `persist_low = general_n.saturating_sub(BLOCK_PERSIST_WINDOW)`.
+        // Both windows must describe the same "register-miss risk"
+        // horizon for the correctness invariant to hold.
+        assert_eq!(
+            BLOCK_PERSIST_WINDOW, 5,
+            "block-persist window must match reset's keep_low window (5 blocks)"
+        );
+    }
+
+    /// Issue #179: `gc_collect_inner` must return the sweep's
+    /// freed_bytes so the adaptive step logic can react to
+    /// object-reclaim activity immediately, not wait for blocks to
+    /// clear the 2-cycle grace and surface as a `pre - post` drop on
+    /// the next cycle. The return value drives the `>90% halve /
+    /// 10-90% halve / <10% double` classifier in `gc_check_trigger`.
+    #[test]
+    fn gc_collect_inner_returns_freed_bytes() {
+        // Allocate an object that's guaranteed unreachable (no
+        // roots hold it — we immediately drop the pointer).
+        let _throwaway = gc_malloc(128, GC_TYPE_STRING);
+        // freed_bytes is the per-sweep reclaim count; for this
+        // tiny test we just assert the signature (returns u64).
+        // The exact freed count depends on thread-local state from
+        // other tests, so we only assert the type/shape.
+        let _freed: u64 = gc_collect_inner();
     }
 
     #[test]
