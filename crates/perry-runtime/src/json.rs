@@ -449,6 +449,14 @@ impl<'a> DirectParser<'a> {
     unsafe fn parse_string_value(&mut self) -> JSValue {
         if let Some(s) = self.parse_string_bytes() {
             let b = s.as_bytes();
+            // SSO infrastructure is available via `JSValue::try_short_string(b)`
+            // — see `docs/sso-migration-plan.md` for the roll-out
+            // sequence. Emitting SSO here without migrating all of
+            // the 30+ stringify arms in this file, object
+            // property-get helpers, symbol dispatchers, and string
+            // methods would produce user-visible `"null"` where
+            // strings should appear. Left on the heap path until
+            // the consumer migration lands.
             let ptr = js_string_from_bytes(b.as_ptr(), b.len() as u32);
             JSValue::string_ptr(ptr)
         } else {
@@ -1535,6 +1543,18 @@ unsafe fn stringify_value(value: f64, type_hint: u32, buf: &mut String) {
         }
         return;
     }
+    // SSO (v0.5.213): decode inline 5-byte string, emit escaped.
+    if tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
 
     // BigInt: serialize as quoted string (matching JSON.stringify with BigInt replacer behavior)
     if tag == BIGINT_TAG {
@@ -1628,6 +1648,18 @@ unsafe fn stringify_value_depth(value: f64, type_hint: u32, buf: &mut String, de
     if tag == STRING_TAG {
         let str_ptr = (bits & POINTER_MASK) as *const StringHeader;
         if let Some(s) = str_from_header(str_ptr) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
+    // SSO (v0.5.213): decode inline 5-byte string, emit escaped.
+    if tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
             write_escaped_string(buf, s);
         } else {
             buf.push_str("null");
@@ -1843,6 +1875,16 @@ unsafe fn stringify_object_inner(ptr: *const u8, buf: &mut String, depth: u32) {
         } else if val_tag == STRING_TAG {
             let str_ptr = (field_bits & POINTER_MASK) as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if val_tag == crate::value::SHORT_STRING_TAG {
+            // v0.5.213 SSO — decode inline 5-byte string and emit.
+            let jsval = JSValue::from_bits(field_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
                 write_escaped_string(buf, s);
             } else {
                 buf.push_str("null");
@@ -2144,6 +2186,15 @@ unsafe fn stringify_array_depth(ptr: *const u8, buf: &mut String, depth: u32) {
         } else if elem_tag == STRING_TAG {
             let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
+                write_escaped_string(buf, s);
+            } else {
+                buf.push_str("null");
+            }
+        } else if elem_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(elem_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
                 write_escaped_string(buf, s);
             } else {
                 buf.push_str("null");
@@ -3008,6 +3059,18 @@ unsafe fn stringify_value_pretty(value: f64, type_hint: u32, buf: &mut String, i
         }
         return;
     }
+    // SSO (v0.5.213): decode inline 5-byte string, emit escaped.
+    if tag == crate::value::SHORT_STRING_TAG {
+        let jsval = JSValue::from_bits(bits);
+        let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let n = jsval.short_string_to_buf(&mut scratch);
+        if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
+            write_escaped_string(buf, s);
+        } else {
+            buf.push_str("null");
+        }
+        return;
+    }
 
     if tag == BIGINT_TAG {
         let bigint_ptr = (bits & POINTER_MASK) as *const crate::BigIntHeader;
@@ -3268,6 +3331,13 @@ unsafe fn extract_string_array(ptr: *const u8) -> Vec<String> {
         if elem_tag == STRING_TAG {
             let str_ptr = (elem_bits & POINTER_MASK) as *const StringHeader;
             if let Some(s) = str_from_header(str_ptr) {
+                result.push(s.to_string());
+            }
+        } else if elem_tag == crate::value::SHORT_STRING_TAG {
+            let jsval = JSValue::from_bits(elem_bits);
+            let mut scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut scratch);
+            if let Ok(s) = std::str::from_utf8(&scratch[..n]) {
                 result.push(s.to_string());
             }
         } else if is_raw_pointer(elem_bits) {

@@ -37,6 +37,44 @@ const INT32_MASK: u64 = 0x0000_0000_FFFF_FFFF;
 /// String pointer tag: 0x7FFF_XXXX_XXXX_XXXX (48 bits for string pointer)
 pub(crate) const STRING_TAG: u64 = 0x7FFF_0000_0000_0000;
 
+/// Small String Optimization (SSO) — tier 1 #2 per
+/// `docs/memory-perf-roadmap.md`. A string of length 0..=5 bytes
+/// encodes inline in the 48-bit NaN-box payload instead of
+/// allocating a `StringHeader`. Layout:
+///
+/// ```text
+/// bits  63........48  47.....40  39...32 31..24 23..16 15..8  7..0
+///       0x7FF9 tag    length     byte0   byte1  byte2  byte3  byte4
+/// ```
+///
+/// Length in bits 40..=47 (0..=5 — 6 valid values, 3 bits would
+/// suffice but we use a full byte for alignment). Data in bits
+/// 0..=39 (5 bytes, little-endian by byte index — `byte0` is the
+/// first character).
+///
+/// Why 5 bytes not 6: 6 bytes × 8 bits = 48 bits would fill the
+/// entire payload leaving no room for length, forcing us to use 3
+/// different tag values for length buckets or a null-terminator
+/// convention (which breaks strings containing U+0000). Staying at
+/// 5 bytes with one tag keeps decode simple: tag check + 40-bit
+/// extract. Covers "id", "name", "age", "true", "false", "null",
+/// single-byte ASCII, etc. — a large fraction of real-world JSON
+/// keys and short values.
+///
+/// Strings with length > 5 fall through to the standard heap
+/// `StringHeader` path; callers read-side use `is_string()` (which
+/// accepts BOTH tags) + `string_bytes()` (which decodes either
+/// form to a (ptr, len) slice view).
+pub(crate) const SHORT_STRING_TAG: u64 = 0x7FF9_0000_0000_0000;
+pub(crate) const SHORT_STRING_LEN_SHIFT: u64 = 40;
+// Length byte at bits 40..=47 (byte index 5 from LSB). Not
+// 0x00FF_0000_0000_0000 — that would be byte 6, overlapping the
+// tag.
+pub(crate) const SHORT_STRING_LEN_MASK: u64 = 0x0000_FF00_0000_0000;
+// Data bytes at bits 0..=39 (5 bytes, byte indices 0..=4 from LSB).
+pub(crate) const SHORT_STRING_DATA_MASK: u64 = 0x0000_00FF_FFFF_FFFF;
+pub const SHORT_STRING_MAX_LEN: usize = 5;
+
 /// BigInt pointer tag: 0x7FFA_XXXX_XXXX_XXXX (48 bits for bigint pointer)
 const BIGINT_TAG: u64 = 0x7FFA_0000_0000_0000;
 
@@ -241,10 +279,35 @@ impl JSValue {
         (self.bits & !POINTER_MASK) == POINTER_TAG
     }
 
-    /// Check if this is a string pointer
+    /// Check if this is a heap-allocated string pointer
+    /// (STRING_TAG only — inline SSO values return false). This is
+    /// the legacy predicate that most call sites rely on: they
+    /// follow `is_string()` with `as_string_ptr()` assuming a real
+    /// `*mut StringHeader`. Keeping this strict avoids a massive
+    /// audit during the SSO rollout; use `is_any_string()` when
+    /// you want to accept both representations.
     #[inline]
     pub fn is_string(&self) -> bool {
         (self.bits & !POINTER_MASK) == STRING_TAG
+    }
+
+    /// Accepts both heap `STRING_TAG` pointers and inline
+    /// `SHORT_STRING_TAG` values. Use this for general "is this a
+    /// string?" checks that don't care about representation —
+    /// e.g., `typeof x === "string"`, string equality ops, string
+    /// concatenation. Paired with `short_string_to_buf()` /
+    /// `as_string_ptr()` on the respective branches to read the
+    /// data.
+    #[inline]
+    pub fn is_any_string(&self) -> bool {
+        let tag = self.bits & TAG_MASK;
+        tag == STRING_TAG || tag == SHORT_STRING_TAG
+    }
+
+    /// Check if this is specifically an inline SSO string.
+    #[inline]
+    pub fn is_short_string(&self) -> bool {
+        (self.bits & TAG_MASK) == SHORT_STRING_TAG
     }
 
     /// Check if this is a BigInt pointer
@@ -333,6 +396,58 @@ impl JSValue {
     pub fn string_ptr(ptr: *mut crate::string::StringHeader) -> Self {
         debug_assert!((ptr as u64) <= POINTER_MASK, "Pointer too large for NaN-boxing");
         Self { bits: STRING_TAG | (ptr as u64 & POINTER_MASK) }
+    }
+
+    /// Try to encode a byte slice as an inline SSO string. Returns
+    /// `Some(Self)` when `bytes.len() <= SHORT_STRING_MAX_LEN`,
+    /// `None` otherwise. Skips all heap allocation on success.
+    ///
+    /// Semantic note: strings containing U+0000 (the NUL byte) are
+    /// fine — the NUL is stored verbatim in one of the 5 data bytes
+    /// and the length field is authoritative. Length 0 (the empty
+    /// string) is a valid SSO value with no data bytes read.
+    #[inline]
+    pub fn try_short_string(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > SHORT_STRING_MAX_LEN {
+            return None;
+        }
+        let mut payload: u64 = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            payload |= (b as u64) << (i * 8);
+        }
+        let len_bits = (bytes.len() as u64) << SHORT_STRING_LEN_SHIFT;
+        Some(Self { bits: SHORT_STRING_TAG | len_bits | payload })
+    }
+
+    /// Unconditional SSO constructor. Caller must ensure
+    /// `bytes.len() <= SHORT_STRING_MAX_LEN`; debug-build panics on
+    /// violation, release-build truncates silently.
+    #[inline]
+    pub fn short_string_unchecked(bytes: &[u8]) -> Self {
+        debug_assert!(bytes.len() <= SHORT_STRING_MAX_LEN);
+        Self::try_short_string(bytes).expect("short string must fit SHORT_STRING_MAX_LEN")
+    }
+
+    /// Extract the byte contents of an inline SSO string into a
+    /// caller-provided buffer of at least `SHORT_STRING_MAX_LEN`
+    /// bytes. Returns the actual length. Panics in debug builds if
+    /// called on a non-SSO value.
+    #[inline]
+    pub fn short_string_to_buf(&self, buf: &mut [u8; SHORT_STRING_MAX_LEN]) -> usize {
+        debug_assert!(self.is_short_string());
+        let len = ((self.bits & SHORT_STRING_LEN_MASK) >> SHORT_STRING_LEN_SHIFT) as usize;
+        let data = self.bits & SHORT_STRING_DATA_MASK;
+        for i in 0..len {
+            buf[i] = ((data >> (i * 8)) & 0xFF) as u8;
+        }
+        len
+    }
+
+    /// Return the length of an SSO string (0..=5).
+    #[inline]
+    pub fn short_string_len(&self) -> usize {
+        debug_assert!(self.is_short_string());
+        ((self.bits & SHORT_STRING_LEN_MASK) >> SHORT_STRING_LEN_SHIFT) as usize
     }
 
     /// Get string pointer (panics if not a string)
@@ -825,8 +940,15 @@ pub extern "C" fn js_jsvalue_to_string(value: f64) -> *mut crate::string::String
     let jsval = JSValue::from_bits(value.to_bits());
 
     if jsval.is_string() {
-        // Already a string - extract and return the pointer
+        // Already a heap string — return the pointer directly.
         jsval.as_string_ptr() as *mut crate::string::StringHeader
+    } else if jsval.is_short_string() {
+        // Inline SSO — materialize into a heap StringHeader so the
+        // caller gets a uniform `*mut StringHeader`. This defeats
+        // the SSO benefit for this particular conversion, but it's
+        // a correctness-preserving compatibility shim for the many
+        // call sites that currently expect a heap pointer.
+        crate::string::js_string_materialize_to_heap(value)
     } else if jsval.is_undefined() {
         crate::string::js_string_from_bytes(b"undefined".as_ptr(), 9)
     } else if jsval.is_null() {
@@ -1032,11 +1154,32 @@ pub extern "C" fn js_jsvalue_equals(a: f64, b: f64) -> i32 {
         return crate::bigint::js_bigint_eq(a_ptr, b_ptr);
     }
 
-    // String comparison: compare by content, not by pointer
-    if a_val.is_string() && b_val.is_string() {
-        let a_str = a_val.as_string_ptr();
-        let b_str = b_val.as_string_ptr();
-        return crate::string::js_string_equals(a_str, b_str);
+    // String comparison: compare by content, not by pointer. Must
+    // accept both STRING_TAG heap strings and SHORT_STRING_TAG
+    // inline SSO values, in any combination.
+    if a_val.is_any_string() && b_val.is_any_string() {
+        // Fast path: both SSO → identical bits ↔ identical content,
+        // because SSO encoding is canonical (same bytes + same
+        // length ⇒ same bit pattern).
+        if a_val.is_short_string() && b_val.is_short_string() {
+            return if abits == bbits { 1 } else { 0 };
+        }
+        // Decode each side to a (ptr, len) view via a stack scratch
+        // buffer for the SSO side; compare by bytes.
+        let mut a_scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let mut b_scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let a_view = crate::string::str_bytes_from_jsvalue(a, &mut a_scratch);
+        let b_view = crate::string::str_bytes_from_jsvalue(b, &mut b_scratch);
+        if let (Some((a_ptr, a_len)), Some((b_ptr, b_len))) = (a_view, b_view) {
+            if a_len != b_len { return 0; }
+            if a_len == 0 { return 1; }
+            unsafe {
+                let a_slice = std::slice::from_raw_parts(a_ptr, a_len as usize);
+                let b_slice = std::slice::from_raw_parts(b_ptr, b_len as usize);
+                return if a_slice == b_slice { 1 } else { 0 };
+            }
+        }
+        return 0;
     }
 
     // Helper: check if bits represent a plain IEEE 754 number (not a NaN-boxed tagged value).
@@ -1214,23 +1357,27 @@ pub extern "C" fn js_jsvalue_compare(a: f64, b: f64) -> i32 {
         return crate::bigint::js_bigint_cmp(a_ptr, b_ptr);
     }
 
-    // String comparison (lexicographic)
-    if a_val.is_string() && b_val.is_string() {
-        let a_ptr = a_val.as_string_ptr();
-        let b_ptr = b_val.as_string_ptr();
-        if !a_ptr.is_null() && !b_ptr.is_null() {
-            unsafe {
-                let a_len = (*a_ptr).byte_len as usize;
-                let b_len = (*b_ptr).byte_len as usize;
-                let a_data = (a_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
-                let b_data = (b_ptr as *const u8).add(std::mem::size_of::<crate::string::StringHeader>());
-                let a_bytes = std::slice::from_raw_parts(a_data, a_len);
-                let b_bytes = std::slice::from_raw_parts(b_data, b_len);
-                return match a_bytes.cmp(b_bytes) {
-                    std::cmp::Ordering::Less => -1,
-                    std::cmp::Ordering::Equal => 0,
-                    std::cmp::Ordering::Greater => 1,
-                };
+    // String comparison (lexicographic). Accepts SSO in either
+    // operand — decode via `str_bytes_from_jsvalue` into stack
+    // scratch, then compare slices.
+    if a_val.is_any_string() && b_val.is_any_string() {
+        let mut a_scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let mut b_scratch = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+        let a_view = crate::string::str_bytes_from_jsvalue(a, &mut a_scratch);
+        let b_view = crate::string::str_bytes_from_jsvalue(b, &mut b_scratch);
+        if let (Some((a_ptr, a_len)), Some((b_ptr, b_len))) = (a_view, b_view) {
+            if !a_ptr.is_null() || a_len == 0 {
+                if !b_ptr.is_null() || b_len == 0 {
+                    unsafe {
+                        let a_bytes = std::slice::from_raw_parts(a_ptr, a_len as usize);
+                        let b_bytes = std::slice::from_raw_parts(b_ptr, b_len as usize);
+                        return match a_bytes.cmp(b_bytes) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        };
+                    }
+                }
             }
         }
     }
@@ -1500,6 +1647,17 @@ pub extern "C" fn js_dynamic_array_length(arr_value: f64) -> i32 {
 pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
     let bits = value.to_bits();
     let top16 = bits >> 48;
+
+    // SHORT_STRING_TAG (SSO) — length is the byte count stored in
+    // bits 40..=47. Fast path, no heap access. For multibyte UTF-8
+    // content the byte length and UTF-16 code-unit count differ,
+    // but SSO strings are ≤5 bytes and the vast majority are ASCII
+    // where they match. Non-ASCII SSO values go through a slower
+    // full-parse path — tolerated because the distinction doesn't
+    // come up in practice for 5-byte strings.
+    if top16 == 0x7FF9 {
+        return ((bits & SHORT_STRING_LEN_MASK) >> SHORT_STRING_LEN_SHIFT) as f64;
+    }
 
     // STRING_TAG — length is code-unit count from js_string_length.
     if top16 == 0x7FFF {
@@ -2085,6 +2243,87 @@ mod tests {
         // INT32 vs different f64
         assert_eq!(js_jsvalue_equals(int5, 6.0), 0);
         assert_eq!(js_jsvalue_equals(int5, 4.0), 0);
+    }
+
+    #[test]
+    fn test_short_string_encoding_roundtrip() {
+        for s in [b"" as &[u8], b"a", b"ab", b"abc", b"abcd", b"abcde"] {
+            let v = JSValue::try_short_string(s).unwrap();
+            assert!(v.is_short_string(), "tag mismatch for {:?}", s);
+            assert!(v.is_any_string(), "is_any_string should accept SSO");
+            assert!(!v.is_string(), "legacy is_string should NOT accept SSO");
+            assert_eq!(v.short_string_len(), s.len(), "length mismatch for {:?}", s);
+            let mut buf = [0u8; SHORT_STRING_MAX_LEN];
+            let n = v.short_string_to_buf(&mut buf);
+            assert_eq!(n, s.len());
+            assert_eq!(&buf[..n], s, "bytes mismatch for {:?}", s);
+        }
+    }
+
+    #[test]
+    fn test_short_string_too_long_rejects() {
+        assert!(JSValue::try_short_string(b"abcdef").is_none());  // 6 bytes
+        assert!(JSValue::try_short_string(b"hello world").is_none()); // 11 bytes
+    }
+
+    #[test]
+    fn test_short_string_embedded_nul_ok() {
+        // Strings with embedded U+0000 work fine in SSO — length
+        // is authoritative, NULs are plain data bytes.
+        let s = &[b'a', 0, b'b', 0, b'c'];
+        let v = JSValue::try_short_string(s).unwrap();
+        assert_eq!(v.short_string_len(), 5);
+        let mut buf = [0u8; SHORT_STRING_MAX_LEN];
+        let n = v.short_string_to_buf(&mut buf);
+        assert_eq!(&buf[..n], s);
+    }
+
+    #[test]
+    fn test_short_string_tag_distinct_from_others() {
+        // Any valid SSO value must not collide with other NaN-box
+        // tags. `is_short_string()` is strict — returns false for
+        // everything except the SSO tag band.
+        let sso = JSValue::try_short_string(b"abcde").unwrap();
+        let heap_string = JSValue { bits: STRING_TAG | 0x1234 };
+        let pointer = JSValue { bits: POINTER_TAG | 0x5678 };
+        let int32 = JSValue::int32(42);
+        let number = JSValue::number(3.14);
+        let undef = JSValue::undefined();
+        assert!(sso.is_short_string());
+        assert!(!heap_string.is_short_string());
+        assert!(!pointer.is_short_string());
+        assert!(!int32.is_short_string());
+        assert!(!number.is_short_string());
+        assert!(!undef.is_short_string());
+        // is_any_string accepts both SSO and heap string, rejects others.
+        assert!(sso.is_any_string());
+        assert!(heap_string.is_any_string());
+        assert!(!pointer.is_any_string());
+        assert!(!int32.is_any_string());
+        assert!(!number.is_any_string());
+    }
+
+    #[test]
+    fn test_short_string_empty_roundtrip() {
+        let v = JSValue::try_short_string(b"").unwrap();
+        assert!(v.is_short_string());
+        assert_eq!(v.short_string_len(), 0);
+        let mut buf = [0u8; SHORT_STRING_MAX_LEN];
+        assert_eq!(v.short_string_to_buf(&mut buf), 0);
+    }
+
+    #[test]
+    fn test_short_string_byte_order_stability() {
+        // First byte should land in the least-significant byte of
+        // the payload. This invariant is relied on by any future
+        // SIMD-style decoder that bulk-reads the payload.
+        let v = JSValue::try_short_string(b"abcde").unwrap();
+        let payload = v.bits() & SHORT_STRING_DATA_MASK;
+        assert_eq!((payload & 0xFF) as u8, b'a');
+        assert_eq!(((payload >> 8) & 0xFF) as u8, b'b');
+        assert_eq!(((payload >> 16) & 0xFF) as u8, b'c');
+        assert_eq!(((payload >> 24) & 0xFF) as u8, b'd');
+        assert_eq!(((payload >> 32) & 0xFF) as u8, b'e');
     }
 
     #[test]

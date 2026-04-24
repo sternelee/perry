@@ -128,6 +128,98 @@ pub extern "C" fn js_string_from_bytes(data: *const u8, len: u32) -> *mut String
     js_string_from_bytes_with_capacity(data, len, len)
 }
 
+/// SSO-aware decoder. Returns `Some((ptr, len))` view over the
+/// bytes of a string JSValue, regardless of representation:
+/// - Heap `STRING_TAG` → returns the `StringHeader`'s data pointer
+///   + `byte_len`.
+/// - Inline `SHORT_STRING_TAG` → copies into the caller's scratch
+///   buffer (which must live at least `SHORT_STRING_MAX_LEN` bytes)
+///   and returns a pointer into it.
+/// - Anything else → `None`.
+///
+/// Safety: the returned pointer is valid for the lifetime of either
+/// (a) the underlying `StringHeader`, OR (b) the caller-owned
+/// `scratch` buffer. Callers must not hold this pointer past a
+/// subsequent `scratch` modification or a GC cycle that could sweep
+/// the heap-backed `StringHeader`.
+#[inline]
+pub fn str_bytes_from_jsvalue<'a>(
+    value: f64,
+    scratch: &'a mut [u8; crate::value::SHORT_STRING_MAX_LEN],
+) -> Option<(*const u8, u32)> {
+    let bits = value.to_bits();
+    let jsval = crate::value::JSValue::from_bits(bits);
+    unsafe {
+        if jsval.is_short_string() {
+            let n = jsval.short_string_to_buf(scratch);
+            return Some((scratch.as_ptr(), n as u32));
+        }
+        if jsval.is_string() {
+            let hdr = jsval.as_string_ptr();
+            if hdr.is_null() {
+                return Some((std::ptr::null(), 0));
+            }
+            let data = (hdr as *const u8).add(std::mem::size_of::<StringHeader>());
+            return Some((data, (*hdr).byte_len));
+        }
+    }
+    None
+}
+
+/// Materialize an inline SSO value into a heap `StringHeader`.
+/// For call sites that need a real `*mut StringHeader` pointer and
+/// can't easily be migrated to use `str_bytes_from_jsvalue`. No-op
+/// for values already backed by a heap string.
+///
+/// Allocation implication: this defeats the SSO win for the
+/// materialized value, so use sparingly — only as a last-resort
+/// compatibility shim on paths that truly need the heap
+/// representation.
+#[no_mangle]
+pub extern "C" fn js_string_materialize_to_heap(value: f64) -> *mut StringHeader {
+    let bits = value.to_bits();
+    let jsval = crate::value::JSValue::from_bits(bits);
+    unsafe {
+        if jsval.is_short_string() {
+            let mut buf = [0u8; crate::value::SHORT_STRING_MAX_LEN];
+            let n = jsval.short_string_to_buf(&mut buf);
+            return js_string_from_bytes(buf.as_ptr(), n as u32);
+        }
+        if jsval.is_string() {
+            return jsval.as_string_ptr() as *mut StringHeader;
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// SSO-aware string construction. Returns a NaN-boxed `JSValue` as
+/// raw f64 bits. When `len <= SHORT_STRING_MAX_LEN` the result is
+/// an inline `SHORT_STRING_TAG` value with no heap allocation;
+/// otherwise falls back to `js_string_from_bytes` + `STRING_TAG`.
+///
+/// Tier 1 #2 entry point. Callers that NaN-box the result anyway
+/// (as opposed to dereferencing the raw `StringHeader` pointer)
+/// can migrate to this function without changing their downstream
+/// consumers — as long as those consumers use
+/// `JSValue::is_any_string()` + branch on `is_short_string()`
+/// vs `is_string()` to decode. Call sites that need a
+/// `*mut StringHeader` unconditionally should stay on
+/// `js_string_from_bytes` for now.
+#[no_mangle]
+pub extern "C" fn js_string_new_sso(data: *const u8, len: u32) -> f64 {
+    unsafe {
+        let ulen = len as usize;
+        if ulen <= crate::value::SHORT_STRING_MAX_LEN {
+            let bytes = std::slice::from_raw_parts(data, ulen);
+            if let Some(v) = crate::value::JSValue::try_short_string(bytes) {
+                return f64::from_bits(v.bits());
+            }
+        }
+        let ptr = js_string_from_bytes(data, len);
+        f64::from_bits(crate::value::JSValue::string_ptr(ptr).bits())
+    }
+}
+
 /// Create a string from raw bytes in the **longlived arena** (issue #179).
 /// Intended for cache-resident strings that explicit root scanners keep
 /// alive for the program's lifetime (`PARSE_KEY_CACHE` interned keys,

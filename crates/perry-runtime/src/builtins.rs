@@ -974,8 +974,10 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         get_cached(&TYPEOF_OBJECT, "object")
     } else if jsval.is_bool() {
         get_cached(&TYPEOF_BOOLEAN, "boolean")
-    } else if jsval.is_string() {
-        // String pointer (uses STRING_TAG)
+    } else if jsval.is_any_string() {
+        // String pointer (STRING_TAG) OR inline SSO (SHORT_STRING_TAG).
+        // `typeof` doesn't distinguish between representations — both
+        // are observed as "string" from user code.
         get_cached(&TYPEOF_STRING, "string")
     } else if crate::value::is_js_handle(value) {
         // JS handle from V8 runtime - always an object
