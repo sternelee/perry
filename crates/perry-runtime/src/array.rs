@@ -337,6 +337,40 @@ pub extern "C" fn js_array_get_f64_unchecked(arr: *const ArrayHeader, index: u32
 /// Get an element from an array by index (returns f64)
 #[no_mangle]
 pub extern "C" fn js_array_get_f64(arr: *const ArrayHeader, index: u32) -> f64 {
+    // Issue #179 Phase 5: lazy fast path — must run BEFORE
+    // `clean_arr_ptr` because that helper force-materializes a lazy
+    // pointer into a regular ArrayHeader. For the common read-only
+    // shape (`parsed[i]` on a lazy result), force-materializing the
+    // whole tree on first access dominates the workload; the sparse
+    // per-element cache only materializes the touched subtree.
+    //
+    // Same tag-strip pattern as `js_array_length`: v0.5.206 added a
+    // lazy guard in `clean_arr_ptr` that force-materializes, but
+    // for the sparse-cache path we want to keep the LazyArrayHeader
+    // around so the cache persists across calls. Strip the NaN-box
+    // tag manually and check obj_type without going through the
+    // clean-and-validate helper.
+    unsafe {
+        let bits = arr as u64;
+        let top16 = bits >> 48;
+        let raw_ptr = if top16 >= 0x7FF8 {
+            if top16 == 0x7FFC { return f64::NAN; }
+            (bits & 0x0000_FFFF_FFFF_FFFF) as *const ArrayHeader
+        } else {
+            arr
+        };
+        if !raw_ptr.is_null() && (raw_ptr as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 {
+            let gc_header = (raw_ptr as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc_header).obj_type == crate::gc::GC_TYPE_LAZY_ARRAY {
+                let lazy = raw_ptr as *mut crate::json_tape::LazyArrayHeader;
+                if (*lazy).magic == crate::json_tape::LAZY_ARRAY_MAGIC {
+                    let value = crate::json_tape::lazy_get(lazy, index);
+                    return f64::from_bits(value.bits());
+                }
+            }
+        }
+    }
     let arr = clean_arr_ptr(arr);
     if arr.is_null() { return f64::NAN; }
     // Check if this is actually a TypedArray — dispatch through typed array helper

@@ -2266,6 +2266,29 @@ unsafe fn try_stringify_lazy_array(value: f64) -> Option<*mut StringHeader> {
     {
         return None;
     }
+    // Phase 5: if the sparse per-element cache has ANY bit set,
+    // stringify might miss mutations made through a cached element
+    // (e.g. `parsed[0].name = "x"` modifies the materialized object
+    // but leaves the blob bytes untouched). Force-materialize the
+    // full tree (which consults the sparse cache and preserves
+    // cached mutations), then bail out so `redirect_lazy_to_materialized`
+    // forwards to the materialized ArrayHeader on the next stringify
+    // dispatch. No bits set means we haven't handed any pointers to
+    // user code yet, so the blob bytes are authoritative.
+    if !(*lazy).materialized_bitmap.is_null() && (*lazy).cached_length > 0 {
+        let bitmap = (*lazy).materialized_bitmap;
+        let bitmap_words = ((*lazy).cached_length as usize + 63) / 64;
+        let mut has_bits = false;
+        for w in 0..bitmap_words {
+            if *bitmap.add(w) != 0 { has_bits = true; break; }
+        }
+        if has_bits {
+            crate::json_tape::force_materialize_lazy(
+                lazy as *mut crate::json_tape::LazyArrayHeader,
+            );
+            return None;
+        }
+    }
     let tape = crate::json_tape::LazyArrayHeader::tape_slice(lazy);
     let blob_bytes = crate::json_tape::LazyArrayHeader::blob_bytes(lazy);
     if tape.is_empty() {

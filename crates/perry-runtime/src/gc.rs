@@ -1456,6 +1456,62 @@ unsafe fn trace_lazy_array(
             worklist.push(hdr);
         }
     }
+
+    // Phase 5: sparse per-element cache. Both the cache buffer and
+    // the bitmap are separate arena allocations that must be marked
+    // to survive sweep. The cache's live JSValues (only those with
+    // their bitmap bit set) must in turn be traced — their pointees
+    // are the real backing objects for `parsed[i]` and must stay
+    // alive across GC so identity holds.
+    let cache_ptr = (*lazy).materialized_elements as usize;
+    if cache_ptr != 0 && valid_ptrs.contains(&cache_ptr) {
+        let hdr = header_from_user_ptr(cache_ptr as *const u8);
+        if (*hdr).gc_flags & GC_FLAG_MARKED == 0 {
+            (*hdr).gc_flags |= GC_FLAG_MARKED;
+            // No need to push onto worklist — GC_TYPE_STRING is a
+            // leaf, no children to trace through the buffer itself.
+        }
+    }
+    let bitmap_ptr = (*lazy).materialized_bitmap as usize;
+    if bitmap_ptr != 0 && valid_ptrs.contains(&bitmap_ptr) {
+        let hdr = header_from_user_ptr(bitmap_ptr as *const u8);
+        if (*hdr).gc_flags & GC_FLAG_MARKED == 0 {
+            (*hdr).gc_flags |= GC_FLAG_MARKED;
+        }
+    }
+    // Walk the cache and trace each set slot's JSValue. Unset slots
+    // hold zero bits (positive zero number) which try_mark_value
+    // correctly ignores as a non-pointer; safe to walk either way,
+    // but checking the bitmap first avoids redundant work.
+    let cached_length = (*lazy).cached_length as usize;
+    if cache_ptr != 0 && bitmap_ptr != 0 && cached_length > 0 {
+        let cache = (*lazy).materialized_elements;
+        let bitmap = (*lazy).materialized_bitmap;
+        let bitmap_words = (cached_length + 63) / 64;
+        for w in 0..bitmap_words {
+            let word = *bitmap.add(w);
+            if word == 0 { continue; }
+            let base_idx = w * 64;
+            for b in 0..64usize {
+                if word & (1u64 << b) == 0 { continue; }
+                let i = base_idx + b;
+                if i >= cached_length { break; }
+                let val_bits = (*cache.add(i)).bits();
+                if try_mark_value(val_bits, valid_ptrs) {
+                    let tag = val_bits & TAG_MASK;
+                    let ptr_val = if tag == POINTER_TAG || tag == STRING_TAG || tag == BIGINT_TAG {
+                        (val_bits & POINTER_MASK) as usize
+                    } else {
+                        val_bits as usize
+                    };
+                    if ptr_val != 0 && valid_ptrs.contains(&ptr_val) {
+                        let header = header_from_user_ptr(ptr_val as *const u8);
+                        worklist.push(header);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Trace closure captures

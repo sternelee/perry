@@ -679,10 +679,28 @@ pub struct LazyArrayHeader {
     /// this to keep the blob alive while this lazy value is
     /// reachable.
     pub blob_str: *const crate::StringHeader,
-    /// Null until first access forces materialization. Once non-null,
-    /// the value behaves exactly like a regular array — the lazy
-    /// tape is effectively dead for it.
+    /// Null until a *full-array* operation forces materialization
+    /// (mutation, iteration, spread, .map, etc.). Once non-null, the
+    /// value behaves exactly like a regular array and the sparse
+    /// per-element cache below is effectively dead.
     pub materialized: *mut crate::array::ArrayHeader,
+    /// Phase 5: sparse per-element cache. `materialized_elements[i]`
+    /// is only meaningful when the corresponding bit in
+    /// `materialized_bitmap` is set. `JSValue::ZERO` is a valid value
+    /// (number 0 bits are all zero under NaN-boxing), so the bitmap
+    /// is the authoritative "cache valid" signal — we can't use
+    /// null-pointer semantics here.
+    ///
+    /// Identity invariant: a cache hit returns the *same* JSValue on
+    /// every access, so `parsed[i] === parsed[i]` holds. Without
+    /// this cache we'd return two distinct materialized objects and
+    /// user code that stores `parsed[0]` into a variable then
+    /// compares it against `parsed[0]` later would see `false`.
+    pub materialized_elements: *mut crate::value::JSValue,
+    /// 1 bit per index, `ceil(cached_length / 64)` words. Set when
+    /// the corresponding slot in `materialized_elements` holds a
+    /// valid materialized JSValue.
+    pub materialized_bitmap: *mut u64,
     // Followed by `tape_len` `TapeEntry` elements inline.
 }
 
@@ -726,6 +744,39 @@ pub unsafe fn alloc_lazy_array(
     (*hdr).tape_len = tape_entries.len() as u32;
     (*hdr).blob_str = blob_str;
     (*hdr).materialized = std::ptr::null_mut();
+    // Allocate the sparse cache + bitmap in the arena so GC traces
+    // them together with the header. The cache is an array of
+    // `cached_length` JSValue slots; the bitmap is
+    // `ceil(cached_length / 64)` u64 words. Both start zeroed
+    // (arena_alloc_gc returns zeroed memory on fresh block), which
+    // gives us empty bitmap + zeroed element slots — the invariant
+    // being "cache slot is only valid when bitmap bit is set," so
+    // the zero initial state is correctly "empty cache."
+    //
+    // For a 10k-record blob, cache = 80 KB + bitmap = 1.25 KB =
+    // ~81 KB of per-parse overhead — small relative to the ~240 KB
+    // tape itself.
+    if cached_length > 0 {
+        let cache_bytes = (cached_length as usize) * std::mem::size_of::<crate::value::JSValue>();
+        let cache_raw = crate::arena::arena_alloc_gc(cache_bytes, 8, crate::gc::GC_TYPE_STRING);
+        // arena_alloc_gc can reuse slots from the free list whose
+        // bytes still hold whatever the previous occupant wrote.
+        // Zero explicitly — the cache invariant relies on the
+        // bitmap being the "cache valid" signal and the cache slots
+        // starting clean; otherwise a leftover nonzero bit plus a
+        // stale JSValue from a prior LazyArrayHeader gives us a
+        // cross-parse ghost cache hit.
+        std::ptr::write_bytes(cache_raw, 0, cache_bytes);
+        (*hdr).materialized_elements = cache_raw as *mut crate::value::JSValue;
+        let bitmap_words = ((cached_length as usize) + 63) / 64;
+        let bitmap_bytes = bitmap_words * 8;
+        let bitmap_raw = crate::arena::arena_alloc_gc(bitmap_bytes, 8, crate::gc::GC_TYPE_STRING);
+        std::ptr::write_bytes(bitmap_raw, 0, bitmap_bytes);
+        (*hdr).materialized_bitmap = bitmap_raw as *mut u64;
+    } else {
+        (*hdr).materialized_elements = std::ptr::null_mut();
+        (*hdr).materialized_bitmap = std::ptr::null_mut();
+    }
     let tape_dst = (raw as *mut u8)
         .add(std::mem::size_of::<LazyArrayHeader>()) as *mut TapeEntry;
     std::ptr::copy_nonoverlapping(tape_entries.as_ptr(), tape_dst, tape_entries.len());
@@ -757,6 +808,89 @@ pub fn count_array_length(tape: &[TapeEntry], root_idx: usize) -> u32 {
     count
 }
 
+/// Phase 5: per-element sparse lookup. Return the i-th top-level
+/// element of the lazy array, materializing only that element's
+/// subtree on first access and caching the JSValue in the header's
+/// sparse cache so `parsed[i] === parsed[i]` holds on subsequent
+/// reads.
+///
+/// Fast path precedence:
+/// 1. Full-materialize already happened (mutation, .map, etc.) →
+///    forward to the regular ArrayHeader's inline element slot.
+/// 2. Bitmap bit set → cache hit, return `materialized_elements[i]`.
+/// 3. Cold read → walk the tape to the i-th entry via `link`
+///    chasing, materialize that subtree, cache it, return.
+///
+/// Out-of-bounds returns `undefined`. Caller must ensure `hdr` is a
+/// live LazyArrayHeader pointer; the materialize step uses the
+/// arena allocator and may trigger GC (its `hdr` argument is
+/// walked-through by the tracer if so, so the header survives).
+pub unsafe fn lazy_get(hdr: *mut LazyArrayHeader, i: u32) -> JSValue {
+    if hdr.is_null() {
+        return JSValue::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    // Fast path 1: full-materialize already triggered. Read from
+    // the real array at arr+8+i*8.
+    let mat = (*hdr).materialized;
+    if !mat.is_null() {
+        let length = (*mat).length;
+        if i >= length {
+            return JSValue::from_bits(crate::value::TAG_UNDEFINED);
+        }
+        let elements_ptr = (mat as *const u8)
+            .add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const u64;
+        return JSValue::from_bits(*elements_ptr.add(i as usize));
+    }
+
+    let cached_length = (*hdr).cached_length;
+    if i >= cached_length {
+        return JSValue::from_bits(crate::value::TAG_UNDEFINED);
+    }
+
+    // Fast path 2: bitmap hit.
+    let bitmap = (*hdr).materialized_bitmap;
+    let cache = (*hdr).materialized_elements;
+    if !bitmap.is_null() && !cache.is_null() {
+        let word_idx = (i as usize) / 64;
+        let bit_idx = (i as usize) % 64;
+        let word = *bitmap.add(word_idx);
+        if word & (1u64 << bit_idx) != 0 {
+            return *cache.add(i as usize);
+        }
+    }
+
+    // Cold path: walk tape to entry i, materialize subtree, cache.
+    let tape = LazyArrayHeader::tape_slice(hdr);
+    let bytes = LazyArrayHeader::blob_bytes(hdr);
+    let root = (*hdr).root_idx as usize;
+    if root >= tape.len() || tape[root].kind != KIND_ARR_START {
+        return JSValue::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    let end = tape[root].link as usize;
+    let mut idx = root + 1;
+    let mut element_count: u32 = 0;
+    while idx < end && element_count < i {
+        let k = tape[idx].kind;
+        if k == KIND_OBJ_START || k == KIND_ARR_START {
+            idx = tape[idx].link as usize + 1;
+        } else {
+            idx += 1;
+        }
+        element_count += 1;
+    }
+    if idx >= end {
+        return JSValue::from_bits(crate::value::TAG_UNDEFINED);
+    }
+    let value = materialize_from_idx(tape, bytes, idx);
+    if !bitmap.is_null() && !cache.is_null() {
+        *cache.add(i as usize) = value;
+        let word_idx = (i as usize) / 64;
+        let bit_idx = (i as usize) % 64;
+        *bitmap.add(word_idx) |= 1u64 << bit_idx;
+    }
+    value
+}
+
 /// Force-materialize a lazy array into an `ArrayHeader`-backed tree.
 /// Idempotent: subsequent calls return the cached `materialized`
 /// pointer. Callers of array accessors that don't have a lazy path
@@ -768,11 +902,67 @@ pub unsafe fn force_materialize_lazy(hdr: *mut LazyArrayHeader) -> *mut crate::a
     if !(*hdr).materialized.is_null() {
         return (*hdr).materialized;
     }
+    let cached_length = (*hdr).cached_length;
+    let bitmap = (*hdr).materialized_bitmap;
+    let cache = (*hdr).materialized_elements;
+    let has_cache_hits = if !bitmap.is_null() && cached_length > 0 {
+        let words = (cached_length as usize + 63) / 64;
+        let mut any = false;
+        for w in 0..words {
+            if *bitmap.add(w) != 0 { any = true; break; }
+        }
+        any
+    } else {
+        false
+    };
+
+    // Fast path: no cache hits — the tape is authoritative for
+    // every element, walk it top-to-bottom.
+    if !has_cache_hits {
+        let tape = LazyArrayHeader::tape_slice(hdr);
+        let bytes = LazyArrayHeader::blob_bytes(hdr);
+        let root = (*hdr).root_idx as usize;
+        let js = materialize_from_idx(tape, bytes, root);
+        let arr_ptr = (js.bits() & crate::value::POINTER_MASK) as *mut crate::array::ArrayHeader;
+        (*hdr).materialized = arr_ptr;
+        return arr_ptr;
+    }
+
+    // Slow path: the sparse cache may contain mutations. For each
+    // top-level element, use the cached JSValue when bitmap bit is
+    // set (preserves mutations + identity); otherwise materialize
+    // from the tape. Build the array element-by-element.
+    let arr_ptr = crate::array::js_array_alloc(cached_length);
+    let elements_ptr = (arr_ptr as *mut u8)
+        .add(std::mem::size_of::<crate::array::ArrayHeader>()) as *mut u64;
     let tape = LazyArrayHeader::tape_slice(hdr);
     let bytes = LazyArrayHeader::blob_bytes(hdr);
     let root = (*hdr).root_idx as usize;
-    let js = materialize_from_idx(tape, bytes, root);
-    let arr_ptr = (js.bits() & crate::value::POINTER_MASK) as *mut crate::array::ArrayHeader;
+    if root < tape.len() && tape[root].kind == KIND_ARR_START {
+        let end = tape[root].link as usize;
+        let mut idx = root + 1;
+        for i in 0..cached_length as usize {
+            if idx >= end { break; }
+            let word_idx = i / 64;
+            let bit_idx = i % 64;
+            let use_cache = (*bitmap.add(word_idx)) & (1u64 << bit_idx) != 0;
+            let value = if use_cache {
+                *cache.add(i)
+            } else {
+                let mut walk_idx = idx;
+                materialize_value_slice(tape, bytes, &mut walk_idx)
+            };
+            *elements_ptr.add(i) = value.bits();
+            // Advance tape cursor past this element.
+            let k = tape[idx].kind;
+            if k == KIND_OBJ_START || k == KIND_ARR_START {
+                idx = tape[idx].link as usize + 1;
+            } else {
+                idx += 1;
+            }
+        }
+    }
+    (*arr_ptr).length = cached_length;
     (*hdr).materialized = arr_ptr;
     arr_ptr
 }
