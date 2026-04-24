@@ -145,6 +145,25 @@ impl Arena {
 thread_local! {
     static ARENA: UnsafeCell<Arena> = UnsafeCell::new(Arena::new());
 
+    /// Segregated long-lived arena (issue #179). Holds objects that are
+    /// intentionally pinned for the lifetime of the program by explicit
+    /// root scanners — `PARSE_KEY_CACHE` interned strings, class/object
+    /// shape-cache `keys_array`s + their string element pointers. Keeping
+    /// these out of the general arena prevents block-persistence
+    /// cascades: without segregation, those long-lived allocations
+    /// co-locate with the first few iterations' fresh parse output in
+    /// general-arena block 0, block-persist marks every adjacent dead
+    /// iter-0 object live, those dead objects' field values anchor
+    /// fresh-block objects, and the "live set" snowballs.
+    ///
+    /// Longlived blocks are never reset by `arena_reset_empty_blocks` /
+    /// `arena_reset_all_blocks_to_zero`, and are never fed into the
+    /// inline bump allocator (no `INLINE_STATE` entanglement). Walkers
+    /// still traverse them so mark/trace reach cached objects; root
+    /// scanners (`scan_parse_roots`, `scan_shape_cache_roots`,
+    /// `scan_transition_cache_roots`) keep them marked.
+    static LONGLIVED_ARENA: UnsafeCell<Arena> = UnsafeCell::new(Arena::new());
+
     /// Inline allocator state — a cache of the current arena block's
     /// `(data, offset, size)` triple, exposed via a stable pointer so
     /// codegen can emit inline bump-allocate IR without going through
@@ -295,6 +314,44 @@ pub fn arena_alloc(size: usize, align: usize) -> *mut u8 {
     })
 }
 
+/// Allocate from the longlived arena (issue #179). Unlike `arena_alloc`,
+/// this never touches the inline allocator state — the longlived arena
+/// is reserved for explicit-call allocations from cache builders
+/// (`js_string_from_bytes_longlived`, `js_array_alloc_with_length_longlived`),
+/// not hot-path `new ClassName()` bump allocations.
+pub fn arena_alloc_longlived(size: usize, align: usize) -> *mut u8 {
+    LONGLIVED_ARENA.with(|a| unsafe {
+        let arena = &mut *a.get();
+        arena.alloc(size, align)
+    })
+}
+
+/// Allocate a GcHeader-prefixed object from the longlived arena (issue #179).
+/// Same header layout as `arena_alloc_gc` so every walker, tracer, and
+/// NaN-boxed-pointer resolver works unchanged — these objects are simply
+/// not subject to block reset, so their backing storage is stable for the
+/// lifetime of the thread.
+///
+/// No free-list reuse: longlived objects are never swept individually
+/// (the cache's root scanner keeps them marked), so there's nothing to
+/// re-add to the free list.
+pub fn arena_alloc_gc_longlived(size: usize, align: usize, obj_type: u8) -> *mut u8 {
+    use crate::gc::{GcHeader, GC_HEADER_SIZE, GC_FLAG_ARENA};
+
+    let total = GC_HEADER_SIZE + size;
+    let raw = arena_alloc_longlived(total, align);
+
+    unsafe {
+        let header = raw as *mut GcHeader;
+        (*header).obj_type = obj_type;
+        (*header).gc_flags = GC_FLAG_ARENA;
+        (*header)._reserved = 0;
+        (*header).size = total as u32;
+    }
+
+    unsafe { raw.add(GC_HEADER_SIZE) }
+}
+
 /// Allocate from arena with a GcHeader prepended.
 /// Returns pointer to usable memory AFTER the GcHeader.
 /// The object is NOT added to any tracking list — arena objects are discovered
@@ -379,16 +436,22 @@ pub extern "C" fn js_arena_alloc(size: u32) -> *mut u8 {
     arena_alloc(size as usize, 8)
 }
 
-/// Get total bytes reserved across all arena blocks
+/// Get total bytes reserved across all arena blocks (general + longlived).
 pub fn arena_total_bytes() -> usize {
+    let mut total: usize = 0;
     ARENA.with(|arena| {
         let arena = unsafe { &*arena.get() };
-        let mut total: usize = 0;
         for block in &arena.blocks {
             total += block.size;
         }
-        total
-    })
+    });
+    LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        for block in &arena.blocks {
+            total += block.size;
+        }
+    });
+    total
 }
 
 /// Get bytes currently in use (sum of `block.offset` across blocks).
@@ -398,17 +461,25 @@ pub fn arena_total_bytes() -> usize {
 /// dramatically while reserved bytes stay constant.
 pub fn arena_in_use_bytes() -> usize {
     sync_inline_arena_state();
+    let mut used: usize = 0;
     ARENA.with(|arena| {
         let arena = unsafe { &*arena.get() };
-        let mut used: usize = 0;
         for block in &arena.blocks {
             used += block.offset;
         }
-        used
-    })
+    });
+    LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        for block in &arena.blocks {
+            used += block.offset;
+        }
+    });
+    used
 }
 
-/// Walk all GcHeader objects in arena blocks linearly.
+/// Walk all GcHeader objects in arena blocks linearly (general arena +
+/// longlived arena, in that order — block indices are global with
+/// general blocks occupying `0..general_block_count()`).
 /// Calls `callback` for each GcHeader pointer found.
 /// Objects are discovered by their `size` field (hop from one to the next).
 pub fn arena_walk_objects(mut callback: impl FnMut(*mut u8)) {
@@ -416,12 +487,12 @@ pub fn arena_walk_objects(mut callback: impl FnMut(*mut u8)) {
 
     // Sync inline state's offset back to the underlying block first,
     // so the walk sees objects that the inline allocator has emitted
-    // since the last non-inline alloc.
+    // since the last non-inline alloc. Only the general ARENA has an
+    // inline path; the longlived arena is always sync by construction.
     sync_inline_arena_state();
 
-    ARENA.with(|arena| {
-        let arena = unsafe { &*arena.get() };
-        for block in &arena.blocks {
+    let mut walk_region = |blocks: &[ArenaBlock]| {
+        for block in blocks {
             let mut offset = 0usize;
             while offset < block.offset {
                 // Align to 8 bytes (all our allocations are 8-byte aligned)
@@ -452,21 +523,35 @@ pub fn arena_walk_objects(mut callback: impl FnMut(*mut u8)) {
                 }
             }
         }
+    };
+
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks);
+    });
+    LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks);
     });
 }
 
-/// Like `arena_walk_objects` but also passes the block's index alongside
-/// each header — used by the GC sweep to track per-block live counts in
-/// a `Vec<bool>` (O(1) lookups) so it can reset fully-empty blocks back
-/// to offset=0 in O(blocks) instead of O(objects).
+/// Like `arena_walk_objects` but also passes the block's global index
+/// alongside each header — used by the GC sweep to track per-block live
+/// counts in a `Vec<bool>` (O(1) lookups) so it can reset fully-empty
+/// blocks back to offset=0 in O(blocks) instead of O(objects).
+///
+/// Block indices are global across both arenas: `0..general_block_count()`
+/// for the general arena, `general_block_count()..arena_block_count()`
+/// for the longlived arena (issue #179).
 pub fn arena_walk_objects_with_block_index(mut callback: impl FnMut(*mut u8, usize)) {
     use crate::gc::GcHeader;
 
     sync_inline_arena_state();
 
-    ARENA.with(|arena| {
-        let arena = unsafe { &*arena.get() };
-        for (block_idx, block) in arena.blocks.iter().enumerate() {
+    let general_n = ARENA.with(|a| unsafe { (*a.get()).blocks.len() });
+    let mut walk_region = |blocks: &[ArenaBlock], base: usize| {
+        for (i, block) in blocks.iter().enumerate() {
+            let block_idx = base + i;
             let mut offset = 0usize;
             while offset < block.offset {
                 let aligned = (offset + 7) & !7;
@@ -488,6 +573,15 @@ pub fn arena_walk_objects_with_block_index(mut callback: impl FnMut(*mut u8, usi
                 }
             }
         }
+    };
+
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks, 0);
+    });
+    LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks, general_n);
     });
 }
 
@@ -497,6 +591,8 @@ pub fn arena_walk_objects_with_block_index(mut callback: impl FnMut(*mut u8, usi
 /// O(n_objects_in_skipped_blocks), which matters a lot when the GC
 /// block-persistence pass has 3M dead objects spread across 27 blocks
 /// it already knows have no live objects (issue #64 follow-up).
+///
+/// Block indices are global (general arena first, longlived after).
 pub fn arena_walk_objects_filtered(
     mut block_filter: impl FnMut(usize) -> bool,
     mut callback: impl FnMut(*mut u8, usize),
@@ -505,9 +601,13 @@ pub fn arena_walk_objects_filtered(
 
     sync_inline_arena_state();
 
-    ARENA.with(|arena| {
-        let arena = unsafe { &*arena.get() };
-        for (block_idx, block) in arena.blocks.iter().enumerate() {
+    let general_n = ARENA.with(|a| unsafe { (*a.get()).blocks.len() });
+    let mut walk_region = |blocks: &[ArenaBlock],
+                           base: usize,
+                           block_filter: &mut dyn FnMut(usize) -> bool,
+                           callback: &mut dyn FnMut(*mut u8, usize)| {
+        for (i, block) in blocks.iter().enumerate() {
+            let block_idx = base + i;
             if !block_filter(block_idx) {
                 continue;
             }
@@ -532,12 +632,32 @@ pub fn arena_walk_objects_filtered(
                 }
             }
         }
+    };
+
+    ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks, 0, &mut block_filter, &mut callback);
+    });
+    LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        walk_region(&arena.blocks, general_n, &mut block_filter, &mut callback);
     });
 }
 
-/// How many arena blocks are currently allocated. Used by the sweep to
-/// size its per-block live-tracking `Vec<bool>` before walking objects.
+/// How many arena blocks are currently allocated across general +
+/// longlived arenas. Used by the sweep to size its per-block
+/// live-tracking `Vec<bool>` before walking objects.
 pub fn arena_block_count() -> usize {
+    let g = ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() });
+    let l = LONGLIVED_ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() });
+    g + l
+}
+
+/// Block-index range boundary: block indices `0..general_block_count()`
+/// belong to the general arena (eligible for reset), the rest belong to
+/// the longlived arena and must never be reset (issue #179).
+#[inline]
+pub fn general_block_count() -> usize {
     ARENA.with(|arena| unsafe { (*arena.get()).blocks.len() })
 }
 
@@ -552,6 +672,8 @@ pub fn arena_block_count() -> usize {
 /// nothing escapes, GC observes that all 700k+ objects from the
 /// previous burst are dead and reclaims the entire arena in O(1).
 pub fn arena_reset_all_blocks_to_zero() {
+    // Only the general arena is reset (issue #179). The longlived arena
+    // holds cached data that must not be reclaimed.
     ARENA.with(|arena| unsafe {
         let arena = &mut *arena.get();
         for block in arena.blocks.iter_mut() {
@@ -592,6 +714,10 @@ pub fn arena_reset_all_blocks_to_zero() {
 pub fn arena_reset_empty_blocks(block_has_live: &[bool]) {
     let n_live = block_has_live.iter().filter(|&&b| b).count();
     let n_total = block_has_live.len();
+    // Issue #179: only reset general-arena blocks. Longlived-arena blocks
+    // (global indices >= general arena block count) are never reclaimed;
+    // they hold cached data whose addresses we've handed out to
+    // root-tracked caches.
     ARENA.with(|arena| unsafe {
         let arena = &mut *arena.get();
         let mut reset_block_ranges: Vec<(usize, usize)> = Vec::new();
@@ -685,17 +811,140 @@ pub extern "C" fn js_arena_stats(out_used: *mut u64, out_total: *mut u64) {
     // Sync inline state so the "used" count reflects the inline-burst
     // high-water mark, not just the last sync point.
     sync_inline_arena_state();
+    let mut used: u64 = 0;
+    let mut total: u64 = 0;
     ARENA.with(|arena| {
         let arena = unsafe { &*arena.get() };
-        let mut used: u64 = 0;
-        let mut total: u64 = 0;
         for block in &arena.blocks {
             used += block.offset as u64;
             total += block.size as u64;
         }
-        unsafe {
-            *out_used = used;
-            *out_total = total;
+    });
+    LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        for block in &arena.blocks {
+            used += block.offset as u64;
+            total += block.size as u64;
         }
     });
+    unsafe {
+        *out_used = used;
+        *out_total = total;
+    }
+}
+
+/// Bytes currently allocated in the longlived arena (sum of per-block
+/// offsets). Diagnostic-only — used by tests and `PERRY_GC_DIAG=1` output
+/// to confirm that long-lived allocations are actually routed into the
+/// segregated region.
+pub fn longlived_in_use_bytes() -> usize {
+    LONGLIVED_ARENA.with(|arena| {
+        let arena = unsafe { &*arena.get() };
+        arena.blocks.iter().map(|b| b.offset).sum()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gc::{GC_HEADER_SIZE, GC_TYPE_STRING, GC_TYPE_ARRAY};
+
+    /// Issue #179: a longlived-arena allocation must not land inside any
+    /// general-arena block. This is the architectural guarantee behind
+    /// the "segregated quarantine" design — GP blocks can be reset on
+    /// GC without touching cached object pointers, which stay parked in
+    /// longlived blocks.
+    #[test]
+    fn longlived_pointer_is_disjoint_from_general_blocks() {
+        // Force a general-arena allocation first so block 0 exists.
+        let gen_ptr = arena_alloc_gc(32, 8, GC_TYPE_STRING) as usize;
+        let ll_ptr = arena_alloc_gc_longlived(32, 8, GC_TYPE_STRING) as usize;
+
+        // Collect general-arena block ranges.
+        let mut general_ranges: Vec<(usize, usize)> = Vec::new();
+        ARENA.with(|a| {
+            let arena = unsafe { &*a.get() };
+            for block in &arena.blocks {
+                general_ranges.push((block.data as usize, block.size));
+            }
+        });
+
+        let in_general = general_ranges
+            .iter()
+            .any(|&(base, size)| ll_ptr >= base && ll_ptr < base + size);
+        assert!(
+            !in_general,
+            "longlived pointer {ll_ptr:#x} landed inside a general-arena block; \
+             segregation is broken"
+        );
+
+        // Sanity: general allocation IS in a general block.
+        let gen_in_general = general_ranges
+            .iter()
+            .any(|&(base, size)| gen_ptr >= base && gen_ptr < base + size);
+        assert!(gen_in_general, "general alloc {gen_ptr:#x} not in any general block");
+    }
+
+    /// Walker + block-index contract: longlived objects get global
+    /// block indices at or above `general_block_count()`, so the
+    /// `arena_reset_empty_blocks` range check correctly skips them.
+    #[test]
+    fn longlived_walk_yields_indices_outside_general_range() {
+        // Ensure each arena has at least one block with one allocation.
+        let _g = arena_alloc_gc(16, 8, GC_TYPE_ARRAY) as usize;
+        let ll = arena_alloc_gc_longlived(24, 8, GC_TYPE_STRING) as usize;
+
+        let general_n = general_block_count();
+        let mut seen_ll_idx: Option<usize> = None;
+        arena_walk_objects_with_block_index(|header_ptr, block_idx| {
+            let user_ptr = unsafe { (header_ptr as *mut u8).add(GC_HEADER_SIZE) } as usize;
+            if user_ptr == ll {
+                seen_ll_idx = Some(block_idx);
+            }
+        });
+        let idx = seen_ll_idx.expect("longlived allocation not visited by walker");
+        assert!(
+            idx >= general_n,
+            "longlived block_idx {idx} must be ≥ general_block_count {general_n}"
+        );
+    }
+
+    /// `arena_reset_empty_blocks` must never reset a longlived block,
+    /// even if its block-has-live slot is `false`. This is the load-
+    /// bearing correctness guarantee: cache-held pointers into the
+    /// longlived arena must survive GC cycles where the cache itself
+    /// is the only thing referencing them.
+    #[test]
+    fn reset_never_clears_longlived_blocks() {
+        let ll = arena_alloc_gc_longlived(40, 8, GC_TYPE_STRING) as usize;
+        let ll_header_in_block = {
+            // The header sits GC_HEADER_SIZE before the user pointer;
+            // use the user pointer for range comparison below.
+            ll - GC_HEADER_SIZE
+        };
+
+        let n_blocks = arena_block_count();
+        // Build a block_has_live where EVERY block is marked dead.
+        let all_dead = vec![false; n_blocks];
+        arena_reset_empty_blocks(&all_dead);
+
+        // The longlived allocation must still be readable (its block
+        // wasn't reset, so the bytes are still there).
+        let mut found = false;
+        LONGLIVED_ARENA.with(|a| {
+            let arena = unsafe { &*a.get() };
+            for block in &arena.blocks {
+                let base = block.data as usize;
+                if ll_header_in_block >= base && ll_header_in_block < base + block.size {
+                    // Block still has nonzero offset (not reset).
+                    assert!(
+                        block.offset > 0,
+                        "longlived block reset to offset=0 despite reset_empty_blocks guard"
+                    );
+                    found = true;
+                }
+            }
+        });
+        assert!(found, "longlived alloc not located in any longlived block");
+    }
 }

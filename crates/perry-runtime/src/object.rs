@@ -1139,10 +1139,16 @@ pub extern "C" fn js_build_class_keys_array(
     let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
     let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
     let num_keys = keys.len();
-    let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+    // Issue #179: the keys_array and its string elements are shape-cache
+    // resident for the program's lifetime (anchored by
+    // `scan_shape_cache_roots`). Route them through the longlived arena
+    // so general-arena block 0 doesn't get pinned by the first `new C()`
+    // in a loop, which cascaded via block-persistence into every
+    // subsequent iteration's allocations.
+    let arr = crate::array::js_array_alloc_with_length_longlived(num_keys as u32);
     let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
     for (i, key_bytes) in keys.iter().enumerate() {
-        let str_ptr = crate::string::js_string_from_bytes(
+        let str_ptr = crate::string::js_string_from_bytes_longlived(
             key_bytes.as_ptr(),
             key_bytes.len() as u32,
         );
@@ -1207,10 +1213,12 @@ pub extern "C" fn js_object_alloc_class_with_keys(
         let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
         let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
         let num_keys = keys.len();
-        let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+        // Issue #179: shape-cache keys_array lives in the longlived arena
+        // (see `js_build_class_keys_array` for the rationale).
+        let arr = crate::array::js_array_alloc_with_length_longlived(num_keys as u32);
         let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
         for (i, key_bytes) in keys.iter().enumerate() {
-            let str_ptr = crate::string::js_string_from_bytes(
+            let str_ptr = crate::string::js_string_from_bytes_longlived(
                 key_bytes.as_ptr(), key_bytes.len() as u32,
             );
             let nanboxed = f64::from_bits(
@@ -1266,10 +1274,11 @@ pub extern "C" fn js_object_alloc_with_shape(
         let keys_bytes = unsafe { std::slice::from_raw_parts(packed_keys, packed_keys_len as usize) };
         let keys: Vec<&[u8]> = keys_bytes.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
         let num_keys = keys.len();
-        let arr = crate::array::js_array_alloc_with_length(num_keys as u32);
+        // Issue #179: shape-cache keys_array lives in the longlived arena.
+        let arr = crate::array::js_array_alloc_with_length_longlived(num_keys as u32);
         let elements_ptr = unsafe { (arr as *mut u8).add(8) as *mut f64 };
         for (i, key_bytes) in keys.iter().enumerate() {
-            let str_ptr = crate::string::js_string_from_bytes(
+            let str_ptr = crate::string::js_string_from_bytes_longlived(
                 key_bytes.as_ptr(), key_bytes.len() as u32,
             );
             let nanboxed = f64::from_bits(

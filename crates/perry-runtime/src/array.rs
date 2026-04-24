@@ -146,6 +146,31 @@ pub extern "C" fn js_array_alloc_with_length(capacity: u32) -> *mut ArrayHeader 
     ptr
 }
 
+/// Allocate a new array with `length == capacity == capacity` in the
+/// **longlived arena** (issue #179). Used to build the shape-cache
+/// `keys_array` backing storage, which is cache-resident for the life
+/// of the thread and anchored by `scan_shape_cache_roots`.
+///
+/// Caller fills element slots immediately via direct writes (same
+/// contract as `js_array_alloc_with_length`). Uses exact capacity — no
+/// `MIN_ARRAY_CAPACITY` padding — because keys arrays never grow
+/// (shapes are immutable once built).
+#[no_mangle]
+pub extern "C" fn js_array_alloc_with_length_longlived(capacity: u32) -> *mut ArrayHeader {
+    let ptr = crate::arena::arena_alloc_gc_longlived(
+        array_byte_size(capacity as usize),
+        8,
+        crate::gc::GC_TYPE_ARRAY,
+    ) as *mut ArrayHeader;
+
+    unsafe {
+        (*ptr).length = capacity;
+        (*ptr).capacity = capacity;
+    }
+
+    ptr
+}
+
 /// Allocate and initialize an array from a list of f64 values
 #[no_mangle]
 pub extern "C" fn js_array_from_f64(elements: *const f64, count: u32) -> *mut ArrayHeader {

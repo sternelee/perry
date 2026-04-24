@@ -128,6 +128,38 @@ pub extern "C" fn js_string_from_bytes(data: *const u8, len: u32) -> *mut String
     js_string_from_bytes_with_capacity(data, len, len)
 }
 
+/// Create a string from raw bytes in the **longlived arena** (issue #179).
+/// Intended for cache-resident strings that explicit root scanners keep
+/// alive for the program's lifetime (`PARSE_KEY_CACHE` interned keys,
+/// shape-cache `keys_array` string elements). Allocating these in a
+/// dedicated arena prevents them from anchoring general-arena blocks
+/// where per-iteration parse output is co-located, breaking the
+/// block-persistence cascade documented in the issue.
+///
+/// Same layout and wire format as `js_string_from_bytes` — only the
+/// backing arena differs.
+#[no_mangle]
+pub extern "C" fn js_string_from_bytes_longlived(
+    data: *const u8,
+    len: u32,
+) -> *mut StringHeader {
+    let total_size = std::mem::size_of::<StringHeader>() + len as usize;
+    let raw = crate::arena::arena_alloc_gc_longlived(total_size, 8, crate::gc::GC_TYPE_STRING);
+    let ptr = raw as *mut StringHeader;
+    unsafe {
+        let u16len = compute_utf16_len(data, len);
+        (*ptr).utf16_len = u16len;
+        (*ptr).byte_len = len;
+        (*ptr).capacity = len;
+        (*ptr).refcount = 0;
+        if len > 0 && !data.is_null() {
+            let data_ptr = (ptr as *mut u8).add(std::mem::size_of::<StringHeader>());
+            ptr::copy_nonoverlapping(data, data_ptr, len as usize);
+        }
+    }
+    ptr
+}
+
 /// Fast path: create a string from bytes known to be pure ASCII.
 /// Skips the `compute_utf16_len` byte scan — sets utf16_len = byte_len directly.
 #[inline]

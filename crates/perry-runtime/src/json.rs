@@ -448,7 +448,15 @@ impl<'a> DirectParser<'a> {
             let key_ptr = if let Some(p) = cached {
                 p
             } else {
-                let ptr = js_string_from_bytes(key_bytes.as_ptr(), key_bytes.len() as u32);
+                // Issue #179: allocate cached key strings in the longlived
+                // arena. They're held by PARSE_KEY_CACHE (+ scan_parse_roots)
+                // for the program's lifetime and must not co-locate with
+                // per-iteration parse output or the block-persistence pass
+                // pins all adjacent dead objects live.
+                let ptr = crate::string::js_string_from_bytes_longlived(
+                    key_bytes.as_ptr(),
+                    key_bytes.len() as u32,
+                );
                 PARSE_KEY_CACHE.with(|c| {
                     c.borrow_mut().insert(key_bytes.to_vec(), ptr);
                 });
