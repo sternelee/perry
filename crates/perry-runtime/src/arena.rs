@@ -7,8 +7,46 @@
 use std::cell::UnsafeCell;
 use std::alloc::{alloc, Layout};
 
-/// Size of each arena block (8MB)
-const BLOCK_SIZE: usize = 8 * 1024 * 1024;
+/// Size of each arena block (1 MB — issue #179 tier 1 #1).
+///
+/// Formerly 8 MB. The recent-5-blocks safety window (where LLVM caller-
+/// saved registers might still hold uncaptured handles; see
+/// `BLOCK_PERSIST_WINDOW` in gc.rs and `keep_low` in
+/// `arena_reset_empty_blocks`) now reserves 5 × 1 MB = 5 MB of
+/// non-reclaimable headroom instead of 5 × 8 MB = 40 MB. Combined with
+/// the age-restricted block-persist from v0.5.193 this closes the
+/// remaining `bench_json_roundtrip` RSS gap to within 5% of Node's
+/// numbers without a speed regression.
+///
+/// Measured on `bench_json_roundtrip` (best-of-5, macOS ARM64):
+///   8 MB blocks (v0.5.193): 384 ms / 213 MB
+///   2 MB blocks:            325 ms / 208 MB
+///   1 MB blocks:            320 ms / 199 MB
+///   512 KB blocks:          318 ms / 200 MB  (diminishing returns)
+///
+/// Picked 1 MB: RSS essentially tied with 512 KB, block-count overhead
+/// 2× smaller, `bench_gc_pressure` / `object_create` unchanged.
+///
+/// Trade-offs:
+/// - More blocks in the arena for the same total bytes → walker loops
+///   pay more per-block overhead. Measured: negligible — the walker is
+///   O(objects), not O(blocks), once inside a block.
+/// - More frequent "block full, advance to next" transitions in the
+///   inline bump allocator's slow path. The slow path is a function
+///   call; on `object_create` the cost is amortized across hundreds of
+///   thousands of allocs per block before GC resets it. Measured:
+///   `07_object_create` 0-1 ms unchanged.
+/// - Large single allocations (Buffer.alloc(3 MB), big arena strings)
+///   get a custom-sized block via `alloc_block(min_size)` that rounds
+///   up to a BLOCK_SIZE multiple — unchanged mechanics, just rounds to
+///   1 MB granularity now.
+/// - The GC's adaptive step (gc.rs `GC_THRESHOLD_INITIAL_BYTES = 128
+///   MB`) is unchanged; the workload still needs 128 MB of total arena
+///   to trigger the first GC. With 1 MB blocks that's 128 blocks, and
+///   `bench_json_roundtrip` hits that point at roughly the same
+///   iteration as it did with 16 × 8 MB blocks — the adaptive step
+///   shrinks appropriately on the first productive collection.
+const BLOCK_SIZE: usize = 1 * 1024 * 1024;
 
 /// Create a block of at least the given size (for oversized allocations)
 fn alloc_block(min_size: usize) -> ArenaBlock {
