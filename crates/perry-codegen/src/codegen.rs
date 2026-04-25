@@ -167,6 +167,13 @@ pub struct ImportedClass {
     pub constructor_param_count: usize,
     /// Method names defined on this class.
     pub method_names: Vec<String>,
+    /// Getter property names. Without these, cross-module `obj.prop` for a
+    /// getter property silently falls through to `undefined` because the
+    /// dispatch site at `expr.rs::PropertyGet` looks up `(class, "__get_prop")`
+    /// in `method_names`, which previously had no cross-module entry.
+    pub getter_names: Vec<String>,
+    /// Setter property names. Symmetric to `getter_names` for `obj.prop = v`.
+    pub setter_names: Vec<String>,
     /// Parent class name, if any.
     pub parent_name: Option<String>,
     /// Field names in declaration order (for allocation sizing and field index mapping).
@@ -913,6 +920,45 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             let param_types: Vec<crate::types::LlvmType> =
                 std::iter::repeat(DOUBLE).take(6).collect();
             llmod.declare_function(&llvm_fn, DOUBLE, &param_types);
+        }
+
+        // Cross-module getters. The dispatch site at
+        // `expr.rs::PropertyGet` looks up `(class, "__get_<prop>")` in
+        // `method_names`; without this loop the entry is missing for
+        // imported classes and `obj.prop` silently falls through to
+        // `undefined`. The source module mangles getters as
+        // `perry_method_<src>__<class>____get_get_<prop>` (the inner
+        // `get_<prop>` is the HIR function name from
+        // `lower_getter_method`, then codegen prepends `__get_`).
+        for prop in &ic.getter_names {
+            let inner_fn_name = format!("get_{}", prop);
+            let llvm_fn = scoped_method_name(
+                &sanitize(src),
+                &ic.name,
+                &format!("__get_{}", inner_fn_name),
+            );
+            method_names
+                .entry((effective_name.to_string(), format!("__get_{}", prop)))
+                .or_insert_with(|| llvm_fn.clone());
+            // Getters take only `this` (NaN-boxed double) and return double.
+            llmod.declare_function(&llvm_fn, DOUBLE, &[DOUBLE]);
+        }
+
+        // Cross-module setters. Symmetric to getters: source-side
+        // mangling is `perry_method_<src>__<class>____set_set_<prop>`.
+        for prop in &ic.setter_names {
+            let inner_fn_name = format!("set_{}", prop);
+            let llvm_fn = scoped_method_name(
+                &sanitize(src),
+                &ic.name,
+                &format!("__set_{}", inner_fn_name),
+            );
+            method_names
+                .entry((effective_name.to_string(), format!("__set_{}", prop)))
+                .or_insert_with(|| llvm_fn.clone());
+            // Setters take `this` plus the new value, both NaN-boxed
+            // doubles, and return double (the assigned value).
+            llmod.declare_function(&llvm_fn, DOUBLE, &[DOUBLE, DOUBLE]);
         }
 
         // Constructor: declared as
