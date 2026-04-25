@@ -340,6 +340,118 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationTap(
     crate::callback::invoke2(key, id_value, action_value);
 }
 
+/// Schedule a fire-after-N-seconds notification via PerryBridge (#96).
+/// `repeats` is JS-truthy-coerced before crossing the JNI boundary.
+pub fn notification_schedule_interval(
+    id_ptr: *const u8, title_ptr: *const u8, body_ptr: *const u8,
+    seconds: f64, repeats: f64,
+) {
+    extern "C" { fn js_is_truthy(value: f64) -> i32; }
+    let repeats_bool = unsafe { js_is_truthy(repeats) != 0 };
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let jid = env.new_string(id).expect("id");
+    let jtitle = env.new_string(title).expect("title");
+    let jbody = env.new_string(body).expect("body");
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "scheduleInterval",
+        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;DZ)V",
+        &[
+            JValue::Object(&activity),
+            JValue::Object(&jid),
+            JValue::Object(&jtitle),
+            JValue::Object(&jbody),
+            JValue::Double(seconds),
+            JValue::Bool(if repeats_bool { 1u8 } else { 0u8 }),
+        ],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Schedule a fire-at-wallclock-ms notification via PerryBridge (#96).
+pub fn notification_schedule_calendar(
+    id_ptr: *const u8, title_ptr: *const u8, body_ptr: *const u8,
+    timestamp_ms: f64,
+) {
+    let id = str_from_header(id_ptr);
+    let title = str_from_header(title_ptr);
+    let body = str_from_header(body_ptr);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(16);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let jid = env.new_string(id).expect("id");
+    let jtitle = env.new_string(title).expect("title");
+    let jbody = env.new_string(body).expect("body");
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "scheduleCalendar",
+        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;D)V",
+        &[
+            JValue::Object(&activity),
+            JValue::Object(&jid),
+            JValue::Object(&jtitle),
+            JValue::Object(&jbody),
+            JValue::Double(timestamp_ms),
+        ],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Logged no-op — Geofencing requires `FUSED_LOCATION_PROVIDER` + a
+/// runtime `ACCESS_FINE_LOCATION` grant. That's a separate scope expansion
+/// (#96 follow-up); programs targeting Android should fall back to
+/// app-side geofence wiring or use interval/calendar triggers.
+pub fn notification_schedule_location(
+    _id_ptr: *const u8, _title_ptr: *const u8, _body_ptr: *const u8,
+    _lat: f64, _lon: f64, _radius: f64,
+) {
+    extern "C" {
+        fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
+    }
+    unsafe {
+        __android_log_print(
+            5, b"PerryNotification\0".as_ptr(),
+            b"schedule_location: Geofencing API not wired on Android (#96 follow-up); skipped\0".as_ptr(),
+        );
+    }
+}
+
+/// Cancel a scheduled or already-displayed notification by id (#96).
+pub fn notification_cancel(id_ptr: *const u8) {
+    let id = str_from_header(id_ptr);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(8);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let jid = env.new_string(id).expect("id");
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "cancelNotification",
+        "(Landroid/app/Activity;Ljava/lang/String;)V",
+        &[JValue::Object(&activity), JValue::Object(&jid)],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
 /// Send a notification via PerryBridge.
 pub fn notification_send(title_ptr: *const u8, body_ptr: *const u8) {
     let title = str_from_header(title_ptr);

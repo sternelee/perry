@@ -978,26 +978,45 @@ pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
 
-/// Stub: AlarmManager + NotificationManager scheduling is a separate PR
-/// (#96 follow-up). Same shape as the remote-push stubs above.
+/// Schedule a fire-after-N-seconds notification via AlarmManager (#96).
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_interval(
-    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,
-) {}
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, seconds: f64, repeats: f64,
+) {
+    system::notification_schedule_interval(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        seconds, repeats,
+    );
+}
 
+/// Schedule a fire-at-wallclock-ms notification via AlarmManager (#96).
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_calendar(
-    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _timestamp_ms: f64,
-) {}
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, timestamp_ms: f64,
+) {
+    system::notification_schedule_calendar(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        timestamp_ms,
+    );
+}
 
-/// Stub: Geofencing API scheduling is a separate PR (#96 follow-up).
+/// Logged no-op — Geofencing API requires `FUSED_LOCATION_PROVIDER` + a
+/// runtime `ACCESS_FINE_LOCATION` grant. Deferred to #96 follow-up.
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_location(
-    _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _lat: f64, _lon: f64, _radius: f64,
-) {}
+    id_ptr: i64, title_ptr: i64, body_ptr: i64, lat: f64, lon: f64, radius: f64,
+) {
+    system::notification_schedule_location(
+        id_ptr as *const u8, title_ptr as *const u8, body_ptr as *const u8,
+        lat, lon, radius,
+    );
+}
 
+/// Cancel a scheduled or already-displayed notification by id (#96).
 #[no_mangle]
-pub extern "C" fn perry_system_notification_cancel(_id_ptr: i64) {}
+pub extern "C" fn perry_system_notification_cancel(id_ptr: i64) {
+    system::notification_cancel(id_ptr as *const u8);
+}
 
 /// Real impl (#97): register the tap callback so `PerryNotificationReceiver`
 /// can dispatch back to it when the user taps a delivered notification.

@@ -2,6 +2,7 @@ package com.perry.app
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -869,14 +870,17 @@ object PerryBridge {
         // FLAG_IMMUTABLE is required at API 31+ and harmless before.
         // FLAG_UPDATE_CURRENT lets the same PendingIntent be reused across
         // calls (matching the fixed-id replace-by-id semantics on the
-        // notification itself).
+        // notification itself). Request code matches the notify int id
+        // (`"perry_notification".hashCode()`) so `cancelNotification("perry_notification")`
+        // can tear both down (#96).
         val tapIntent = Intent(activity, PerryNotificationReceiver::class.java).apply {
             action = "com.perry.app.NOTIFICATION_TAP"
-            putExtra("id", "perry_notification")
+            putExtra("id", PERRY_DEFAULT_ID)
         }
+        val intId = PERRY_DEFAULT_ID.hashCode()
         val tapPending = PendingIntent.getBroadcast(
             activity,
-            PERRY_DEFAULT_NOTIFICATION_ID,
+            intId,
             tapIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -891,7 +895,7 @@ object PerryBridge {
             .build()
 
         try {
-            notificationManager.notify(PERRY_DEFAULT_NOTIFICATION_ID, notification)
+            notificationManager.notify(intId, notification)
         } catch (e: SecurityException) {
             Log.w(
                 "PerryBridge",
@@ -903,4 +907,101 @@ object PerryBridge {
 
     private const val PERRY_DEFAULT_CHANNEL_ID: String = "perry-default"
     private const val PERRY_DEFAULT_NOTIFICATION_ID: Int = 1
+    /// String id used by `sendNotification` (no user-supplied id). Same
+    /// value as iOS's `requestWithIdentifier:"perry_notification"`. Hashed
+    /// to an int for `NotificationManager.notify`/`cancel` lookups; that
+    /// hash also serves as the PendingIntent request code so
+    /// `cancelNotification("perry_notification")` finds the registration.
+    private const val PERRY_DEFAULT_ID: String = "perry_notification"
+
+    // --- Scheduled notifications (#96) ---
+
+    /**
+     * Build a `PendingIntent` targeting `PerryScheduledNotificationReceiver`
+     * with the given id/title/body extras. The request code is `id.hashCode()`
+     * so `cancel(id)` later can match the same PendingIntent and tear the
+     * alarm down.
+     */
+    private fun buildScheduledPendingIntent(
+        activity: Activity, id: String, title: String, body: String
+    ): PendingIntent {
+        val intent = Intent(activity, PerryScheduledNotificationReceiver::class.java).apply {
+            action = "com.perry.app.SCHEDULED_FIRE"
+            putExtra("id", id)
+            putExtra("title", title)
+            putExtra("body", body)
+        }
+        return PendingIntent.getBroadcast(
+            activity,
+            id.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
+
+    /**
+     * Schedule a notification firing after `seconds` (#96, interval trigger).
+     *
+     * `repeats=true` uses `AlarmManager.setRepeating` with `RTC_WAKEUP` —
+     * inexact on API 19+ but acceptable for our semantics. `repeats=false`
+     * uses `setAndAllowWhileIdle` for a one-shot that survives Doze without
+     * the `SCHEDULE_EXACT_ALARM` permission.
+     */
+    @JvmStatic
+    fun scheduleInterval(
+        activity: Activity, id: String, title: String, body: String,
+        seconds: Double, repeats: Boolean
+    ) {
+        val alarmManager = activity.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val pi = buildScheduledPendingIntent(activity, id, title, body)
+        val triggerAt = System.currentTimeMillis() + (seconds * 1000.0).toLong().coerceAtLeast(0L)
+        if (repeats) {
+            val intervalMs = (seconds * 1000.0).toLong().coerceAtLeast(60_000L)
+            alarmManager.setRepeating(AlarmManager.RTC_WAKEUP, triggerAt, intervalMs, pi)
+        } else {
+            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pi)
+        }
+    }
+
+    /**
+     * Schedule a notification firing once at `timestampMs` (#96, calendar
+     * trigger). Uses `setAndAllowWhileIdle` — inexact but Doze-safe and
+     * permission-free. Apps that need exact wall-clock fire have to request
+     * the `SCHEDULE_EXACT_ALARM` permission themselves.
+     */
+    @JvmStatic
+    fun scheduleCalendar(
+        activity: Activity, id: String, title: String, body: String,
+        timestampMs: Double
+    ) {
+        val alarmManager = activity.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val pi = buildScheduledPendingIntent(activity, id, title, body)
+        alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, timestampMs.toLong(), pi)
+    }
+
+    /**
+     * Cancel a previously scheduled notification by id (#96). Tears down both
+     * the AlarmManager registration (so future fires don't post anything) and
+     * any already-displayed notification under that id.
+     */
+    @JvmStatic
+    fun cancelNotification(activity: Activity, id: String) {
+        val alarmManager = activity.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        // Build a matching PendingIntent (same intent + same request code) so
+        // alarmManager.cancel can find and remove the registration.
+        val intent = Intent(activity, PerryScheduledNotificationReceiver::class.java).apply {
+            action = "com.perry.app.SCHEDULED_FIRE"
+        }
+        val pi = PendingIntent.getBroadcast(
+            activity,
+            id.hashCode(),
+            intent,
+            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE
+        )
+        if (pi != null) {
+            alarmManager.cancel(pi)
+            pi.cancel()
+        }
+        NotificationManagerCompat.from(activity).cancel(id.hashCode())
+    }
 }

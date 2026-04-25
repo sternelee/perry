@@ -27,5 +27,14 @@
                 <action android:name="com.perry.app.NOTIFICATION_TAP" />
             </intent-filter>
         </receiver>
+        <!-- Fires when an AlarmManager alarm scheduled via
+             `notificationSchedule` (#96) goes off. Builds + posts the
+             notification with the same channel and tap routing as
+             `sendNotification`. -->
+        <receiver android:name=".PerryScheduledNotificationReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="com.perry.app.SCHEDULED_FIRE" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
