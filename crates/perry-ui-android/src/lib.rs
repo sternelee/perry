@@ -968,15 +968,22 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }
 
-/// Stub: Firebase Messaging wiring is a separate PR (#95 follow-up).
-/// Compiles + links so TS code that calls `notificationRegisterRemote` runs
-/// without a missing-symbol crash; the callback simply never fires.
+/// Real impl (#95): kick off FCM token fetch + register the JS closure that
+/// fires when FCM hands us a registration token. Requires a real
+/// `google-services.json` to actually work — the placeholder bundled with
+/// the template lets the build succeed but the SDK rejects it at runtime.
 #[no_mangle]
-pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    system::notification_register_remote(callback);
+}
 
-/// Stub: see `perry_system_notification_register_remote` above.
+/// Real impl (#95): register the JS closure that fires for foreground FCM
+/// payloads. `PerryFirebaseMessagingService.onMessageReceived` forwards
+/// the JSON-serialized RemoteMessage to native via JNI.
 #[no_mangle]
-pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    system::notification_on_receive(callback);
+}
 
 /// Schedule a fire-after-N-seconds notification via AlarmManager (#96).
 #[no_mangle]

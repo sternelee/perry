@@ -302,6 +302,18 @@ pub fn keychain_delete(key_ptr: *const u8) {
 static NOTIFICATION_TAP_KEY: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 
+/// FCM device-token callback key (#95). Set via `notification_register_remote`
+/// and read by `Java_com_perry_app_PerryBridge_nativeNotificationToken` when
+/// FCM hands us a registration token (initial fetch + future rotations).
+static NOTIFICATION_REMOTE_TOKEN_KEY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
+/// FCM payload-receive callback key (#95). Set via `notification_on_receive`
+/// and read by `Java_com_perry_app_PerryBridge_nativeNotificationReceive`
+/// when a foreground push payload arrives.
+static NOTIFICATION_RECEIVE_KEY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
 /// Store the JS closure that fires when a notification is tapped (#97).
 /// The closure is stashed in `crate::callback::register` so the global
 /// callback table keeps it alive across GC; the returned key is saved in
@@ -338,6 +350,84 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationTap(
     let action_value = f64::from_bits(TAG_UNDEFINED);
 
     crate::callback::invoke2(key, id_value, action_value);
+}
+
+/// Register the JS closure that fires when FCM hands us a device token
+/// (#95). Stores the closure in the global callback table, saves the key in
+/// `NOTIFICATION_REMOTE_TOKEN_KEY` for the JNI side to look up, and asks
+/// `PerryBridge.registerForRemoteNotifications` to kick off the initial
+/// `FirebaseMessaging.getInstance().token` fetch.
+pub fn notification_register_remote(callback: f64) {
+    let key = crate::callback::register(callback);
+    NOTIFICATION_REMOTE_TOKEN_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
+
+    let mut env = jni_bridge::get_env();
+    let _ = env.push_local_frame(8);
+    let activity = crate::widgets::get_activity(&mut env);
+    let bridge_class = jni_bridge::with_cache(|c| {
+        env.new_local_ref(c.perry_bridge_class.as_obj()).unwrap()
+    });
+    let bridge_cls: &jni::objects::JClass = (&bridge_class).into();
+    let _ = env.call_static_method(
+        bridge_cls,
+        "registerForRemoteNotifications",
+        "(Landroid/app/Activity;)V",
+        &[JValue::Object(&activity)],
+    );
+    unsafe { env.pop_local_frame(&jni::objects::JObject::null()); }
+}
+
+/// Register the JS closure that fires for foreground FCM payloads (#95).
+/// `PerryFirebaseMessagingService.onMessageReceived` serializes the
+/// `RemoteMessage` to JSON and calls `nativeNotificationReceive`, which
+/// looks up this key and invokes the closure.
+pub fn notification_on_receive(callback: f64) {
+    let key = crate::callback::register(callback);
+    NOTIFICATION_RECEIVE_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// JNI: FCM device token (#95). Looks up the registered remote-token
+/// callback and invokes it with the token NaN-boxed string.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationToken(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    token: jni::objects::JString,
+) {
+    let key = NOTIFICATION_REMOTE_TOKEN_KEY.load(std::sync::atomic::Ordering::Relaxed);
+    if key == 0 { return; }
+    let rust_str: String = env.get_string(&token).map(|s| s.into()).unwrap_or_default();
+    let bytes = rust_str.as_bytes();
+    let token_value = unsafe {
+        let ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len());
+        js_nanbox_string(ptr)
+    };
+    crate::callback::invoke1(key, token_value);
+}
+
+/// JNI: FCM foreground push (#95). Parses the JSON payload via the runtime's
+/// `js_json_parse` to produce a Perry object, then invokes the registered
+/// receive callback with it.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationReceive(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    payload_json: jni::objects::JString,
+) {
+    let key = NOTIFICATION_RECEIVE_KEY.load(std::sync::atomic::Ordering::Relaxed);
+    if key == 0 { return; }
+    let rust_str: String = env.get_string(&payload_json).map(|s| s.into()).unwrap_or_default();
+    let bytes = rust_str.as_bytes();
+
+    extern "C" {
+        fn js_json_parse(text_ptr: *const u8) -> u64;
+    }
+    let payload_value = unsafe {
+        let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len());
+        let bits = js_json_parse(str_ptr);
+        f64::from_bits(bits)
+    };
+    crate::callback::invoke1(key, payload_value);
 }
 
 /// Schedule a fire-after-N-seconds notification via PerryBridge (#96).

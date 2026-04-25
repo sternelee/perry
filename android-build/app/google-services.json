@@ -1,0 +1,30 @@
+{
+  "_comment": "PLACEHOLDER — overlay this file with the google-services.json from your real Firebase project before deploying. The dummy values here let `gradlew assembleDebug` succeed (the google-services plugin parses the file at apply time) but FCM registration will fail at runtime against real Google APIs because the api_key + project_number don't authenticate.",
+  "project_info": {
+    "project_number": "000000000000",
+    "project_id": "perry-placeholder",
+    "storage_bucket": "perry-placeholder.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:0000000000000000",
+        "android_client_info": {
+          "package_name": "com.skelpo.pickcolor"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDummyPlaceholderKeyForBuildOnly000000"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

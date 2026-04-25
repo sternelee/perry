@@ -819,6 +819,20 @@ object PerryBridge {
     @JvmStatic
     external fun nativeNotificationTap(id: String)
 
+    /// Forwarded by `PerryFirebaseMessagingService.onNewToken` (#95) when
+    /// FCM hands us a registration token. Rust dispatches to the JS closure
+    /// registered via `notificationRegisterRemote`.
+    @JvmStatic
+    external fun nativeNotificationToken(token: String)
+
+    /// Forwarded by `PerryFirebaseMessagingService.onMessageReceived` (#95)
+    /// for foreground push messages. `payloadJson` is a JSON-serialized
+    /// shape of the `RemoteMessage` (data + notification fields) — the Rust
+    /// side `JSON.parse`s it into a Perry object before invoking the JS
+    /// closure registered via `notificationOnReceive`.
+    @JvmStatic
+    external fun nativeNotificationReceive(payloadJson: String)
+
     // --- Notifications (#94) ---
 
     /**
@@ -977,6 +991,42 @@ object PerryBridge {
         val alarmManager = activity.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pi = buildScheduledPendingIntent(activity, id, title, body)
         alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, timestampMs.toLong(), pi)
+    }
+
+    /**
+     * Kick off FCM registration (#95). Calls
+     * `FirebaseMessaging.getInstance().token` to fetch the current cached
+     * token (if any) and forwards it to native via `nativeNotificationToken`.
+     * Future token rotations come through
+     * `PerryFirebaseMessagingService.onNewToken`.
+     *
+     * Catches reflectively because the FCM SDK throws at runtime if no real
+     * `google-services.json` was wired in (the placeholder ships in the
+     * template repo so the build succeeds without breaking — actual FCM
+     * needs the user's real file).
+     */
+    @JvmStatic
+    fun registerForRemoteNotifications(activity: Activity) {
+        try {
+            val fm = com.google.firebase.messaging.FirebaseMessaging.getInstance()
+            fm.token.addOnSuccessListener { token: String ->
+                try {
+                    nativeNotificationToken(token)
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.w("PerryFirebase", "nativeNotificationToken unavailable", e)
+                }
+            }.addOnFailureListener { e ->
+                Log.w(
+                    "PerryFirebase",
+                    "FCM token request failed (likely placeholder google-services.json): ${e.message}"
+                )
+            }
+        } catch (e: Throwable) {
+            Log.w(
+                "PerryFirebase",
+                "registerForRemoteNotifications: FCM init failed (${e.javaClass.simpleName}): ${e.message}"
+            )
+        }
     }
 
     /**
