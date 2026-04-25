@@ -836,6 +836,16 @@ fn gc_collect_inner() -> u64 {
     // 3. Run registered root scanners (promise queues, timers, etc.)
     mark_registered_roots(&valid_ptrs);
 
+    // 3b. Gen-GC Phase C3: scan remembered set as additional roots.
+    //     Old-gen objects that wrote young-gen pointers since the
+    //     last collection are recorded here by the write barrier
+    //     (gen-gc-plan.md §C). For full GC this is redundant with
+    //     the conservative+precise scan that already covered them,
+    //     but it's cheap and keeps the dispatch path uniform with
+    //     the eventual minor-GC entry. RS is cleared at the end of
+    //     collection so the next cycle starts coherent.
+    mark_remembered_set_roots(&valid_ptrs);
+
     // 4. Trace from marked roots (iterative worklist)
     trace_marked_objects(&valid_ptrs);
 
@@ -849,6 +859,16 @@ fn gc_collect_inner() -> u64 {
     // sweep() now clears mark bits on surviving objects inline,
     // eliminating 2 redundant heap walks (arena + malloc).
     let freed_bytes = sweep();
+
+    // Gen-GC Phase C3: clear the remembered set after sweep. The
+    // RS records old→young writes since the previous collection;
+    // after a full collection, every young object referenced by
+    // an old-gen parent has either been kept alive (via the
+    // mark_remembered_set_roots scan above) or is dead and gets
+    // swept. Either way the parent's RS entry is no longer
+    // load-bearing — the next allocation cycle's barrier emissions
+    // will repopulate it as needed.
+    REMEMBERED_SET.with(|s| s.borrow_mut().clear());
 
     // Return released glibc heap pages to the kernel. Without this, glibc
     // keeps freed memory in its arena for reuse but never shrinks RSS, so
@@ -1253,6 +1273,35 @@ fn mark_registered_roots(valid_ptrs: &ValidPointerSet) {
         scanner(&mut |value: f64| {
             try_mark_value(value.to_bits(), valid_ptrs);
         });
+    }
+}
+
+/// Gen-GC Phase C3: mark the remembered set as roots. Old-gen
+/// objects in the RS may hold pointers to young-gen objects that
+/// would otherwise be missed by a minor GC. Today the full GC
+/// also calls this so the RS stays coherent (nothing gets stuck
+/// pointing at swept young objects), and so that the RS clear at
+/// the end has clear "consumed" semantics. The actual minor-GC
+/// time win lands in C3b when trace-from-RS short-circuits at
+/// old-gen boundaries instead of recursing through them.
+fn mark_remembered_set_roots(valid_ptrs: &ValidPointerSet) {
+    // Snapshot the RS so we can iterate without holding the borrow
+    // across `try_mark_value` (which may trigger user-code paths
+    // that touch other RefCells).
+    let snapshot: Vec<usize> = REMEMBERED_SET.with(|s| s.borrow().iter().copied().collect());
+    for header_addr in snapshot {
+        // Header sits at GcHeader; user pointer is +GC_HEADER_SIZE.
+        // Mark the OLD-gen object itself live (Phase C3b will scan
+        // its fields for young pointers without recursing into the
+        // old-gen subtree). For this commit we use the existing
+        // `try_mark_value` machinery which traces transitively —
+        // correct but not yet generationally optimal.
+        let user_ptr = header_addr + GC_HEADER_SIZE;
+        if !valid_ptrs.contains(&user_ptr) { continue; }
+        // Treat as a NaN-boxed POINTER value; try_mark_value
+        // dispatches through the standard mark + worklist path.
+        let nanbox = POINTER_TAG | (user_ptr as u64);
+        try_mark_value(nanbox, valid_ptrs);
     }
 }
 
@@ -2655,6 +2704,21 @@ mod tests {
         assert_eq!(remembered_set_size(), 1);
         remembered_set_clear();
         assert_eq!(remembered_set_size(), 0);
+    }
+
+    #[test]
+    fn test_remembered_set_cleared_after_full_gc() {
+        reset_remembered_set();
+        // Set up an old→young edge to populate the RS.
+        let young = crate::arena::arena_alloc_gc(40, 8, GC_TYPE_OBJECT) as usize;
+        let old = crate::arena::arena_alloc_gc_old(40, 8, GC_TYPE_OBJECT) as usize;
+        js_write_barrier(POINTER_TAG | (old as u64), POINTER_TAG | (young as u64));
+        assert_eq!(remembered_set_size(), 1);
+        // Run a full collection.
+        let _freed = gc_collect_inner();
+        // RS must be empty after collection — coherence invariant.
+        assert_eq!(remembered_set_size(), 0,
+            "remembered set must be cleared after gc_collect_inner");
     }
 
     #[test]
