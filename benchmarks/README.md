@@ -1,12 +1,17 @@
 # Perry Benchmarks
 
-This is the canonical, single-page comparison of Perry against
-production-quality runtimes — **node, bun, Rust, Go, C++ (nlohmann
-+ simdjson), Swift, Java, Kotlin, Python, AssemblyScript**. It
-pulls together every benchmark in this repo, lists the exact
-compiler flags used per language, calls out where Perry leads and
-where it doesn't, and links to the design docs that explain *why*
-the numbers look the way they do.
+This is the canonical, single-page comparison of Perry against its
+**runtime peers** — **Node** and **Bun**, the production
+TypeScript-input runtimes Perry is most directly compared against
+— plus **TS-to-native peers** (AssemblyScript with json-as) and
+**reference points** to hand-written compiled native languages
+(Rust, Go, C++ with nlohmann + simdjson, Swift, Java, Kotlin) and
+Python. The native compilers are *not* peers — they are
+calibration. They show the floor of what hand-written, statically-
+typed, compiled-ahead-of-time code achieves on this hardware so a
+reader can see where Perry sits relative to that floor. The
+comparisons that matter for "is Perry a good TypeScript runtime"
+are against Node and Bun.
 
 The format is designed for skeptics. Every implementation, every
 flag, every methodology decision is in this page — no tables hidden
@@ -33,11 +38,63 @@ behind blog posts, no cherry-picked subsets.
 > RSS in MB (peak resident set size from `/usr/bin/time -l`, the worst
 > peak observed across runs).
 >
+> **Pre-1.0 caveat:** Perry is pre-1.0 (v0.5.241); compared compilers
+> and runtimes are stable releases. Numbers reflect Perry's current
+> alpha state and may regress between releases.
+>
 > **Warmup:** the bench programs themselves run 3 untimed warmup
 > iterations before the timed loop, to avoid charging JIT-y runtimes
 > (Perry's compiled binary, V8, JSC, JVM) for cold-start. Process
 > startup is included in the timed window for non-JIT runtimes (Go,
 > Rust, C++, Swift) since their startup is sub-millisecond.
+>
+> **Node vs. Bun TS handling (asymmetric, on purpose).** Node
+> measurements run on **precompiled `.mjs`** — the runner uses
+> `esbuild` (or `tsc` as fallback) to strip TypeScript types in an
+> untimed setup step, then `node bench.mjs`. Bun runs **`bench.ts`
+> directly** because direct TypeScript execution is its native input
+> format (and value prop). Without this asymmetry, Node would be
+> charged on every launch for `--experimental-strip-types`'s parse +
+> strip cost — work that Perry pays at compile time and Bun
+> pays as part of being a TS-native runtime. With no stripper
+> installed, the runner falls back to `node --experimental-strip-types`
+> and prints a banner so the asymmetry is visible.
+
+---
+
+## Why these specific peers
+
+This page mixes three categories of comparison and treats them
+differently:
+
+- **Runtime peers (Node, Bun).** Same input language as Perry
+  (TypeScript), same general value proposition (run a TS program).
+  These are the comparisons that matter most. If Perry doesn't
+  beat Node and Bun on a workload, the workload doesn't favor
+  Perry — and that's worth saying out loud rather than hiding.
+- **TS-to-native peers (AssemblyScript with json-as; porffor and
+  shermes were tried).** Same output as Perry: a native binary
+  produced from TS source. These show what the TS-to-native
+  ecosystem looks like today. porffor 0.61.13 and Static Hermes
+  weren't bench-ready (see "Honest disclaimers"); AssemblyScript
+  with `json-as` is the closest installable peer that runs the
+  workload to completion.
+- **Reference points to compiled native (Rust, C++, Go, Swift,
+  Java, Kotlin).** Hand-written, statically-typed, compiled
+  ahead-of-time. **These are NOT peers — they are calibration.**
+  They show the floor of what compiled code achieves on this
+  hardware, so a reader can see where Perry sits relative to that
+  floor (closer than Node/Bun on some workloads, further on
+  others). simdjson (C++ + SIMD) is the absolute parse-throughput
+  ceiling; it is on the page deliberately, so the gap to it is
+  visible. Perry is not expected to match it, and matching it is
+  not the goal.
+
+The headline question this page tries to answer honestly is
+"compared to other TypeScript runtimes, is Perry's perf
+competitive?" Native reference points exist to answer the
+follow-up question: "and how does that compare to giving up
+TypeScript entirely?"
 
 ---
 
@@ -68,7 +125,7 @@ and rebuilds the string from the parsed tree on every `dump()`.
 | rust serde_json (LTO+1cgu) | optimized | 186 | 188 | 1.1 | 184 | 188 | 11 |
 | rust serde_json | idiomatic | 200 | 202 | 1.0 | 198 | 202 | 11 |
 | bun | idiomatic | 252 | 257 | 3.2 | 248 | 257 | 84 |
-| perry (mark-sweep, no lazy) | idiomatic | 368 | 381 | 7.0 | 360 | 381 | 102 |
+| perry (mark-sweep, no lazy) | untuned floor | 368 | 381 | 7.0 | 360 | 381 | 102 |
 | node | idiomatic | 381 | 399 | 7.1 | 377 | 399 | 182 |
 | node --max-old=4096 | optimized | 386 | 389 | 3.7 | 377 | 389 | 182 |
 | kotlin -server -Xmx512m | optimized | 461 | 466 | 6.4 | 443 | 466 | 421 |
@@ -99,7 +156,7 @@ tape pays its overhead without compensation.
 | bun | idiomatic | 257 | 260 | 2.0 | 252 | 260 | 87 |
 | node | idiomatic | 360 | 368 | 4.1 | 352 | 368 | 119 |
 | node --max-old=4096 | optimized | 365 | 378 | 5.1 | 358 | 378 | 119 |
-| perry (mark-sweep, no lazy) | idiomatic | 373 | 376 | 2.7 | 367 | 376 | 102 |
+| perry (mark-sweep, no lazy) | untuned floor | 373 | 376 | 2.7 | 367 | 376 | 102 |
 | kotlin -server -Xmx512m | optimized | 462 | 470 | 4.6 | 454 | 470 | 423 |
 | perry (gen-gc + lazy tape) | optimized | 476 | 482 | 3.8 | 470 | 482 | 100 |
 | kotlin (kotlinx.serialization) | idiomatic | 484 | 494 | 5.4 | 476 | 494 | 606 |
@@ -256,6 +313,39 @@ page.
 
 ---
 
+## What this page does not measure
+
+Surfaced before the per-benchmark detail sections so a reader sees
+the limitations alongside the headline numbers, not buried after
+them.
+
+- **GC latency / tail latency.** Reported numbers are throughput
+  (median wall clock across RUNS=11 invocations). A 99th-percentile
+  pause measurement would show Perry's stop-the-world GC at a
+  disadvantage vs Go's concurrent collector or HotSpot ZGC.
+- **JIT warmup behavior.** JS-family runtimes (Node, Bun) get
+  3-iteration warmup before timed iterations to avoid charging them
+  for cold-JIT compilation. Real cold-start latency is much worse for
+  V8 / JSC than for Perry / Go / Rust binaries.
+- **Async / await.** Every benchmark on this page is synchronous.
+  Async runtime overhead, event-loop scheduling, microtask draining
+  — not measured here.
+- **I/O.** No file, network, or DB benchmark. Perry's `perry/thread`
+  + tokio integration for HTTP / WebSocket / DB is benchmarked
+  separately (see [`docs/`](../docs/) — partial).
+- **Realistic application workloads.** Microbenches are probes,
+  not workload simulators. The "Perry is X× faster than Y" claim
+  is only true on the specific workload shape measured.
+- **Memory pressure under contention.** All benches run on an
+  otherwise-idle machine. Behavior under co-located-tenant pressure
+  is not measured.
+- **Compile time / binary size.** Perry compiles slower than Go (Go
+  is famously fast at compile-time). Binary size is ~1 MB for hello
+  world; comparable to Go but bigger than Rust release binaries with
+  panic=abort + strip.
+
+---
+
 ## How to read this page
 
 The **compute microbenches** measure compiler choices: loop iteration
@@ -326,10 +416,10 @@ correctness is verifiable.
 | Profile | Language | Flags |
 |---|---|---|
 | optimized | Perry | `cargo build --release -p perry` (LLVM `-O3` equivalent, lazy JSON tape default for ≥1 KB blobs since v0.5.210, gen-GC default ON since v0.5.237) |
-| idiomatic | Perry (escape hatch) | `PERRY_GEN_GC=0 PERRY_JSON_TAPE=0` (full mark-sweep, no lazy parse) — included for honesty so a skeptic can see the un-tuned floor |
-| idiomatic | Bun | `bun bench.ts` (no flags — Bun is JIT, no compile step) |
-| idiomatic | Node | `node --experimental-strip-types bench.ts` |
-| optimized | Node | `node --experimental-strip-types --max-old-space-size=4096 bench.ts` |
+| untuned floor | Perry (escape hatch) | `PERRY_GEN_GC=0 PERRY_JSON_TAPE=0` (full mark-sweep, no lazy parse). Neither flag is something an idiomatic user sets; this row is the default-disabled baseline so a skeptic can see the floor under Perry's tuning. |
+| idiomatic | Bun | `bun bench.ts` — runs **TS source directly** (no precompile; that IS Bun's value prop) |
+| idiomatic | Node | `node bench.mjs` — runs **precompiled JS** (`.mjs` produced by `esbuild`/`tsc` as an untimed setup step). Falls back to `node --experimental-strip-types bench.ts` only when no stripper is on PATH; the runner prints a banner if it does. |
+| optimized | Node | `node --max-old-space-size=4096 bench.mjs` (same precompile as above) |
 | idiomatic | Go | `go build` (default) |
 | optimized | Go | `go build -ldflags="-s -w" -trimpath` (smaller binary; ~no perf delta — included for completeness, see "honest disclaimers" below) |
 | idiomatic | Rust | `cargo build --release` (`opt-level=3`, `lto=false`, `codegen-units=16`) |
@@ -467,8 +557,8 @@ in the TL;DR above. Compiler details:
 | Swift | swiftc 6.0 (Apple) | `swiftc -O` |
 | Java | javac 21 + java 21 (HotSpot) | default `java -cp .` |
 | Kotlin (JSON only) | kotlinc 2.3.21 | `java -cp ... BenchKt` |
-| Node.js | v20 | `node --experimental-strip-types` |
-| Bun | 1.3 | `bun` |
+| Node.js | v20 | `node bench.mjs` (precompiled .mjs via `esbuild`/`tsc`; falls back to `node --experimental-strip-types` if no stripper is on PATH) |
+| Bun | 1.3 | `bun bench.ts` (runs TS source directly — that IS Bun's value prop) |
 | Static Hermes | shermes 0.13 | `shermes -O` (skipped if not installed) |
 | Python | 3.12 | `python3` |
 
@@ -548,8 +638,12 @@ stringify, peak RSS via `/usr/bin/time -l`):
 | v0.5.241 (current, this commit) | **102** | **375** | unchanged from v0.5.237; suite re-run for this README |
 
 Default (lazy + gen-gc), the case `bench_json_roundtrip` measures with
-no env vars: **66 ms / 85 MB**, currently best in class on time across
-every other measured runtime.
+no env vars: **66 ms / 85 MB**. On this specific workload (parse +
+stringify, no intermediate iteration), faster than every other
+TypeScript-input runtime measured here (Node, Bun); slower than
+simdjson (C++ + SIMD, the parse-throughput ceiling). See TL;DR §A
+for the full table and the workload caveats — the lazy tape's win
+is workload-specific, and this is the workload it was designed for.
 
 ### Other Perry benches (best-of-5 minimum across RUNS=5 quick runs, M1 Max, this commit)
 
@@ -598,17 +692,20 @@ Where Perry actually wins, and a one-line "why" per item.
   and Perry's lazy tape pays overhead it can't amortize when every
   element is touched.
 - **f64-arithmetic flag-aggressiveness probes** (`loop_overhead`,
-  `math_intensive`, `accumulate`) — Perry 3-8× faster than native on
-  these microbenches because TypeScript's `number` semantics let LLVM
-  apply `reassoc contract` flags that strict-IEEE languages can't.
-  C++ `-O3 -ffast-math` closes this gap; nothing else on the list
-  can. **Important framing**: these are *flag-aggressiveness probes*,
-  not runtime perf wins on real code. They measure whether the
-  compiler folded the loop, not how fast it actually computes. See
-  the "Optimization probes" subsection below for the explicit honest
-  framing, and the genuinely-non-foldable
-  [`loop_data_dependent`](polyglot/bench.rs#L122) for what Perry
-  looks like when the compiler *can't* fold.
+  `math_intensive`, `accumulate`) — Perry 3-8× faster than native
+  compilers' default release builds on these microbenches (measures
+  compiler optimization aggressiveness, not runtime performance —
+  see Optimization Probes section), because TypeScript's `number`
+  semantics let LLVM apply `reassoc contract` flags that strict-IEEE
+  languages can't apply by default. C++ `-O3 -ffast-math` closes
+  most of this gap (see [`RESULTS_OPT.md`](polyglot/RESULTS_OPT.md));
+  nothing else on the list can. **Important framing**: these are
+  *flag-aggressiveness probes*, not runtime perf wins on real code.
+  They measure whether the compiler folded the loop, not how fast
+  it actually computes. See the "Optimization probes" subsection
+  below for the explicit honest framing, and the genuinely-non-
+  foldable [`loop_data_dependent`](polyglot/bench.rs#L122) for what
+  Perry looks like when the compiler *can't* fold.
 - **Object allocation in tight loops** (`object_create`, 1M iters) —
   ties native (0 ms). Working set fits in one arena block; GC never
   fires; the inline bump allocator is ~5 instructions per `new`.
@@ -661,36 +758,7 @@ The ones we already know about and what's tracked:
 
 ---
 
-## 6. What this page does not measure
-
-- **GC latency / tail latency.** Reported numbers are throughput
-  (median wall clock across RUNS=11 invocations). A 99th-percentile
-  pause measurement would show Perry's stop-the-world GC at a
-  disadvantage vs Go's concurrent collector or HotSpot ZGC.
-- **JIT warmup behavior.** JS-family runtimes (Node, Bun) get
-  3-iteration warmup before timed iterations to avoid charging them
-  for cold-JIT compilation. Real cold-start latency is much worse for
-  V8 / JSC than for Perry / Go / Rust binaries.
-- **Async / await.** Every benchmark on this page is synchronous.
-  Async runtime overhead, event-loop scheduling, microtask draining
-  — not measured here.
-- **I/O.** No file, network, or DB benchmark. Perry's `perry/thread`
-  + tokio integration for HTTP / WebSocket / DB is benchmarked
-  separately (see [`docs/`](../docs/) — partial).
-- **Realistic application workloads.** Microbenches are probes,
-  not workload simulators. The "Perry is X× faster than Y" claim
-  is only true on the specific workload shape measured.
-- **Memory pressure under contention.** All benches run on an
-  otherwise-idle machine. Behavior under co-located-tenant pressure
-  is not measured.
-- **Compile time / binary size.** Perry compiles slower than Go (Go
-  is famously fast at compile-time). Binary size is ~1 MB for hello
-  world; comparable to Go but bigger than Rust release binaries with
-  panic=abort + strip.
-
----
-
-## 7. Reproducing
+## 6. Reproducing
 
 ### JSON polyglot
 
@@ -731,7 +799,7 @@ RSS per cell. Wired into CI via `.github/workflows/test.yml`.
 
 ---
 
-## 8. Design / implementation references
+## 7. Design / implementation references
 
 - [`docs/generational-gc-plan.md`](../docs/generational-gc-plan.md) —
   the GC architecture: phases A-D, write barriers, evacuation,
