@@ -1432,18 +1432,30 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
 }
 
 /// Compile a single user function into the module.
-/// Gen-GC Phase A sub-phase 2: enable shadow-stack push/pop
-/// emission for every user function? Cached at first call so
-/// subsequent compile_* calls skip the env-var lookup.
+/// Shadow-stack push/pop + slot-set emission for every user
+/// function. Default ON as of Phase D part 2 (v0.5.238); set
+/// `PERRY_SHADOW_STACK=0`/`off`/`false` to disable for bisection.
+/// Cached at first call so subsequent compile_* calls skip the
+/// env-var lookup.
 ///
-/// `PERRY_SHADOW_STACK=1` / `on` / `true` → enabled.
-/// Anything else → disabled (default).
+/// Why on by default now: the shadow stack precisely covers every
+/// pointer-typed local in compiled JS frames, complementing the
+/// conservative C-stack scan. With Phase A complete and the GC
+/// tracer consuming the shadow stack as a parallel root source
+/// (v0.5.221), enabling it is a strict-improvement default —
+/// fewer over-promoted objects in generational mode, no change
+/// in observed correctness, modest per-function-entry overhead
+/// (one frame_push call + N slot stores at safepoints) that's
+/// invisible on every measured benchmark. Phase D part 2 then
+/// uses the shadow stack's authoritative JS-frame coverage to
+/// shrink the conservative scanner — which only makes sense once
+/// the shadow stack is guaranteed to be live.
 fn shadow_stack_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| matches!(
+    *CACHED.get_or_init(|| !matches!(
         std::env::var("PERRY_SHADOW_STACK").as_deref(),
-        Ok("1") | Ok("on") | Ok("true")
+        Ok("0") | Ok("off") | Ok("false")
     ))
 }
 

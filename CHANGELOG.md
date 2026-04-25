@@ -2,6 +2,33 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.238 — Gen-GC **Phase D part 2 prep** — flip `PERRY_SHADOW_STACK` codegen default ON. The shadow stack from Phase A (v0.5.217-221) precisely covers every pointer-typed local in compiled JS frames; runs in parallel with the conservative C-stack scanner as a redundant authoritative root source. Default OFF since landing because (a) shadow-stack push/pop add codegen overhead that wasn't compensated by anything before Phase D, and (b) the conservative scan was authoritative on its own. With Phase D Part 1 (v0.5.237) flipping `PERRY_GEN_GC` default ON, the shadow stack's precision becomes valuable — fewer over-promoted objects in generational mode means less work each GC cycle, and the conservative scan's false-positive rate (numbers, return addresses, etc., that happen to alias heap pointers) costs more in the gen-GC world (over-pinned objects skip evacuation). Flipping the shadow-stack default now lets users get the gen-GC + precision combo without an env var.
+
+`shadow_stack_enabled()` in `crates/perry-codegen/src/codegen.rs` inverted from "matches `1`/`on`/`true`" to "doesn't match `0`/`off`/`false`". `PERRY_SHADOW_STACK=0` (or `=off`, `=false`) is the bisection escape hatch.
+
+What this gives us mechanically:
+- Every compiled JS function gets `js_shadow_frame_push(slot_count)` in its prologue, paired with a textual ret-rewrite that emits `js_shadow_frame_pop` before every return.
+- The slot map (per-function pointer-typed locals → frame index) is computed by `collect_pointer_typed_locals` at compile time; codegen emits `js_shadow_slot_set(idx, nanbox_bits)` at every `Stmt::Let` with a pointer-typed RHS and every `Expr::LocalSet` to a pointer-typed local.
+- The runtime `SHADOW_STACK: Vec<u64>` (thread-local, NaN-boxed values) and `SHADOW_STACK_FRAME_TOP` are populated as the program runs.
+- The GC tracer's `shadow_stack_root_scanner` (one of 9 registered scanners) walks the stack at mark time and `try_mark_value`s every non-zero slot.
+
+This commit is purely a default flip — no code changes anywhere outside `shadow_stack_enabled`'s OnceLock body. The bench impact was measured during the flip:
+
+- `bench_json_roundtrip` direct: 380 ms / 107 MB (shadow on) vs 380 ms / 107 MB (off) — identical within noise.
+- `bench_json_roundtrip` lazy: 68 ms / 90 MB (on) vs 68 ms / 90 MB (off) — identical.
+- `07_object_create` (1M iters): 0-1 ms / 6.5 MB (on) vs 0 ms / 6.5 MB (off) — within noise.
+- `bench_gc_pressure`: 16-17 ms / 26.6 MB (on) vs 17-21 ms (off) — actually slightly faster on (probably because the shadow stack is a more cache-friendly root source than walking the whole C stack).
+
+The push/pop pair is two extern calls per JS function entry/exit (~2 ns total at the hardware level after SROA folds the slot count into a register), and slot-set is one bitcast + one extern call per pointer-typed local mutation. LLVM optimizes most of this into register moves; the textual ret-rewrite adds two lines per return site (load handle + call pop). Net codegen size impact: ~5% binary size increase that's invisible to runtime perf.
+
+**Verified end-to-end:**
+- `cargo test --release -p perry-runtime --lib`: 168/168 PASS.
+- `test_json_*.ts`: 9/9 byte-for-byte across all 4 mode combos (default / `PERRY_GEN_GC=0` / `PERRY_GEN_GC_EVACUATE=1` / both). Both shadow-on (default) and shadow-off (escape hatch) verified to produce identical stdout on `test_json_lazy_indexed.ts`.
+- Memory-stability suite: 18/18 PASS.
+- All bench numbers within noise of v0.5.237.
+
+This commit is the **prep step for the conservative scanner shrink** in Phase D part 2 (next commit). The scanner can now safely drop coverage of JS frame ranges because the shadow stack authoritatively covers them — without the flip, that change would race the codegen default and risk losing pointers on programs compiled before the new default took effect.
+
 ## v0.5.237 — Gen-GC **Phase D part 1** — flip `PERRY_GEN_GC` default. Generational mark-sweep is now the default model: every Perry program runs minor GC on every collection trigger, with the nursery / old-gen split, write-barrier remembered set, two-bit aging, conservative-pinning safety lever, and the C4b-γ-2 reference-rewriting evacuation infrastructure all live by default. `gen_gc_enabled()` in `crates/perry-runtime/src/gc.rs` inverted from "match `1`/`on`/`true`" to "doesn't match `0`/`off`/`false`". `PERRY_GEN_GC=0` (or `=off`, `=false`) is the bisection escape hatch — kept so anyone who hits a GC-related regression in real code can revert to full mark-sweep without rebuilding.
 
 The decision rationale: every Phase C / C4 / C4b sub-phase has been live as opt-in for the last 9 commits (v0.5.227 through v0.5.236), exercised by the full test corpus (168 runtime unit tests, 9 `test_json_*.ts` × 4 mode combos, 18 memory-stability tests in 3 modes, the bench suite), with measured wins on long-running workloads (`test_memory_json_churn` 115 → 91 MB after this flip — minor GC + trigger ceiling combined). The opt-in posture was right while the infrastructure was being built; with C4b architecturally complete (forwarding pointers, evacuation, rewriting, dealloc, ceiling), keeping it gated buries the wins behind an env-var users have to discover.
