@@ -4087,29 +4087,22 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(ctx.block().call(DOUBLE, &fn_name, &arg_slices))
         }
 
-        // -------- fs.readFileBuffer(path) / fs.readFileSync(path) -> Buffer --------
-        // Calls js_fs_read_file_binary(path: f64) -> i64 (raw *BufferHeader),
-        // then bitcasts the raw pointer directly to f64 WITHOUT NaN-boxing
-        // The runtime's
-        // `js_console_log_dynamic` → `format_jsvalue` path detects raw buffer
-        // pointers via the thread-local BUFFER_REGISTRY and formats them as
-        // `<Buffer xx xx ...>`. Buffer methods (`.length`, `.toString`, etc.)
-        // also flow through the raw-pointer fallback.
+        // -------- fs.readFileSync(path) -> Buffer (no encoding) --------
+        // Node returns a Buffer when no encoding is supplied; mirror that.
+        // js_fs_read_file_binary returns a raw *mut BufferHeader registered
+        // in BUFFER_REGISTRY; NaN-box with POINTER_TAG so downstream
+        // console.log / .toString / .length / .[i] dispatch consult the
+        // registry and format the value as `<Buffer xx xx ...>` (or the
+        // appropriate Buffer behaviour for each method).
         Expr::FsReadFileBinary(path) => {
-            // Use js_fs_read_file_sync (returns StringHeader*) instead of
-            // js_fs_read_file_binary (returns BufferHeader*). StringHeader
-            // is 12 bytes (length, capacity, refcount) while BufferHeader
-            // is 8 bytes (length, capacity). Treating a Buffer pointer as
-            // a String skips 4 bytes of data (offset 12 vs 8), causing
-            // "sidebarLocation" to become "barLocation".
             let path_box = lower_expr(ctx, path)?;
             let blk = ctx.block();
-            let str_handle = blk.call(
+            let buf_handle = blk.call(
                 I64,
-                "js_fs_read_file_sync",
+                "js_fs_read_file_binary",
                 &[(DOUBLE, &path_box)],
             );
-            Ok(nanbox_string_inline(blk, &str_handle))
+            Ok(nanbox_pointer_inline(blk, &buf_handle))
         }
 
         // -------- instanceof --------

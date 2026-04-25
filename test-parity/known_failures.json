@@ -1,8 +1,4 @@
 {
-  "test_cli_simulation": {
-    "status": "bug",
-    "reason": "fs.readFileSync return-type divergence: Node returns Buffer (`<Buffer 6c 69 6e 65 ...>`), Perry returns string (`line1\\nline2\\n...`). Pre-existing — appeared between parity runs 2026-04-24 and 2026-04-25, predates v0.5.250's known_failures cleanup (HIR-only commit). Likely surfaces from a recent codegen commit (c4739341 cross-module getters/setters, or 3ba1188e FFI manifest); root-cause separately."
-  },
   "test_edge_control_flow": {
     "status": "flake",
     "reason": "Intermittent: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Appeared alongside test_cli_simulation between the 2026-04-24 and 2026-04-25 runs. Possibly state-dependent on sibling tests or non-deterministic codegen path; investigate separately."

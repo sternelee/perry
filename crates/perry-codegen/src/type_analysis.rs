@@ -143,11 +143,12 @@ pub(crate) fn refine_type_from_init(ctx: &FnCtx<'_>, init: &Expr) -> Option<HirT
         // refined to String, charCodeAt hits the inline string fast
         // path that calls `js_string_char_code_at`.
         Expr::Atob(_) | Expr::Btoa(_) => Some(HirType::String),
-        // fs.readFileSync returns a NaN-boxed string. Without this,
-        // `const text = readFileSync(path); text.split('\n')` routes
-        // .split() through the generic method dispatcher instead of
-        // the string fast path.
-        Expr::FsReadFileSync(_) | Expr::FsReadFileBinary(_) => Some(HirType::String),
+        // fs.readFileSync(path, 'utf8') returns a NaN-boxed string;
+        // fs.readFileSync(path) (no encoding, lowered to FsReadFileBinary)
+        // returns a Buffer. Refining the string variant lets `.split()`
+        // / `.length` / etc. take the string fast path. The Buffer variant
+        // dispatches through the POINTER_TAG path with BUFFER_REGISTRY.
+        Expr::FsReadFileSync(_) => Some(HirType::String),
         // `process.hrtime.bigint()` returns a BigInt value. Refining the
         // local type lets `hr2 >= hr1` route through the BigInt compare
         // fast path (`js_bigint_cmp`) instead of fcmp-on-NaN.
