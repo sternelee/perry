@@ -181,6 +181,31 @@ if have swiftc; then
 fi
 
 # ---------------------------------------------------------------------------
+# Kotlin (kotlinx.serialization on JVM)
+#   idiomatic = JVM defaults (java -cp ...)
+#   optimized = JVM with server-class JIT + larger initial heap
+# Both go through the JVM JIT, so we add an extra warmup margin via the
+# in-program 3-iteration warmup loop (already in bench.kt).
+# ---------------------------------------------------------------------------
+echo "=== Kotlin ==="
+GRADLE_LIB=$(brew --prefix gradle 2>/dev/null)/libexec/lib
+KOTLINC_LIB=$(brew --prefix kotlin 2>/dev/null)/libexec/lib
+if have kotlinc && [[ -d "$GRADLE_LIB" ]] && [[ -d "$KOTLINC_LIB" ]]; then
+    SERIALIZATION_CP="$GRADLE_LIB/kotlinx-serialization-core-jvm-1.9.0.jar:$GRADLE_LIB/kotlinx-serialization-json-jvm-1.9.0.jar"
+    PLUGIN="$KOTLINC_LIB/kotlinx-serialization-compiler-plugin.jar"
+    kotlinc -Xplugin="$PLUGIN" -classpath "$SERIALIZATION_CP" -include-runtime -d "$TMPDIR/bench_kt.jar" bench.kt 2>&1 | tail -3
+    if [[ -f "$TMPDIR/bench_kt.jar" ]]; then
+        run_bench "idiomatic" "kotlin (kotlinx.serialization)" "" \
+            java -cp "$TMPDIR/bench_kt.jar:$SERIALIZATION_CP" BenchKt
+        # JVM "optimized" — server compiler tier 4 + larger heap.
+        run_bench "optimized" "kotlin -server -Xmx512m" "" \
+            java -server -Xmx512m -cp "$TMPDIR/bench_kt.jar:$SERIALIZATION_CP" BenchKt
+    fi
+else
+    echo "  kotlinc / gradle JARs not found — skipping (brew install kotlin gradle)"
+fi
+
+# ---------------------------------------------------------------------------
 # C++ (nlohmann/json)
 #   idiomatic = `clang++ -O2` (most projects' default)
 #   optimized = `clang++ -O3 -flto` (full LTO)

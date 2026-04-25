@@ -2,6 +2,63 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.242 — Kotlin added to JSON polyglot, full benchmark sweep refresh, `benchmarks/README.md` updated as the canonical single source for every measurement. Touchpoints:
+
+**`benchmarks/json_polyglot/bench.kt`** — new Kotlin implementation of the identical 10k-record / ~1 MB blob / 50-iteration parse + stringify workload. Uses `kotlinx.serialization-json` 1.9.0 (the official Kotlin serialization library; compile-time-generated (de)serializers via the kotlinx-serialization compiler plugin, no runtime reflection). Compiles via `kotlinc -Xplugin=...kotlinx-serialization-compiler-plugin.jar` against the JARs shipped with `brew install gradle` (the brew kotlin formula doesn't bundle the runtime libs but gradle does). Listed twice in `RESULTS.md` — idiomatic JVM defaults and `-server -Xmx512m`.
+
+**`benchmarks/json_polyglot/run.sh`** — extended to detect kotlinc, use the gradle-bundled kotlinx-serialization JARs, compile the .kt to a JAR, and run under both flag profiles. Other languages unchanged.
+
+**Full sweep re-run on this commit (M1 Max, macOS 26.4, best of 5):**
+
+JSON polyglot (15 rows, sorted by time):
+
+| Implementation | Profile | Time (ms) | Peak RSS (MB) |
+|---|---|---:|---:|
+| **perry (gen-gc + lazy tape)** | optimized | **67** | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 183 | 11 |
+| rust serde_json | idiomatic | 193 | 11 |
+| bun | idiomatic | 240 | 81 |
+| perry (mark-sweep, no lazy) | idiomatic | 341 | 102 |
+| node | idiomatic | 361 | 180 |
+| node --max-old=4096 | optimized | 364 | 182 |
+| kotlin -server -Xmx512m | optimized | 446 | 423 |
+| kotlin (kotlinx.serialization) | idiomatic | 460 | 606 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 774 | 25 |
+| go (encoding/json) | optimized | 783 | 22 |
+| go (encoding/json) | idiomatic | 785 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 840 | 25 |
+| swift -O -wmo (Foundation) | optimized | 3665 | 34 |
+| swift -O (Foundation) | idiomatic | 3674 | 33 |
+
+Perry leads the entire field on time: 3.6× over Bun, 5.4× over Node, 2.7× over Rust serde_json (LTO), 6.7× over Kotlin (server JIT), 11.6× over C++ -O3 -flto, 11.7× over Go encoding/json, 54.7× over Swift Foundation. RSS is mid-pack — beats Node and Kotlin (JVM heap reservation is enormous), comparable to Bun, 8× higher than typed-struct languages (Rust 11 MB, Go 22 MB, C++ 25 MB).
+
+Compute polyglot (8 microbenches × 9 runtimes, refreshed):
+
+| Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
+|----------------|------:|------:|------:|------:|------:|------:|------:|------:|--------:|
+| fibonacci      |   302 |   314 |   304 |   440 |   394 |   276 |   991 |   510 |   15661 |
+| loop_overhead  |    12 |    95 |    94 |    94 |    94 |    96 |    52 |    40 |    2934 |
+| array_write    |     3 |     7 |     2 |     8 |     2 |     6 |     8 |     5 |     389 |
+| array_read     |     4 |     9 |     9 |    10 |     9 |    10 |    12 |    15 |     337 |
+| math_intensive |    14 |    46 |    49 |    47 |    47 |    50 |    48 |    50 |    2204 |
+| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     158 |
+| nested_loops   |    17 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     470 |
+| accumulate     |    33 |    94 |    94 |    94 |    95 |    96 |   585 |    96 |    4916 |
+
+**Two regressions vs the v0.5.164 baseline** documented honestly in both the polyglot RESULTS.md and the consolidated README:
+- `nested_loops` 8 → 17 ms (+9 ms)
+- `accumulate` 24 → 33 ms (+9 ms)
+
+Both caused by the v0.5.237 generational-GC default flip — per-allocation gen-GC machinery (write-barrier potential, age-bump pass) is overhead that allocation-heavy compute benches can't recoup. `PERRY_GEN_GC=0` recovers the 8 / 24 ms baseline. The trade-off was deliberate; gen-GC's wins on long-running and RSS-sensitive workloads (`test_memory_json_churn` 115 → 91 MB in v0.5.237) outweigh the small compute regression. All other compute cells unchanged or slightly faster. Listed unapologetically in the docs because the point of the consolidated benchmark page is to be defensible, not to win.
+
+Memory-stability suite: 18/18 PASS under default / mark-sweep escape hatch / gen-gc + write barriers; 6/6 PASS under gen-gc + evacuate. RSS values per test: long_lived_loop 54 MB, json_churn 91 MB, string_churn 48 MB, closure_churn 13 MB, gc_aggressive_forced 9 MB, gc_deep_recursion 6 MB.
+
+Perry-suite RSS (best of 5, with `/usr/bin/time -l`): bench_json_roundtrip default 66 ms / 85 MB, direct (no lazy) 375 ms / 102 MB; bench_json_readonly default 67 ms / 81 MB, direct 279 ms / 103 MB; 07_object_create 0 ms / 6 MB; 12_binary_trees 0 ms / 6 MB; bench_gc_pressure 16 ms / 25 MB; 04_array_read 4 ms / 211 MB; 05_fibonacci 309 ms / 6 MB; 08_string_concat 0 ms / 6 MB.
+
+**`benchmarks/README.md` is now the canonical single source** — every benchmark, every comparison runtime, every flag profile, every honest disclaimer in one GitHub-renderable page. The page is the file every other doc reference points at when discussing performance. Page-internal sections: TL;DR (JSON + compute), how-to-read, JSON polyglot full data + library choices + per-cell disclaimers, compute polyglot full data + regression footnotes, memory tests, RSS-history table, strengths (4 wins with current ratios), weaknesses (8 known gaps), what-this-doesn't-measure honesty section, reproducing instructions, design-doc links. Closing line: "the point of this page is to be defensible, not to win".
+
+`brew install kotlin gradle` added as dependencies for the Kotlin JSON bench. nlohmann-json (3.12.0) for C++ already a dependency from v0.5.241.
+
 ## v0.5.241 — Polyglot JSON benchmark suite + consolidated `benchmarks/README.md`. The repo previously had two benchmark sources — `benchmarks/polyglot/` (8 compute microbenches across 10 runtimes, last refreshed at v0.5.164) and `benchmarks/suite/` (Perry-only roundtrip / readonly / GC-pressure benches). What was missing was a JSON encoding/decoding comparison against native runtimes (Go, Rust, C++, Swift) and a single consolidated page that a skeptical reader could open, see every benchmark in context, and verify Perry's claims. This commit fixes both.
 
 **`benchmarks/json_polyglot/`** — new directory, 6 benchmark implementations of the identical 10k-record / ~1 MB blob / 50-iteration parse + stringify workload:

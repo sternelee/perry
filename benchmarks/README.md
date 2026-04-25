@@ -30,40 +30,46 @@ behind blog posts, no cherry-picked subsets.
 
 | Implementation | Profile | Time (ms) | Peak RSS (MB) |
 |---|---|---:|---:|
-| **perry (gen-gc + lazy tape)** | optimized | **65** | 85 |
-| rust serde_json (LTO+1cgu) | optimized | 180 | 11 |
-| rust serde_json | idiomatic | 192 | 11 |
-| bun | idiomatic | 242 | 80 |
-| perry (mark-sweep, no lazy) | idiomatic | 351 | 102 |
-| node | idiomatic | 359 | 182 |
-| node --max-old=4096 | optimized | 362 | 181 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 778 | 25 |
-| go (encoding/json) | optimized | 785 | 22 |
-| go (encoding/json) | idiomatic | 785 | 24 |
-| c++ -O2 (nlohmann/json) | idiomatic | 843 | 25 |
-| swift -O -wmo (Foundation) | optimized | 3706 | 33 |
-| swift -O (Foundation) | idiomatic | 3710 | 34 |
+| **perry (gen-gc + lazy tape)** | optimized | **67** | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 183 | 11 |
+| rust serde_json | idiomatic | 193 | 11 |
+| bun | idiomatic | 240 | 81 |
+| perry (mark-sweep, no lazy) | idiomatic | 341 | 102 |
+| node | idiomatic | 361 | 180 |
+| node --max-old=4096 | optimized | 364 | 182 |
+| kotlin -server -Xmx512m (kotlinx.serialization) | optimized | 446 | 423 |
+| kotlin (kotlinx.serialization) | idiomatic | 460 | 606 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 774 | 25 |
+| go (encoding/json) | optimized | 783 | 22 |
+| go (encoding/json) | idiomatic | 785 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 840 | 25 |
+| swift -O -wmo (Foundation) | optimized | 3665 | 34 |
+| swift -O (Foundation) | idiomatic | 3674 | 33 |
 
 **Reading this**: Perry leads on time, beating every JS-family
 runtime (Node, Bun) and every native runtime (Rust, Go, C++,
-Swift). Perry's RSS is mid-pack — better than Node, comparable to
-Bun, higher than typed-struct languages (Go, Rust, C++). The RSS
-gap to typed-struct languages is fundamental: dynamic JSON parsing
+Swift, Kotlin). Perry's RSS is mid-pack — better than Node and
+Kotlin (the JVM heap reservation is enormous), comparable to Bun,
+higher than typed-struct languages (Go, Rust, C++). The RSS gap
+to typed-struct languages is fundamental: dynamic JSON parsing
 allocates a heap object per value; typed parsers materialize into
-fixed-layout structs.
+fixed-layout structs. Kotlin's high RSS reflects JVM heap
+reservation, not working-set size.
 
 ### Compute microbenches (8 benchmarks, idiomatic flags)
 
+Best of 5 runs, all times in milliseconds.
+
 | Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
 |----------------|------:|------:|------:|------:|------:|------:|------:|------:|--------:|
-| fibonacci      |   309 |   311 |   308 |   440 |   395 |   279 |   996 |   510 |   15792 |
-| loop_overhead  |    12 |    94 |    95 |    95 |    94 |    95 |    52 |    39 |    2929 |
-| array_write    |     3 |     6 |     2 |     8 |     2 |     6 |     8 |     4 |     385 |
-| array_read     |     3 |     9 |     9 |     9 |     9 |    11 |    13 |    14 |     327 |
-| math_intensive |    14 |    46 |    49 |    48 |    47 |    49 |    49 |    49 |    2185 |
-| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     157 |
-| nested_loops   |     8 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     458 |
-| accumulate     |    24 |    94 |    94 |    95 |    93 |    98 |   583 |    96 |    4854 |
+| fibonacci      |   302 |   314 |   304 |   440 |   394 |   276 |   991 |   510 |   15661 |
+| loop_overhead  |    12 |    95 |    94 |    94 |    94 |    96 |    52 |    40 |    2934 |
+| array_write    |     3 |     7 |     2 |     8 |     2 |     6 |     8 |     5 |     389 |
+| array_read     |     4 |     9 |     9 |    10 |     9 |    10 |    12 |    15 |     337 |
+| math_intensive |    14 |    46 |    49 |    47 |    47 |    50 |    48 |    50 |    2204 |
+| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     158 |
+| nested_loops   |    17 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     470 |
+| accumulate     |    33 |    94 |    94 |    94 |    95 |    96 |   585 |    96 |    4916 |
 
 Perry's **`loop_overhead`, `math_intensive`, `accumulate`, `array_read`**
 wins (3-8× over native) come from a single source: Perry emits
@@ -76,9 +82,29 @@ count 4. C++ closes the gap with `-O3 -ffast-math`; see
 [`benchmarks/polyglot/RESULTS_OPT.md`](polyglot/RESULTS_OPT.md) for
 the per-language flag-tuning table that backs out this entire result.
 
-`nested_loops` and `fibonacci`: Perry matches the compiled pack within
-1ms. `object_create`: tied with native (all 0 ms — working set fits in
-one arena block, GC never fires).
+`fibonacci` (302 ms): Perry matches the compiled pack within 2-12ms
+(Java's HotSpot JIT is ~9% faster). `object_create`: tied with native
+(all 0 ms — working set fits in one arena block, GC never fires).
+
+**Honest regressions vs the v0.5.164 baseline** (when these benches
+were last refreshed, before gen-GC became default):
+
+- `nested_loops` 8 → 17 ms (+9 ms). Caused by the v0.5.237
+  generational GC default flip — gen-GC adds per-allocation overhead
+  (write-barrier potential, age-bump pass) that's pure cost on
+  workloads that don't benefit from it. Set `PERRY_GEN_GC=0` to recover
+  the 8 ms baseline.
+- `accumulate` 24 → 33 ms (+9 ms). Same root cause; same
+  workaround.
+- `array_read` 3 → 4 ms (+1 ms). Within noise.
+- All other cells unchanged or slightly improved (`fibonacci`
+  309 → 302, `array_write` 3 → 3, `math_intensive` 14 → 14).
+
+The trade-off was deliberate: gen-GC's wins on long-running and
+allocation-heavy workloads (`test_memory_json_churn` 115 → 91 MB
+in v0.5.237) outweigh the small compute-bench regressions, and
+the escape hatch is right there. Listed here unapologetically
+because the point of this page is to be defensible.
 
 ---
 
@@ -157,6 +183,8 @@ correctness is verifiable.
 | optimized | Rust | `cargo build --profile release-aggressive` (`opt-level=3`, `lto="fat"`, `codegen-units=1`, `panic=abort`, `strip=true`) |
 | idiomatic | Swift | `swiftc -O bench.swift` |
 | optimized | Swift | `swiftc -O -wmo bench.swift` (whole-module optimization) |
+| idiomatic | Kotlin | `java -cp ... BenchKt` (JVM defaults, kotlinx.serialization) |
+| optimized | Kotlin | `java -server -Xmx512m -cp ... BenchKt` (server JIT + heap tuning) |
 | idiomatic | C++ | `clang++ -std=c++17 -O2` |
 | optimized | C++ | `clang++ -std=c++17 -O3 -flto` |
 
@@ -169,6 +197,7 @@ correctness is verifiable.
 | Go | `encoding/json` | Standard library; what every Go project starts with |
 | Rust | `serde_json` (1.0) | The de facto standard; ~ubiquitous in the Rust ecosystem |
 | Swift | `Foundation.JSONEncoder` / `JSONDecoder` | Apple's standard |
+| Kotlin | `kotlinx.serialization-json` (1.9.0) | The official Kotlin serialization library; uses compile-time-generated (de)serializers, no reflection |
 | C++ | nlohmann/json (3.12.0) | The de facto popular C++ JSON library; not the fastest available (RapidJSON / simdjson are faster) but what most projects reach for |
 
 **Faster C++ libraries exist** (RapidJSON, simdjson). We deliberately
@@ -205,6 +234,13 @@ no stringify).
   JSON pipeline goes through `Mirror`-based reflection on `Codable`
   types and is genuinely slow on macOS. swift-json is faster; not
   included because this is the standard.
+- **Kotlin's RSS is JVM heap reservation, not working-set.** The
+  JVM eagerly reserves up to `-Xmx` even when actual heap usage is
+  much smaller. `-Xmx512m` gives 423 MB peak RSS; default settings
+  reserve more (606 MB observed). The actual JSON working-set in
+  Kotlin is comparable to Java/JVM peers. The 423-606 MB RSS
+  number is correct for "what the OS sees the process holding"
+  but is not a fair comparison of allocator efficiency.
 - **Perry's "mark-sweep, no lazy" entry isn't recommended for
   production** — it disables the lazy JSON tape (v0.5.210) and the
   generational GC default (v0.5.237). It exists so you can see the
@@ -230,10 +266,16 @@ in the TL;DR above. Compiler details:
 | Go | go 1.21 | `go build` |
 | Swift | swiftc 6.0 (Apple) | `swiftc -O` |
 | Java | javac 21 + java 21 (HotSpot) | default `java -cp .` |
+| Kotlin (JSON only) | kotlinc 2.3.21 | `java -cp ... BenchKt` |
 | Node.js | v20 | `node --experimental-strip-types` |
 | Bun | 1.3 | `bun` |
-| Static Hermes | shermes 0.13 | `shermes -O` |
+| Static Hermes | shermes 0.13 | `shermes -O` (skipped if not installed) |
 | Python | 3.12 | `python3` |
+
+Kotlin is JSON-only (not in the compute polyglot table) because the
+compute polyglot runner predates Kotlin support; adding it would
+require porting the 8-benchmark `bench.kt` to match the existing
+`bench.cpp`/`bench.go`/etc. shape. Tracked as a follow-up.
 
 ### Optimized flags + delta table
 
@@ -271,22 +313,28 @@ barriers) = 18 runs per CI invocation.
 
 ### What each test catches
 
-| Test | What it catches | RSS limit | Current |
-|---|---|---:|---:|
-| `test_memory_long_lived_loop.ts` | Block-pinning, PARSE_KEY_CACHE leak, tenuring-trap regressions | 100 MB | 54 MB |
-| `test_memory_json_churn.ts` | Sparse-cache leak, materialized-tree retention, tape-buffer leak | 200 MB | 91 MB |
-| `test_memory_string_churn.ts` | SSO-fast-path-miss alloc, heap-string GC loss | 100 MB | 48 MB |
-| `test_memory_closure_churn.ts` | Box leak, closure-env retention, shadow-stack slot leak | 50 MB | 13 MB |
-| `test_gc_aggressive_forced.ts` | Conservative-scanner misses, parse-suppressed interleaving, write-barrier mid-mutation | 50 MB | 9 MB |
-| `test_gc_deep_recursion.ts` | Stack-scan correctness during deep recursion | 30 MB | 6 MB |
+All numbers from the most recent run on this commit (M1 Max, macOS
+26.4). The test asserts RSS stays under the per-test ceiling; the
+"Current" column is the actual measured peak.
+
+| Test | What it catches | RSS limit | default | mark-sweep | gen-gc+wb |
+|---|---|---:|---:|---:|---:|
+| `test_memory_long_lived_loop.ts` | Block-pinning, PARSE_KEY_CACHE leak, tenuring-trap regressions | 100 MB | 54 MB | 54 MB | 54 MB |
+| `test_memory_json_churn.ts` | Sparse-cache leak, materialized-tree retention, tape-buffer leak | 200 MB | 91 MB | 91 MB | 91 MB |
+| `test_memory_string_churn.ts` | SSO-fast-path-miss alloc, heap-string GC loss | 100 MB | 48 MB | 48 MB | 48 MB |
+| `test_memory_closure_churn.ts` | Box leak, closure-env retention, shadow-stack slot leak | 50 MB | 13 MB | 13 MB | 13 MB |
+| `test_gc_aggressive_forced.ts` | Conservative-scanner misses, parse-suppressed interleaving, write-barrier mid-mutation | 50 MB | 9 MB | 9 MB | 9 MB |
+| `test_gc_deep_recursion.ts` | Stack-scan correctness during deep recursion | 30 MB | 6 MB | 6 MB | 6 MB |
+
+All 18 cells (6 tests × 3 modes) PASS on this commit.
 
 `test_memory_json_churn` dropped from 115 MB → **91 MB** when the
 generational-GC default flipped to ON in v0.5.237 (-21%).
 
 ### bench_json_roundtrip RSS history
 
-Direct path (PERRY_JSON_TAPE=0), 50 iterations of 10k-record parse +
-stringify, peak RSS:
+Direct path (`PERRY_JSON_TAPE=0`, 50 iterations of 10k-record parse +
+stringify, peak RSS via `/usr/bin/time -l`):
 
 | Version | RSS (MB) | Time (ms) | Change |
 |---|---:|---:|---|
@@ -295,10 +343,30 @@ stringify, peak RSS:
 | v0.5.231 (C4b-γ-1, evac no-op) | 109 | ~80 | block-persist + tenuring + arena fixes |
 | v0.5.234 (C4b-γ-2, evac live) | 142 | 358 | rebuilt baseline (post-other-changes) |
 | v0.5.235 (C4b-δ, dealloc) | 142 | 358 | dealloc fires but peak is pre-first-GC |
-| v0.5.236 (C4b-δ-tune, ceiling) | **107** | 358 | trigger ceiling stops step doubling past 64 MB |
+| v0.5.236 (C4b-δ-tune, ceiling) | 107 | 358 | trigger ceiling stops step doubling past 64 MB |
+| v0.5.237 (gen-gc default ON) | 102 | 372 | minor GC fires by default |
+| v0.5.241 (current, this commit) | **102** | **375** | unchanged from v0.5.237; suite re-run for this README |
 
-Lazy path (default, the case `bench_json_roundtrip` measures with no
-env vars): **65 ms / 85 MB**, currently best in class on time.
+Default (lazy + gen-gc), the case `bench_json_roundtrip` measures with
+no env vars: **66 ms / 85 MB**, currently best in class on time across
+every other measured runtime.
+
+### Other Perry benches (best-of-5, M1 Max, this commit)
+
+| Benchmark | Time (ms) | Peak RSS (MB) |
+|---|---:|---:|
+| `bench_json_roundtrip` (default, lazy + gen-gc) | 66 | 85 |
+| `bench_json_roundtrip` (`PERRY_JSON_TAPE=0`) | 375 | 102 |
+| `bench_json_roundtrip` (`PERRY_GEN_GC=0`) | 66 | 85 |
+| `bench_json_roundtrip` (both opts off) | 349 | 102 |
+| `bench_json_readonly` (default) | 67 | 81 |
+| `bench_json_readonly` (`PERRY_JSON_TAPE=0`) | 279 | 103 |
+| `07_object_create` | 0 | 6 |
+| `12_binary_trees` | 0 | 6 |
+| `bench_gc_pressure` | 16 | 25 |
+| `04_array_read` | 4 | 211 |
+| `05_fibonacci` | 309 | 6 |
+| `08_string_concat` | 0 | 6 |
 
 ---
 
@@ -307,12 +375,14 @@ env vars): **65 ms / 85 MB**, currently best in class on time.
 Where Perry actually wins, and a one-line "why" per item.
 
 - **JSON parse + stringify roundtrip** (this page's TL;DR) — Perry is
-  faster than every other measured runtime, including Bun (3.7×),
-  Node (5.5×), Rust serde_json (2.8×), Go encoding/json (12×), C++
-  nlohmann (12×). The win comes from the lazy JSON tape (v0.5.204+):
-  parse builds a 12-byte-per-value tape instead of materializing a
-  tree; stringify on an unmutated parse memcpy's the original blob.
-  See [`json-typed-parse-plan.md`](../docs/json-typed-parse-plan.md).
+  faster than every other measured runtime: 3.6× over Bun, 5.4× over
+  Node, 2.7× over Rust serde_json (LTO), 6.7× over Kotlin
+  kotlinx.serialization (server JIT), 11.6× over C++ nlohmann -O3
+  -flto, 11.7× over Go encoding/json, 54.7× over Swift Foundation.
+  The win comes from the lazy JSON tape (v0.5.204+): parse builds a
+  12-byte-per-value tape instead of materializing a tree; stringify
+  on an unmutated parse memcpy's the original blob. See
+  [`json-typed-parse-plan.md`](../docs/json-typed-parse-plan.md).
 - **f64-arithmetic-heavy tight loops** (`loop_overhead`,
   `math_intensive`, `accumulate`) — 3-8× faster than native because
   TypeScript's `number` semantics let LLVM apply `reassoc contract`

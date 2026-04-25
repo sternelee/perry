@@ -8,16 +8,18 @@ Each language listed twice — *idiomatic* (default release-mode flags most proj
 
 | Implementation | Profile | Time (ms) | Peak RSS (MB) |
 |---|---|---:|---:|
-| perry (gen-gc + lazy tape) | optimized | 65 | 85 |
-| rust serde_json (LTO+1cgu) | optimized | 180 | 11 |
-| rust serde_json | idiomatic | 192 | 11 |
-| bun (default) | idiomatic | 242 | 80 |
-| perry (mark-sweep, no lazy) | idiomatic | 351 | 102 |
-| node (default) | idiomatic | 359 | 182 |
-| node --max-old=4096 | optimized | 362 | 181 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 778 | 25 |
-| go -ldflags="-s -w" -trimpath | optimized | 785 | 22 |
-| go (encoding/json) | idiomatic | 785 | 24 |
-| c++ -O2 (nlohmann/json) | idiomatic | 843 | 25 |
-| swift -O -wmo (Foundation) | optimized | 3706 | 33 |
-| swift -O (Foundation) | idiomatic | 3710 | 34 |
+| perry (gen-gc + lazy tape) | optimized | 67 | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 183 | 11 |
+| rust serde_json | idiomatic | 193 | 11 |
+| bun (default) | idiomatic | 240 | 81 |
+| perry (mark-sweep, no lazy) | idiomatic | 341 | 102 |
+| node (default) | idiomatic | 361 | 180 |
+| node --max-old=4096 | optimized | 364 | 182 |
+| kotlin -server -Xmx512m | optimized | 446 | 423 |
+| kotlin (kotlinx.serialization) | idiomatic | 460 | 606 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 774 | 25 |
+| go -ldflags="-s -w" -trimpath | optimized | 783 | 22 |
+| go (encoding/json) | idiomatic | 785 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 840 | 25 |
+| swift -O -wmo (Foundation) | optimized | 3665 | 34 |
+| swift -O (Foundation) | idiomatic | 3674 | 33 |

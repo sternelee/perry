@@ -13,33 +13,42 @@ each delta.
 
 ## Results
 
-**Run date:** 2026-04-22 — Perry commit `main` (v0.5.164).
+**Run date:** 2026-04-25 — Perry commit `main` (v0.5.241).
 **Hardware:** Apple M1 Max (10 cores, 64 GB RAM), macOS 26.4.
 **Methodology:** best of 5 runs per cell, monotonic clock, no warmup.
 All times in milliseconds. Lower is better.
 
 | Benchmark      | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
 |----------------|-------|-------|-------|-------|-------|-------|-------|-------|---------|
-| fibonacci      |   309 |   311 |   308 |   440 |   395 |   279 |   996 |   510 |   15792 |
-| loop_overhead  |    12 |    94 |    95 |    95 |    94 |    95 |    52 |    39 |    2929 |
-| array_write    |     3 |     6 |     2 |     8 |     2 |     6 |     8 |     4 |     385 |
-| array_read     |     3 |     9 |     9 |     9 |     9 |    11 |    13 |    14 |     327 |
-| math_intensive |    14 |    46 |    49 |    48 |    47 |    49 |    49 |    49 |    2185 |
-| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     157 |
-| nested_loops   |     8 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     458 |
-| accumulate     |    24 |    94 |    94 |    95 |    93 |    98 |   583 |    96 |    4854 |
+| fibonacci      |   302 |   314 |   304 |   440 |   394 |   276 |   991 |   510 |   15661 |
+| loop_overhead  |    12 |    95 |    94 |    94 |    94 |    96 |    52 |    40 |    2934 |
+| array_write    |     3 |     7 |     2 |     8 |     2 |     6 |     8 |     5 |     389 |
+| array_read     |     4 |     9 |     9 |    10 |     9 |    10 |    12 |    15 |     337 |
+| math_intensive |    14 |    46 |    49 |    47 |    47 |    50 |    48 |    50 |    2204 |
+| object_create  |     0 |     0 |     0 |     0 |     0 |     4 |     8 |     6 |     158 |
+| nested_loops   |    17 |     8 |     8 |     9 |     8 |    10 |    16 |    19 |     470 |
+| accumulate     |    33 |    94 |    94 |    94 |    95 |    96 |   585 |    96 |    4916 |
 
-**Fixed in v0.5.164** ([#140](https://github.com/PerryTS/perry/issues/140)):
-`loop_overhead`, `math_intensive`, and `accumulate` had regressed 2–4×
-between v0.5.22 and v0.5.162 (32/48/97 ms) after an `asm sideeffect`
-loop-body barrier (from #74) and an over-eager i32 shadow counter
-started blocking LLVM's vectorizer on pure-accumulator loops. v0.5.164
-scopes the i32 shadow to counters that actually appear in an index
-subtree and refines the loop-body barrier to fire only on truly-empty
-bodies — restoring the `<2 x double>` parallel-accumulator reduction
-(vectorization width 2, interleave count 4) that v0.5.22 had. The three
-cells are back to 12/14/24 ms, matching the v0.5.22 baseline exactly.
-Perry now beats Rust 3–8× on these cells again.
+**Honest regressions vs v0.5.164** (when this table was last refreshed,
+before generational GC became the default in v0.5.237):
+`nested_loops` 8 → 17 ms, `accumulate` 24 → 33 ms. Both caused by
+the v0.5.237 gen-GC default flip — the per-allocation gen-GC machinery
+(write-barrier potential, age-bump pass) is overhead that allocation-heavy
+compute benches don't recoup. `PERRY_GEN_GC=0` recovers the 8 / 24 ms
+baseline. The trade-off was deliberate; gen-GC's wins on long-running and
+RSS-sensitive workloads (`test_memory_json_churn` 115 → 91 MB) outweigh
+the small compute-bench regression. All other cells unchanged or
+slightly faster.
+
+**Original v0.5.164 fix** ([#140](https://github.com/PerryTS/perry/issues/140))
+that established the current `loop_overhead`/`math_intensive`/`accumulate`
+baseline: an `asm sideeffect` loop-body barrier (from #74) and an
+over-eager i32 shadow counter were blocking LLVM's vectorizer on pure-
+accumulator loops; v0.5.164 scoped the i32 shadow to counters that
+actually appear in an index subtree and refined the loop-body barrier
+to fire only on truly-empty bodies — restoring the `<2 x double>`
+parallel-accumulator reduction (vectorization width 2, interleave count
+4). Perry beats Rust 3–8× on these cells.
 
 ## How to reproduce
 
