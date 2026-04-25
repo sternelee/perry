@@ -919,7 +919,15 @@ pub fn gc_collect_minor() -> u64 {
     let valid_ptrs = build_valid_pointer_set();
 
     // === MARK PHASE (minor) ===
+    // Order matters: conservative scan runs FIRST so its discovered
+    // objects can be captured into CONS_PINNED before precise
+    // scanners add to the marked set. Pinning the conservative set
+    // is the C4b safety lever — evacuation excludes pinned objects
+    // because we can't safely rewrite the conservatively-found
+    // pointer words (they might be false positives in non-pointer
+    // memory).
     mark_stack_roots(&valid_ptrs);
+    pin_currently_marked_as_conservative();
     mark_global_roots(&valid_ptrs);
     mark_registered_roots(&valid_ptrs);
     mark_remembered_set_roots(&valid_ptrs);
@@ -975,11 +983,25 @@ pub fn gc_collect_minor() -> u64 {
         }
     });
 
+    // === EVACUATION PASS (Phase C4b-β, opt-in) ===
+    // Copy non-pinned tenured nursery objects into OLD_ARENA and
+    // install forwarding pointers in the original nursery slots.
+    // Reference rewriting (C4b-γ) is NOT yet wired — without it,
+    // any reference to an evacuated object reads garbage. So
+    // gate behind `PERRY_GEN_GC_EVACUATE=1` for now; default OFF
+    // until C4b-γ lands.
+    if gen_gc_evacuate_enabled() {
+        evacuate_tenured_nursery_objects();
+    }
+
     // === SWEEP PHASE ===
     let freed_bytes = sweep();
 
     // RS clear — see gc_collect_inner for the rationale.
     REMEMBERED_SET.with(|s| s.borrow_mut().clear());
+    // Conservative-pinning is per-cycle; clear so next cycle
+    // re-discovers fresh.
+    CONS_PINNED.with(|s| s.borrow_mut().clear());
 
     #[cfg(target_env = "gnu")]
     unsafe { libc::malloc_trim(0); }
@@ -1002,6 +1024,24 @@ pub fn gen_gc_enabled() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| matches!(
         std::env::var("PERRY_GEN_GC").as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    ))
+}
+
+/// Gen-GC Phase C4b: `PERRY_GEN_GC_EVACUATE=1` enables the
+/// experimental copying evacuation that physically relocates
+/// tenured non-pinned nursery objects into OLD_ARENA. Default OFF
+/// — opt-in for testing until C4b-γ (reference rewriting) lands
+/// and the evacuation is correctness-complete on all reference
+/// sites. Without C4b-γ, evacuated objects' nursery slots hold
+/// forwarding pointers but references to those slots still point
+/// at the old (forwarded) location — reads through those refs
+/// get garbage.
+pub fn gen_gc_evacuate_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| matches!(
+        std::env::var("PERRY_GEN_GC_EVACUATE").as_deref(),
         Ok("1") | Ok("on") | Ok("true")
     ))
 }
@@ -2350,6 +2390,131 @@ thread_local! {
     /// by minor GC after the remembered-set scan (Phase C3).
     pub(crate) static REMEMBERED_SET: std::cell::RefCell<std::collections::HashSet<usize>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
+
+    /// Gen-GC Phase C4b: set of GcHeader addresses pinned this
+    /// collection cycle because they may be referenced by the
+    /// conservative C-stack scan. Conservative scan finds candidate
+    /// pointers by bit-pattern matching memory words; we cannot
+    /// safely rewrite those words after evacuation because they
+    /// might not actually be pointers (false positives). Therefore
+    /// any object discovered conservatively is excluded from the
+    /// evacuation candidate set.
+    ///
+    /// Populated by `pin_currently_marked_as_conservative` after
+    /// `mark_stack_roots` runs in `gc_collect_minor`. Cleared at
+    /// the end of every collection so the next cycle starts fresh.
+    pub(crate) static CONS_PINNED: std::cell::RefCell<std::collections::HashSet<usize>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Gen-GC Phase C4b: walk the current arena+malloc marked set and
+/// record every header address as conservatively pinned. Called
+/// AFTER `mark_stack_roots` (the conservative scan) and BEFORE
+/// `mark_global_roots` / `mark_registered_roots` / RS scan — so
+/// only the conservative-scan results are captured. Subsequently-
+/// marked objects (precise sources) get marked but stay out of
+/// `CONS_PINNED`, making them eligible for evacuation if they
+/// also tenure.
+///
+/// Called only from the minor-GC path. The full GC path
+/// (`gc_collect_inner`) doesn't evacuate so doesn't need pinning.
+fn pin_currently_marked_as_conservative() {
+    CONS_PINNED.with(|s| {
+        let mut pinned = s.borrow_mut();
+        crate::arena::arena_walk_objects(|header_ptr| {
+            let header = header_ptr as *mut GcHeader;
+            unsafe {
+                if (*header).gc_flags & GC_FLAG_MARKED != 0 {
+                    pinned.insert(header as usize);
+                }
+            }
+        });
+        MALLOC_STATE.with(|m| {
+            let m = m.borrow();
+            for &header in m.objects.iter() {
+                unsafe {
+                    if (*header).gc_flags & GC_FLAG_MARKED != 0 {
+                        pinned.insert(header as usize);
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Gen-GC Phase C4b-β: walk arena nursery objects and copy
+/// non-pinned tenured ones into OLD_ARENA. Install a forwarding
+/// pointer at the original nursery slot's user-payload start.
+/// Returns the count of evacuated objects (diagnostic only).
+///
+/// Candidate filter: the object must be
+/// - in the nursery arena (not OLD, not LONGLIVED)
+/// - MARKED (alive this cycle)
+/// - TENURED (survived ≥2 minor GCs)
+/// - NOT in CONS_PINNED (no conservative root reaches it)
+/// - NOT already FORWARDED (idempotent; duplicate evacuation is
+///   safe-skipped)
+///
+/// **Reference rewriting is NOT done here** — that's C4b-γ.
+/// Without rewriting, the only way evacuated objects stay
+/// reachable is via the forwarding pointer in their old slot,
+/// which compiled code doesn't yet consult. So this function is
+/// gated `PERRY_GEN_GC_EVACUATE=1` and is currently CORRECTNESS-
+/// UNSAFE if turned on alone — used only for testing the data-
+/// structure layer.
+fn evacuate_tenured_nursery_objects() -> usize {
+    let mut evacuated = 0usize;
+    crate::arena::arena_walk_objects(|header_ptr| {
+        let header = header_ptr as *mut GcHeader;
+        unsafe {
+            let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE);
+            // Skip if not in nursery (LONGLIVED + OLD have their
+            // own arenas).
+            if crate::arena::pointer_in_old_gen(user_ptr as usize) {
+                return;
+            }
+            let flags = (*header).gc_flags;
+            // Already evacuated (shouldn't happen — caller's filter
+            // should prevent — but defend against duplicate calls).
+            if flags & GC_FLAG_FORWARDED != 0 { return; }
+            // Must be alive AND tenured.
+            if flags & GC_FLAG_MARKED == 0 { return; }
+            if flags & GC_FLAG_TENURED == 0 { return; }
+            // Conservative-pinning blocks evacuation.
+            if is_conservatively_pinned(header) { return; }
+            // Allocate the new home in OLD_ARENA. Same size +
+            // alignment as the original; same obj_type.
+            let total = (*header).size as usize;
+            let payload = total - GC_HEADER_SIZE;
+            let new_user = crate::arena::arena_alloc_gc_old(
+                payload,
+                8,
+                (*header).obj_type,
+            );
+            // Copy the user payload bytes verbatim. The new
+            // GcHeader was set up by arena_alloc_gc_old; we don't
+            // copy the OLD header (its flags / size match the
+            // new alloc by construction).
+            std::ptr::copy_nonoverlapping(user_ptr, new_user, payload);
+            // Install forwarding pointer at the OLD location.
+            set_forwarding_address(header, new_user);
+            evacuated += 1;
+        }
+    });
+    evacuated
+}
+
+/// Gen-GC Phase C4b: is `header` pinned this cycle (cannot be
+/// evacuated)? Tested by the evacuation candidate filter in
+/// `gc_collect_minor` after the age-bump pass.
+#[inline]
+pub fn is_conservatively_pinned(header: *const GcHeader) -> bool {
+    CONS_PINNED.with(|s| s.borrow().contains(&(header as usize)))
+}
+
+/// Test-only diagnostic: number of objects pinned this cycle.
+pub fn cons_pinned_count() -> usize {
+    CONS_PINNED.with(|s| s.borrow().len())
 }
 
 /// Gen-GC Phase C1: the write barrier. Called by codegen-emitted
@@ -3069,6 +3234,133 @@ mod tests {
             let raw = nursery_user as *const *mut u8;
             assert_eq!(*raw, target);
         }
+    }
+
+    #[test]
+    fn test_cons_pinned_cleared_after_minor_gc() {
+        // Allocate something to give the GC sweep work to do.
+        let _ = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        // Pre-populate CONS_PINNED to simulate a prior GC's leftover.
+        CONS_PINNED.with(|s| {
+            s.borrow_mut().insert(0xDEAD_BEEF);
+        });
+        assert!(cons_pinned_count() >= 1);
+        let _ = gc_collect_minor();
+        assert_eq!(cons_pinned_count(), 0,
+            "minor GC must clear CONS_PINNED after collection");
+    }
+
+    #[test]
+    fn test_pin_currently_marked_captures_marked_objects() {
+        // Manually mark an arena object, then run the pinning
+        // scan. The pinned set should contain the marked header.
+        CONS_PINNED.with(|s| s.borrow_mut().clear());
+        let user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let header = unsafe { header_from_user_ptr(user) as *mut GcHeader };
+        unsafe {
+            (*header).gc_flags |= GC_FLAG_MARKED;
+        }
+        pin_currently_marked_as_conservative();
+        assert!(is_conservatively_pinned(header),
+            "marked header should land in CONS_PINNED");
+        // Cleanup for test isolation.
+        unsafe { (*header).gc_flags &= !GC_FLAG_MARKED; }
+        CONS_PINNED.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn test_pin_currently_marked_skips_unmarked() {
+        CONS_PINNED.with(|s| s.borrow_mut().clear());
+        let user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let header = unsafe { header_from_user_ptr(user) as *const GcHeader };
+        // Ensure unmarked.
+        unsafe {
+            assert_eq!((*(header as *mut GcHeader)).gc_flags & GC_FLAG_MARKED, 0);
+        }
+        pin_currently_marked_as_conservative();
+        assert!(!is_conservatively_pinned(header),
+            "unmarked header should NOT land in CONS_PINNED");
+    }
+
+    #[test]
+    fn test_evacuate_tenured_skips_pinned() {
+        // An object that's MARKED + TENURED + CONS_PINNED must
+        // NOT be evacuated.
+        CONS_PINNED.with(|s| s.borrow_mut().clear());
+        let user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let header = unsafe { header_from_user_ptr(user) as *mut GcHeader };
+        unsafe {
+            (*header).gc_flags |= GC_FLAG_MARKED | GC_FLAG_TENURED;
+        }
+        // Pin it.
+        CONS_PINNED.with(|s| s.borrow_mut().insert(header as usize));
+        let n = evacuate_tenured_nursery_objects();
+        assert_eq!(n, 0, "pinned tenured object must not be evacuated");
+        unsafe {
+            assert_eq!((*header).gc_flags & GC_FLAG_FORWARDED, 0,
+                "FORWARDED flag must not be set on pinned object");
+        }
+        // Cleanup
+        unsafe { (*header).gc_flags &= !(GC_FLAG_MARKED | GC_FLAG_TENURED); }
+        CONS_PINNED.with(|s| s.borrow_mut().clear());
+    }
+
+    #[test]
+    fn test_evacuate_tenured_skips_unmarked() {
+        // TENURED but not MARKED → dead this cycle, sweep handles it.
+        // Evacuation must skip.
+        CONS_PINNED.with(|s| s.borrow_mut().clear());
+        let user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let header = unsafe { header_from_user_ptr(user) as *mut GcHeader };
+        unsafe {
+            (*header).gc_flags |= GC_FLAG_TENURED; // no MARK
+        }
+        let _n = evacuate_tenured_nursery_objects();
+        unsafe {
+            assert_eq!((*header).gc_flags & GC_FLAG_FORWARDED, 0,
+                "unmarked object must not be evacuated");
+        }
+        unsafe { (*header).gc_flags &= !GC_FLAG_TENURED; }
+    }
+
+    #[test]
+    fn test_evacuate_tenured_marks_forwarded_and_copies_payload() {
+        // The happy path: marked + tenured + not pinned → evacuated.
+        // Verify (a) GC_FLAG_FORWARDED set on nursery header,
+        // (b) forwarding_address points into OLD_ARENA,
+        // (c) payload bytes copied.
+        CONS_PINNED.with(|s| s.borrow_mut().clear());
+        let user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let header = unsafe { header_from_user_ptr(user) as *mut GcHeader };
+        // Write a sentinel pattern into the user payload so we can
+        // confirm it survives the copy.
+        unsafe {
+            let p = user as *mut u64;
+            *p = 0xCAFE_BABE_DEAD_BEEF;
+            *p.add(1) = 0x1234_5678_9ABC_DEF0;
+            (*header).gc_flags |= GC_FLAG_MARKED | GC_FLAG_TENURED;
+        }
+        let n = evacuate_tenured_nursery_objects();
+        assert_eq!(n, 1, "tenured non-pinned marked object must evacuate");
+        unsafe {
+            assert_ne!((*header).gc_flags & GC_FLAG_FORWARDED, 0);
+            let new_user = forwarding_address(header);
+            // Verify old_user points into nursery, new_user points into OLD.
+            assert!(crate::arena::pointer_in_old_gen(new_user as usize),
+                "forwarding address should point into OLD_ARENA");
+            assert!(!crate::arena::pointer_in_old_gen(user as usize),
+                "old (nursery) location should NOT be in OLD_ARENA");
+            // Verify payload was copied.
+            let new_p = new_user as *const u64;
+            // Note: payload starts at user_ptr offset 0, but the
+            // forwarding write at the OLD slot overwrites the first 8
+            // bytes with the new address. So the payload at the OLD
+            // location is partially clobbered now — we can only
+            // verify the NEW location's payload.
+            assert_eq!(*new_p, 0xCAFE_BABE_DEAD_BEEF);
+            assert_eq!(*new_p.add(1), 0x1234_5678_9ABC_DEF0);
+        }
+        unsafe { (*header).gc_flags &= !(GC_FLAG_MARKED | GC_FLAG_TENURED); }
     }
 
     #[test]
