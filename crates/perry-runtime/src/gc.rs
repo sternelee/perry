@@ -919,20 +919,58 @@ pub fn gc_collect_minor() -> u64 {
     let valid_ptrs = build_valid_pointer_set();
 
     // === MARK PHASE (minor) ===
-    // Order matters: conservative scan runs FIRST so its discovered
-    // objects can be captured into CONS_PINNED before precise
-    // scanners add to the marked set. Pinning the conservative set
-    // is the C4b safety lever — evacuation excludes pinned objects
-    // because we can't safely rewrite the conservatively-found
-    // pointer words (they might be false positives in non-pointer
-    // memory).
+    // Order matters for the C4b pinning policy. We pin from every
+    // root source whose internal data structure isn't yet wired
+    // for reference-rewriting (= sources that need their pointer
+    // slots updated post-evacuation; if we can't rewrite, we must
+    // not move):
+    //
+    //   1. Conservative C-stack scan (mark_stack_roots) — can't
+    //      rewrite stack words discovered by bit-pattern matching.
+    //   2. The 9 registered root scanners (mark_registered_roots) —
+    //      their callback API exposes only mutable-mark, not
+    //      mutable-rewrite. C4b-γ would refactor each scanner; for
+    //      now we pin their discoveries.
+    //
+    // Sources we DO plan to rewrite in a future C4b-γ pass and
+    // therefore do NOT pin from:
+    //
+    //   - Module globals (GLOBAL_ROOTS) — Vec<*mut JSValue>,
+    //     iterable mutable.
+    //   - Shadow stack — direct Vec<u64> we already walk in
+    //     `shadow_stack_root_scanner`.
+    //   - Marked-object heap fields (incl. RS-parent fields) —
+    //     trace_*-family walks them per obj_type; a parallel
+    //     rewrite_*-family will land in C4b-γ-2.
+    //
+    // The pinning calls fire BEFORE trace so they capture only
+    // root-direct discoveries, not transitive heap reachability —
+    // transitively-discovered objects came via heap fields that
+    // C4b-γ-2 will walk to rewrite.
     mark_stack_roots(&valid_ptrs);
     pin_currently_marked_as_conservative();
     mark_global_roots(&valid_ptrs);
     mark_registered_roots(&valid_ptrs);
+    // C4b-γ-1: pin again to capture scanner-discovered objects
+    // (objects that mark_registered_roots added since the prior
+    // pin call). The HashSet absorbs the redundant inserts of
+    // already-pinned conservative discoveries cheaply.
+    pin_currently_marked_as_conservative();
     mark_remembered_set_roots(&valid_ptrs);
     trace_marked_objects_minor(&valid_ptrs);
     mark_block_persisting_arena_objects(&valid_ptrs);
+    // C4b-γ-1 transitive pinning: until the heap-field rewrite
+    // pass (C4b-γ-2) lands, we pin every transitively-reachable
+    // object so evacuation has no eligible candidates. This makes
+    // `PERRY_GEN_GC_EVACUATE=1` a correctness-safe no-op rather
+    // than risking dangling refs through un-rewritten heap fields.
+    // Once C4b-γ-2 wires per-obj-type rewrite walkers, this pin
+    // call gets removed and evacuation candidates expand to all
+    // tenured non-root-pinned objects. The bench RSS win lands
+    // when that removal happens; today's commit is the safety
+    // valve that makes C4b shippable as opt-in without a known
+    // correctness gap.
+    pin_currently_marked_as_conservative();
 
     // === AGE-BUMP PASS (gen-GC Phase C4) ===
     // After tracing, any nursery object still carrying
