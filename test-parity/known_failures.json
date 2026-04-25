@@ -19,17 +19,17 @@
     "status": "bug",
     "reason": "Interface implementation edge cases"
   },
-  "test_edge_map_set": {
+  "test_cli_simulation": {
     "status": "bug",
-    "reason": "CWD-dependent: setA.forEach with closure-captured setB.has(val) returns false when compiled from project root, true when compiled from /tmp. Same file MD5, same flags, both paths produce binary with --no-cache. The simpler Set.has() regression (new Set([...]) without type args gave Type::Named instead of Generic) was fixed in v0.5.178 via refine_type_from_init + infer_type_from_expr. The remaining env-dependent flake tracked separately; only manifests at scale inside test-files/"
+    "reason": "fs.readFileSync return-type divergence: Node returns Buffer (`<Buffer 6c 69 6e 65 ...>`), Perry returns string (`line1\\nline2\\n...`). Pre-existing — appeared between parity runs 2026-04-24 and 2026-04-25, predates v0.5.250's known_failures cleanup (HIR-only commit). Likely surfaces from a recent codegen commit (c4739341 cross-module getters/setters, or 3ba1188e FFI manifest); root-cause separately."
   },
-  "test_edge_enums_const": {
-    "status": "bug",
-    "reason": "CWD-dependent flake (same family as test_edge_map_set): constMap[Direction.Up] returns NaN instead of 'going up' when compiled from test-files/ but correct from /tmp. Surfaces on the #157 typed-array branch; root cause is not the typed-array changes (reverting the IndexGet/IndexSet dispatch change still shows the path-dependent divergence). Tracked as a separate pre-existing compiler bug."
+  "test_edge_control_flow": {
+    "status": "flake",
+    "reason": "Intermittent: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Appeared alongside test_cli_simulation between the 2026-04-24 and 2026-04-25 runs. Possibly state-dependent on sibling tests or non-deterministic codegen path; investigate separately."
   },
-  "test_edge_iteration": {
-    "status": "bug",
-    "reason": "CWD-dependent flake (same family as test_edge_map_set / test_edge_enums_const). Same test passes from /tmp but diverges when compiled from test-files/ on the #157 branch. Tracked separately."
+  "test_edge_error_handling": {
+    "status": "flake",
+    "reason": "Same flake family as test_edge_control_flow: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Pre-existing, appeared between 2026-04-24 and 2026-04-25 parity runs."
   },
   "test_gap_async_advanced": {
     "status": "known_limitation",
