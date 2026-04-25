@@ -25,7 +25,7 @@ Apple does not expose unprivileged hard core pinning). Lower is better.
 |---------------------|------:|------:|------:|------:|------:|------:|------:|------:|--------:|
 | fibonacci           |   318 |   330 |   315 |   451 |   406 |   282 |  1022 |   589 |   16054 |
 | loop_overhead       |    12 |    98 |    98 |    98 |   143 |   100 |    54 |    46 |    3019 |
-| **loop_data_dependent** | **231** | **229** | **247** | **132** | **228** | **231** | **233** | **233** | **10750** |
+| **loop_data_dependent** | **235** | **229** | **129** | **128** | **233** | **229** | **322** | **232** | **10750** |
 | array_write         |     4 |     7 |     3 |     9 |     2 |     7 |     9 |     6 |     401 |
 | array_read          |     4 |     9 |     9 |    11 |     9 |    12 |    13 |    16 |     342 |
 | math_intensive      |    14 |    48 |    51 |    49 |    50 |    74 |    51 |    51 |    2238 |
@@ -37,14 +37,29 @@ Apple does not expose unprivileged hard core pinning). Lower is better.
 `loop_overhead` but with a multiplicative carry through `sum` and
 runtime-loaded array reads, so LLVM cannot apply reassoc, IV-simplify,
 or autovectorization. The Rust version's loop body is verified at
-the asm level (see `bench.rs` line 122) — emits a 4-instruction
-scalar fmul/fadd chain with two array loads, no fold, no vectorize.
-**The result is the honest comparison**: Perry / Rust / C++ / Swift /
-Java / Node / Bun all land within 6 ms of each other (228-233 ms),
-because they're all running the same hardware-bound scalar loop. Go's
-132 ms is the outlier — Go's compiler applies more aggressive
-scheduling/unrolling on this specific kernel; we haven't traced
-exactly why.
+the asm level (see `bench.rs` line 122) — emits a scalar fmul + fadd
+chain with two array loads, no fold, no vectorize. **The kernel
+splits the field into two FP-contract clusters:**
+
+- **FMA-contract pack (~128 ms):** Go (default), C++ `g++ -O3` on
+  Apple Clang. Both fuse `sum * a + b` into a single `FMADDD`
+  instruction (one IEEE-754 rounding instead of two), shortening
+  the per-iteration dependency chain from ~6-8 cycles
+  (FMUL→FADD on Apple silicon) to ~4 cycles (single FMADDD).
+- **No-contract pack (~229-235 ms):** Perry, Rust default `-O`,
+  Swift `-O`, Java without `-XX:+UseFMA`, Bun. All emit separate
+  `FMUL` + `FADD` because contracting changes observable IEEE-754
+  result by up to 0.5 ULP per iteration and is not legal under
+  the languages' default FP semantics.
+
+LLVM matches the FMA pack with `-ffast-math` or
+`-ffp-contract=fast`; Apple Clang's default at `-O2+` already enables
+contract. Verified at the asm level on rustc 1.94.1 / Apple Clang on
+2026-04-25 — see `bench.rs` line 115 for the full asm dump and
+toolchain notes. The dependency chain on `sum` is preserved in both
+clusters; the win is one ISA-level fusion, not a fold or a vectorize.
+Node 322 ms this run was a JIT-warm-up tail (σ=63, p95=447); on
+quieter runs it lands in the no-contract pack alongside Bun.
 
 **Interesting tails surfaced by RUNS=11:**
 

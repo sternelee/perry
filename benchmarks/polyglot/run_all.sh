@@ -62,11 +62,63 @@ strip_types() {
     "$1"
 }
 
+# Node-side TS stripper. Node measurements run on precompiled .mjs so we
+# don't charge Node for `--experimental-strip-types`'s per-launch parse +
+# strip cost (Perry compiles AOT and Bun strips natively; neither pays).
+# Setup step, untimed. esbuild preferred; tsc fallback. If nothing's
+# available we fall back to --experimental-strip-types and print a banner.
+NODE_TS_STRIP=""
+NODE_TS_STRIP_NOTE=""
+if command -v esbuild >/dev/null 2>&1; then
+    NODE_TS_STRIP="esbuild"
+    NODE_TS_STRIP_NOTE="esbuild on PATH"
+elif command -v npx >/dev/null 2>&1 && npx --no-install esbuild --version >/dev/null 2>&1; then
+    NODE_TS_STRIP="npx-esbuild"
+    NODE_TS_STRIP_NOTE="npx esbuild (project-local)"
+elif command -v tsc >/dev/null 2>&1; then
+    NODE_TS_STRIP="tsc"
+    NODE_TS_STRIP_NOTE="tsc on PATH"
+fi
+
+# Compile <src.ts> -> <dst.mjs>. Returns 0 on success.
+precompile_to_mjs() {
+    local src="$1"
+    local dst="$2"
+    case "$NODE_TS_STRIP" in
+        esbuild)
+            esbuild "$src" --format=esm --platform=neutral --target=esnext \
+                --outfile="$dst" --log-level=warning >/dev/null 2>&1
+            ;;
+        npx-esbuild)
+            npx --no-install esbuild "$src" --format=esm --platform=neutral \
+                --target=esnext --outfile="$dst" --log-level=warning >/dev/null 2>&1
+            ;;
+        tsc)
+            local d b
+            d=$(dirname "$dst")
+            b=$(basename "$src" .ts)
+            tsc --target esnext --module esnext --moduleResolution bundler \
+                --outDir "$d" "$src" >/dev/null 2>&1
+            [[ -f "$d/${b}.js" ]] && mv "$d/${b}.js" "$dst"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ -f "$dst" ]]
+}
+
 echo "==============================================================="
 echo "Polyglot compute microbenches — Perry v$(grep '^version' $PERRY_ROOT/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
 echo "Hardware: $(uname -srm) on $(hostname -s)"
 echo "Runs per cell: $RUNS (median + p95 + σ + min + max reported)"
 echo "Pinning strategy: $PIN_NOTE"
+if [[ -n "$NODE_TS_STRIP_NOTE" ]]; then
+    echo "Node TS strip:   $NODE_TS_STRIP_NOTE (precompile to .mjs, untimed)"
+else
+    echo "Node TS strip:   none found — falling back to --experimental-strip-types"
+    echo "                 (charges Node for runtime TS stripping; install esbuild or tsc)"
+fi
 echo "==============================================================="
 echo
 
@@ -179,11 +231,24 @@ for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loo
 done
 echo "  Perry: done"
 
-# Node (per .ts file)
+# Node — runs PRECOMPILED .mjs (esbuild/tsc strips TS as a setup step,
+# untimed). Without precompile, Node would be charged for
+# --experimental-strip-types' per-launch TS-stripping cost — work that
+# Perry pays at compile time and Bun pays as part of its native TS-runtime
+# value prop. Falls back to --experimental-strip-types if no stripper is
+# available; the banner at script start makes the asymmetry visible.
 : > "$TMPDIR/results_node.tsv"
 for bk in "fibonacci:05_fibonacci:fibonacci" "loop_overhead:02_loop_overhead:loop_overhead" "loop_data_dependent:17_loop_data_dependent:loop_data_dependent" "array_write:03_array_write:array_write" "array_read:04_array_read:array_read" "math_intensive:06_math_intensive:math_intensive" "object_create:07_object_create:object_create" "nested_loops:10_nested_loops:nested_loops" "accumulate:13_factorial:accumulate"; do
     IFS=: read -r bench ts key <<< "$bk"
-    stats=$(stats_of "node --experimental-strip-types $SUITE/${ts}.ts" "$key")
+    node_input=""
+    if [[ -n "$NODE_TS_STRIP" ]]; then
+        precompile_to_mjs "$SUITE/${ts}.ts" "$TMPDIR/node_${ts}.mjs" && node_input="$TMPDIR/node_${ts}.mjs"
+    fi
+    if [[ -n "$node_input" ]]; then
+        stats=$(stats_of "node $node_input" "$key")
+    else
+        stats=$(stats_of "node --experimental-strip-types $SUITE/${ts}.ts" "$key")
+    fi
     printf "%s\t%s\n" "$bench" "$stats" >> "$TMPDIR/results_node.tsv"
 done
 echo "  Node: done"

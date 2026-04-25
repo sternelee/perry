@@ -113,7 +113,7 @@ fn bench_accumulate() {
 }
 
 fn bench_loop_data_dependent() {
-    // Verified non-foldable on rustc 1.85 stable as of 2026-04-25.
+    // Verified non-foldable on rustc 1.94.1 stable as of 2026-04-25.
     // `rustc -O -C codegen-units=1 --emit=asm bench.rs` produces this
     // exact loop body (label LBB5_41 in the dump):
     //
@@ -136,17 +136,31 @@ fn bench_loop_data_dependent() {
     // vectorizer; the array reads defeat constant propagation past the
     // loop boundary.
     //
-    // This is the honest companion to bench_loop_overhead. Where
-    // loop_overhead measures whether the compiler applied
-    // reassoc + IV-simplify to a trivially-foldable accumulator
-    // (a flag-aggressiveness probe), this one forces the compiler
-    // to actually execute work.
+    // FP-contract caveat (matters for cross-language comparison): the
+    // expression `sum * a + b` can be lowered as either two instructions
+    // (fmul + fadd, 2 IEEE-754 roundings) or a single fused FMADDD
+    // (one rounding). The fused form has shorter per-iteration latency
+    // (~4 cycles vs ~6-8 on Apple silicon) and changes the result by at
+    // most 0.5 ULP per iteration. LLVM's default does NOT contract —
+    // observable: rustc 1.94.1 default `-O` emits the fmul+fadd shape
+    // shown above, and `-C target-cpu=native` does not change this.
+    // Apple Clang `-O2+` (and therefore Apple `g++ -O3`) DOES contract
+    // to FMADDD by default — verified by running `g++ -O3 bench.cpp`
+    // and inspecting the loop body. Go always contracts. Swift `-O`,
+    // V8 (Node), JSC (Bun), Java HotSpot without `-XX:+UseFMA`, and
+    // Perry's default codegen all stay in the no-contract pack. So
+    // the kernel divides the field into two clusters: FMA-contract
+    // (~128 ms here: Go, Apple Clang -O3) and no-contract (~225 ms:
+    // Rust, Swift, Perry, Node, Bun, Java). Both clusters preserve
+    // the dependency chain on `sum`; the win is one ISA-level fusion,
+    // not a fold or a vectorize.
     //
     // This is the honest companion to bench_loop_overhead. Where
     // loop_overhead measures whether the compiler applied
     // reassoc + IV-simplify to a trivially-foldable accumulator
     // (a flag-aggressiveness probe), this one forces the compiler
-    // to actually execute work.
+    // to actually execute work — and surfaces FP-contract as a
+    // secondary axis of the same flag-posture story.
     const N: usize = 64;
     const ITERATIONS: u64 = 100_000_000;
     let mut seed: u64 = 42;

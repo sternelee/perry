@@ -50,6 +50,57 @@ NLOHMANN_INCLUDE=$(brew --prefix nlohmann-json 2>/dev/null || echo "")/include
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------------------
+# Node-side TS stripper. Node measurements run on precompiled .mjs so we
+# don't charge Node for `--experimental-strip-types`'s per-launch parse +
+# strip cost (Perry compiles AOT and Bun strips natively as part of its
+# value prop, so neither pays this; Node otherwise would). The strip is a
+# setup step, untimed. esbuild is preferred (fast, pure type stripping);
+# tsc works as a fallback.
+# ---------------------------------------------------------------------------
+NODE_TS_STRIP=""
+NODE_TS_STRIP_NOTE=""
+if have esbuild; then
+    NODE_TS_STRIP="esbuild"
+    NODE_TS_STRIP_NOTE="esbuild on PATH"
+elif have npx && npx --no-install esbuild --version >/dev/null 2>&1; then
+    NODE_TS_STRIP="npx-esbuild"
+    NODE_TS_STRIP_NOTE="npx esbuild (project-local)"
+elif have tsc; then
+    NODE_TS_STRIP="tsc"
+    NODE_TS_STRIP_NOTE="tsc on PATH"
+fi
+
+# Compile <src.ts> -> <dst.mjs>. Returns 0 on success, 1 if no stripper is
+# available or the strip failed. This is a SETUP step — never inside the
+# timed window.
+precompile_to_mjs() {
+    local src="$1"
+    local dst="$2"
+    case "$NODE_TS_STRIP" in
+        esbuild)
+            esbuild "$src" --format=esm --platform=neutral --target=esnext \
+                --outfile="$dst" --log-level=warning >/dev/null 2>&1
+            ;;
+        npx-esbuild)
+            npx --no-install esbuild "$src" --format=esm --platform=neutral \
+                --target=esnext --outfile="$dst" --log-level=warning >/dev/null 2>&1
+            ;;
+        tsc)
+            local d b
+            d=$(dirname "$dst")
+            b=$(basename "$src" .ts)
+            tsc --target esnext --module esnext --moduleResolution bundler \
+                --outDir "$d" "$src" >/dev/null 2>&1
+            [[ -f "$d/${b}.js" ]] && mv "$d/${b}.js" "$dst"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    [[ -f "$dst" ]]
+}
+
+# ---------------------------------------------------------------------------
 # CPU pinning detection. Sets PIN_CMD (array, may be empty) and PIN_NOTE.
 # ---------------------------------------------------------------------------
 PIN_CMD=()
@@ -81,6 +132,12 @@ echo "JSON polyglot benchmark — Perry v$(grep '^version' ../../Cargo.toml | he
 echo "Hardware: $(uname -srm) on $(hostname -s)"
 echo "Runs per cell: $RUNS (median + p95 + σ + min + max reported)"
 echo "Pinning strategy: $PIN_NOTE"
+if [[ -n "$NODE_TS_STRIP_NOTE" ]]; then
+    echo "Node TS strip:   $NODE_TS_STRIP_NOTE (precompile to .mjs, untimed)"
+else
+    echo "Node TS strip:   none found — falling back to --experimental-strip-types"
+    echo "                 (charges Node for runtime TS stripping; install esbuild or tsc)"
+fi
 echo "==============================================================="
 echo
 
@@ -209,13 +266,34 @@ fi
 
 # ---------------------------------------------------------------------------
 # Node.js — V8.
+#
+# Node runs PRECOMPILED .mjs (esbuild/tsc strips TS types as a setup step,
+# untimed) instead of `node --experimental-strip-types bench.ts`. Otherwise
+# Node would be charged for the runtime TS-stripping cost on every launch
+# — work that Perry pays at compile time and Bun pays as part of its
+# native TS-runtime value prop. If no stripper is available, we fall back
+# to `--experimental-strip-types` and emit a banner so the asymmetry is
+# visible. Bun stays on .ts because direct TS execution IS Bun's value
+# prop (see methodology box in benchmarks/README.md).
 # ---------------------------------------------------------------------------
 echo "=== Node.js ==="
 if have node; then
-    run_bench "roundtrip"    "idiomatic" "node (default)"      ""  node --experimental-strip-types bench.ts
-    run_bench "roundtrip"    "optimized" "node --max-old=4096" ""  node --experimental-strip-types --max-old-space-size=4096 bench.ts
-    run_bench "field_access" "idiomatic" "node (default)"      ""  node --experimental-strip-types bench_field_access.ts
-    run_bench "field_access" "optimized" "node --max-old=4096" ""  node --experimental-strip-types --max-old-space-size=4096 bench_field_access.ts
+    NODE_RT_INPUT=""
+    NODE_FA_INPUT=""
+    NODE_FALLBACK_FLAGS=()
+    if [[ -n "$NODE_TS_STRIP" ]]; then
+        precompile_to_mjs bench.ts              "$TMPDIR/bench.mjs"              && NODE_RT_INPUT="$TMPDIR/bench.mjs"
+        precompile_to_mjs bench_field_access.ts "$TMPDIR/bench_field_access.mjs" && NODE_FA_INPUT="$TMPDIR/bench_field_access.mjs"
+    fi
+    if [[ -z "$NODE_RT_INPUT" ]]; then
+        NODE_RT_INPUT="bench.ts"
+        NODE_FA_INPUT="bench_field_access.ts"
+        NODE_FALLBACK_FLAGS=(--experimental-strip-types)
+    fi
+    run_bench "roundtrip"    "idiomatic" "node (default)"      ""  node ${NODE_FALLBACK_FLAGS[@]+"${NODE_FALLBACK_FLAGS[@]}"} "$NODE_RT_INPUT"
+    run_bench "roundtrip"    "optimized" "node --max-old=4096" ""  node ${NODE_FALLBACK_FLAGS[@]+"${NODE_FALLBACK_FLAGS[@]}"} --max-old-space-size=4096 "$NODE_RT_INPUT"
+    run_bench "field_access" "idiomatic" "node (default)"      ""  node ${NODE_FALLBACK_FLAGS[@]+"${NODE_FALLBACK_FLAGS[@]}"} "$NODE_FA_INPUT"
+    run_bench "field_access" "optimized" "node --max-old=4096" ""  node ${NODE_FALLBACK_FLAGS[@]+"${NODE_FALLBACK_FLAGS[@]}"} --max-old-space-size=4096 "$NODE_FA_INPUT"
 fi
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ Headline = median wall-clock ms. Lower is better.
 |---------------------|-------|-------|-------|-------|-------|-------|-------|-------|--------|---------|
 | fibonacci           |   318 |   330 |   315 |   451 |   406 |   282 |  1022 |   589 |      - |   16054 |
 | loop_overhead       |    12 |    98 |    98 |    98 |   143 |   100 |    54 |    46 |      - |    3019 |
-| loop_data_dependent |   231 |   229 |   247 |   132 |   228 |   231 |   233 |   233 |      - |   10750 |
+| loop_data_dependent |   235 |   229 |   129 |   128 |   233 |   229 |   322 |   232 |      - |   10750 |
 | array_write         |     4 |     7 |     3 |     9 |     2 |     7 |     9 |     6 |      - |     401 |
 | array_read          |     4 |     9 |     9 |    11 |     9 |    12 |    13 |    16 |      - |     342 |
 | math_intensive      |    14 |    48 |    51 |    49 |    50 |    74 |    51 |    51 |      - |    2238 |
@@ -44,14 +44,14 @@ Format: median (p95: X, σ: S, min: Y, max: Z) ms
 | loop_overhead | bun | 46 (p95: 63, σ: 6.2, min: 43, max: 63) |
 | loop_overhead | hermes | - |
 | loop_overhead | python | 3019 (p95: 5066, σ: 587.6, min: 2979, max: 5066) |
-| loop_data_dependent | perry | 231 (p95: 233, σ: 1.2, min: 229, max: 233) |
-| loop_data_dependent | rust | 229 (p95: 230, σ: 1.0, min: 227, max: 230) |
-| loop_data_dependent | cpp | 247 (p95: 450, σ: 66.8, min: 192, max: 450) |
-| loop_data_dependent | go | 132 (p95: 173, σ: 11.9, min: 130, max: 173) |
-| loop_data_dependent | swift | 228 (p95: 230, σ: 1.4, min: 226, max: 230) |
-| loop_data_dependent | java | 231 (p95: 240, σ: 3.7, min: 229, max: 240) |
-| loop_data_dependent | node | 233 (p95: 251, σ: 5.4, min: 231, max: 251) |
-| loop_data_dependent | bun | 233 (p95: 237, σ: 2.0, min: 231, max: 237) |
+| loop_data_dependent | perry | 235 (p95: 307, σ: 29.3, min: 229, max: 307) |
+| loop_data_dependent | rust | 229 (p95: 247, σ: 7.5, min: 227, max: 247) |
+| loop_data_dependent | cpp | 129 (p95: 130, σ: 0.9, min: 128, max: 130) |
+| loop_data_dependent | go | 128 (p95: 130, σ: 1.0, min: 127, max: 130) |
+| loop_data_dependent | swift | 233 (p95: 278, σ: 18.4, min: 229, max: 278) |
+| loop_data_dependent | java | 229 (p95: 231, σ: 0.8, min: 229, max: 231) |
+| loop_data_dependent | node | 322 (p95: 447, σ: 63.4, min: 259, max: 447) |
+| loop_data_dependent | bun | 232 (p95: 241, σ: 3.9, min: 230, max: 241) |
 | loop_data_dependent | hermes | - |
 | loop_data_dependent | python | 10750 (p95: 35545, σ: 8839.0, min: 8201, max: 35545) |
 | array_write | perry | 4 (p95: 5, σ: 0.6, min: 3, max: 5) |

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Perry is a native TypeScript compiler written in Rust that compiles TypeScript source code directly to native executables. It uses SWC for TypeScript parsing and LLVM for code generation.
 
-**Current Version:** 0.5.292
+**Current Version:** 0.5.293
 
 ## TypeScript Parity Status
 
@@ -149,6 +149,7 @@ First-resolved directory cached in `compile_package_dirs`; subsequent imports re
 
 Keep entries to 1-2 lines max. Full details in CHANGELOG.md.
 
+- **v0.5.293** — Repo hygiene: untrack 465 Android Gradle cache files (`android-build/.gradle/`, `android-build/app/build/`, `android-build/build/`) that were churning on every Gradle invocation, and add the matching `.gitignore` rules. Also gitignored: `docs/examples/_reports/` (CI-generated doc-test report), `/assets/` + `benchmarks/suite/assets/` (external game-project assets the user keeps adjacent for perry-ui-* manual testing — never source), and stray repro binaries `enum_repro`/`no_pragma_test`. Bench methodology: `json_polyglot/run.sh` precompiles Node TS to `.mjs` (esbuild → npx-esbuild → tsc fallback chain) as untimed setup so Node isn't charged for `--experimental-strip-types`'s per-launch parse on every run — Perry is AOT and Bun strips natively, so neither pays this; falls back to the old `--experimental-strip-types` invocation with a banner if no stripper is available. `polyglot/bench.rs` gains an FP-contract caveat block on `bench_loop_data_dependent` documenting the FMA-contract (Apple Clang, Go) vs no-contract (Rust, Swift, Perry, Node, Bun, Java) clustering. Plus `tests/test_array_index_loop.sh` runner companion to the existing `.ts` regression test.
 - **v0.5.292** — CLAUDE.md hygiene: migrated 124 verbose Recent Changes entries (~242 KB) to CHANGELOG.md verbatim, condensed the section to the last 22 versions at 1-2 lines each. CLAUDE.md 254 KB → 12 KB (95% reduction). Save the always-loaded context budget for actual project guidance.
 - **v0.5.291** — Land the actual workflow code for v0.5.289's CI disk-space fix.
 - **v0.5.290** — Stub audit: `test_gap_console_methods` removed from `known_failures.json` — passes through the parity-runner's `normalize_output` despite the raw diff showing different timer values.

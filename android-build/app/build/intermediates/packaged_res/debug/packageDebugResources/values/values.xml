@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">Pick Color</string>
-    <style name="Theme.Perry" parent="android:Theme.Material.Light.NoActionBar">
-    </style>
-    <style name="Theme.Perry.Splash" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">@drawable/splash_background</item>
-    </style>
-</resources>
