@@ -38,7 +38,7 @@ behind blog posts, no cherry-picked subsets.
 > RSS in MB (peak resident set size from `/usr/bin/time -l`, the worst
 > peak observed across runs).
 >
-> **Pre-1.0 caveat:** Perry is pre-1.0 (v0.5.241); compared compilers
+> **Pre-1.0 caveat:** Perry is pre-1.0 (v0.5.279); compared compilers
 > and runtimes are stable releases. Numbers reflect Perry's current
 > alpha state and may regress between releases.
 >
@@ -119,24 +119,24 @@ and rebuilds the string from the parsed tree on every `dump()`.
 
 | Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| **c++ -O3 -flto (simdjson)** | optimized | **28** | 48 | 6.9 | 25 | 48 | 9 |
-| c++ -O2 (simdjson) | idiomatic | 32 | 80 | 13.9 | 30 | 80 | 9 |
-| perry (gen-gc + lazy tape) | optimized | 89 | 114 | 12.7 | 74 | 114 | 85 |
-| rust serde_json (LTO+1cgu) | optimized | 186 | 188 | 1.1 | 184 | 188 | 11 |
-| rust serde_json | idiomatic | 200 | 202 | 1.0 | 198 | 202 | 11 |
-| bun | idiomatic | 252 | 257 | 3.2 | 248 | 257 | 84 |
-| perry (mark-sweep, no lazy) | untuned floor | 368 | 381 | 7.0 | 360 | 381 | 102 |
-| node | idiomatic | 381 | 399 | 7.1 | 377 | 399 | 182 |
-| node --max-old=4096 | optimized | 386 | 389 | 3.7 | 377 | 389 | 182 |
-| kotlin -server -Xmx512m | optimized | 461 | 466 | 6.4 | 443 | 466 | 421 |
-| kotlin (kotlinx.serialization) | idiomatic | 473 | 484 | 7.4 | 457 | 484 | 603 |
-| assemblyscript+json-as (wasmtime) | idiomatic | 669 | 694 | 10.7 | 657 | 694 | 58 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 798 | 803 | 3.5 | 792 | 803 | 25 |
-| go (encoding/json) | idiomatic | 805 | 818 | 5.1 | 797 | 818 | 23 |
-| go -ldflags="-s -w" -trimpath | optimized | 806 | 814 | 3.2 | 802 | 814 | 23 |
-| c++ -O2 (nlohmann/json) | idiomatic | 871 | 930 | 19.7 | 858 | 930 | 26 |
-| swift -O (Foundation) | idiomatic | 3748 | 3778 | 17.8 | 3716 | 3778 | 34 |
-| swift -O -wmo (Foundation) | optimized | 3782 | 4196 | 120.3 | 3758 | 4196 | 34 |
+| **c++ -O3 -flto (simdjson)** | optimized | **24** | 28 | 1.2 | 23 | 28 | 8 |
+| c++ -O2 (simdjson) | idiomatic | 29 | 34 | 1.7 | 28 | 34 | 8 |
+| perry (gen-gc + lazy tape) | optimized | 75 | 91 | 6.9 | 69 | 91 | 85 |
+| rust serde_json (LTO+1cgu) | optimized | 185 | 190 | 1.7 | 183 | 190 | 11 |
+| rust serde_json | idiomatic | 198 | 204 | 2.3 | 195 | 204 | 11 |
+| bun | idiomatic | 259 | 342 | 26.1 | 253 | 342 | 82 |
+| perry (mark-sweep, no lazy) | untuned floor | 363 | 378 | 6.3 | 356 | 378 | 102 |
+| node | idiomatic | 394 | 602 | 60.1 | 382 | 602 | 127 |
+| kotlin -server -Xmx512m | optimized | 453 | 484 | 12.6 | 447 | 484 | 423 |
+| kotlin (kotlinx.serialization) | idiomatic | 473 | 533 | 21.4 | 453 | 533 | 606 |
+| node --max-old=4096 | optimized | 526 | 605 | 38.3 | 478 | 605 | 128 |
+| assemblyscript+json-as (wasmtime) | idiomatic | 598 | 621 | 10.5 | 582 | 621 | 58 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 772 | 774 | 1.1 | 771 | 774 | 25 |
+| go -ldflags="-s -w" -trimpath | optimized | 805 | 824 | 9.1 | 796 | 824 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 840 | 846 | 3.0 | 836 | 846 | 25 |
+| go (encoding/json) | idiomatic | 848 | 1344 | 184.3 | 796 | 1344 | 23 |
+| swift -O -wmo (Foundation) | optimized | 3709 | 3793 | 32.5 | 3686 | 3793 | 34 |
+| swift -O (Foundation) | idiomatic | 3730 | 3844 | 54.3 | 3688 | 3844 | 34 |
 
 #### B. JSON parse-and-iterate
 > Per iteration: `parse(blob)` → sum every record's `nested.x`
@@ -149,40 +149,40 @@ tape pays its overhead without compensation.
 
 | Implementation | Profile | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
 |---|---|---:|---:|---:|---:|---:|---:|
-| **c++ -O3 -flto (simdjson)** | optimized | **25** | 62 | 10.6 | 25 | 62 | 9 |
-| c++ -O2 (simdjson) | idiomatic | 26 | 30 | 1.5 | 25 | 30 | 9 |
-| rust serde_json (LTO+1cgu) | optimized | 187 | 190 | 1.5 | 185 | 190 | 11 |
-| rust serde_json | idiomatic | 205 | 244 | 11.5 | 202 | 244 | 12 |
-| bun | idiomatic | 257 | 260 | 2.0 | 252 | 260 | 87 |
-| node | idiomatic | 360 | 368 | 4.1 | 352 | 368 | 119 |
-| node --max-old=4096 | optimized | 365 | 378 | 5.1 | 358 | 378 | 119 |
-| perry (mark-sweep, no lazy) | untuned floor | 373 | 376 | 2.7 | 367 | 376 | 102 |
-| kotlin -server -Xmx512m | optimized | 462 | 470 | 4.6 | 454 | 470 | 423 |
-| perry (gen-gc + lazy tape) | optimized | 476 | 482 | 3.8 | 470 | 482 | 100 |
-| kotlin (kotlinx.serialization) | idiomatic | 484 | 494 | 5.4 | 476 | 494 | 606 |
-| assemblyscript+json-as (wasmtime) | idiomatic | 660 | 746 | 26.7 | 648 | 746 | 58 |
-| c++ -O3 -flto (nlohmann/json) | optimized | 814 | 1379 | 163.7 | 810 | 1379 | 27 |
-| c++ -O2 (nlohmann/json) | idiomatic | 900 | 1004 | 31.2 | 893 | 1004 | 25 |
-| go (encoding/json) | idiomatic | 944 | 1618 | 316.2 | 800 | 1618 | 22 |
-| go -ldflags="-s -w" -trimpath | optimized | 1332 | 1565 | 159.5 | 990 | 1565 | 22 |
-| swift -O (Foundation) | idiomatic | 3714 | 7079 | 1000.8 | 3690 | 7079 | 36 |
-| swift -O -wmo (Foundation) | optimized | 3746 | 3850 | 33.3 | 3725 | 3850 | 34 |
+| c++ -O2 (simdjson) | idiomatic | 24 | 27 | 0.9 | 24 | 27 | 8 |
+| **c++ -O3 -flto (simdjson)** | optimized | **24** | 24 | 0.4 | 23 | 24 | 8 |
+| rust serde_json (LTO+1cgu) | optimized | 183 | 185 | 1.2 | 182 | 185 | 11 |
+| rust serde_json | idiomatic | 200 | 330 | 37.4 | 196 | 330 | 13 |
+| bun | idiomatic | 254 | 255 | 1.9 | 249 | 255 | 87 |
+| node --max-old=4096 | optimized | 355 | 389 | 11.4 | 346 | 389 | 87 |
+| perry (mark-sweep, no lazy) | untuned floor | 375 | 402 | 10.2 | 370 | 402 | 102 |
+| node | idiomatic | 380 | 652 | 87.2 | 356 | 652 | 101 |
+| kotlin -server -Xmx512m | optimized | 455 | 465 | 6.1 | 444 | 465 | 426 |
+| perry (gen-gc + lazy tape) | optimized | 466 | 475 | 7.0 | 457 | 475 | 100 |
+| kotlin (kotlinx.serialization) | idiomatic | 469 | 481 | 5.9 | 459 | 481 | 608 |
+| assemblyscript+json-as (wasmtime) | idiomatic | 605 | 632 | 11.4 | 587 | 632 | 58 |
+| c++ -O3 -flto (nlohmann/json) | optimized | 786 | 793 | 2.7 | 782 | 793 | 25 |
+| go -ldflags="-s -w" -trimpath | optimized | 805 | 833 | 9.2 | 798 | 833 | 22 |
+| go (encoding/json) | idiomatic | 811 | 886 | 25.3 | 803 | 886 | 23 |
+| c++ -O2 (nlohmann/json) | idiomatic | 866 | 929 | 18.7 | 857 | 929 | 26 |
+| swift -O (Foundation) | idiomatic | 3686 | 4009 | 96.7 | 3634 | 4009 | 34 |
+| swift -O -wmo (Foundation) | optimized | 3702 | 3769 | 36.2 | 3660 | 3769 | 34 |
 
 **Reading both tables together**: **simdjson leads both workloads
-decisively** — 28 ms validate-and-roundtrip, 25 ms parse-and-iterate.
+decisively** — 24 ms validate-and-roundtrip, 24 ms parse-and-iterate.
 This is the honest C++ parse-throughput ceiling; cherry-picking
-nlohmann would have hidden it. Perry's lazy tape (89 ms on
+nlohmann would have hidden it. Perry's lazy tape (75 ms on
 validate-and-roundtrip) is best-in-class **among dynamic-typing
-runtimes** (beats Node 381 ms, Bun 252 ms, Kotlin 461 ms) but
+runtimes** (beats Node 394 ms, Bun 259 ms, Kotlin 453 ms) but
 loses cleanly to the SIMD-accelerated reference.
 
 On parse-and-iterate, where the lazy tape can't shortcut, Perry
-default lands at 476 ms — slower than its own mark-sweep escape
-hatch (373 ms) because the lazy tape pays overhead the iteration
+default lands at 466 ms — slower than its own mark-sweep escape
+hatch (375 ms) because the lazy tape pays overhead the iteration
 forces it to amortize. Rust serde_json with typed structs is the
-non-SIMD champion at 187 ms; Bun is the dynamic-typing champion at
-257 ms with single-digit σ. The AssemblyScript+json-as row (660-
-669 ms) shows what the closest TS-to-native peer ships today —
+non-SIMD champion at 183 ms; Bun is the dynamic-typing champion at
+254 ms with single-digit σ. The AssemblyScript+json-as row
+(598-605 ms) shows what the closest TS-to-native peer ships today —
 typed structs + wasmtime + a wasm-target compile pipeline.
 
 The honest framing: **Perry's JSON pipeline is competitive with
@@ -195,8 +195,8 @@ the gap to simdjson's parse-throughput ceiling is tracked in
 
 ### Compute microbenches (idiomatic flags)
 
-RUNS=11 per cell. Headline = median ms. Full per-cell stats (median +
-p95 + σ + min + max) in
+RUNS=11 per cell, refreshed 2026-04-25 at v0.5.249. Headline =
+median ms. Full per-cell stats (median + p95 + σ + min + max) in
 [`polyglot/RESULTS_AUTO.md`](polyglot/RESULTS_AUTO.md) and the
 hand-curated [`polyglot/RESULTS.md`](polyglot/RESULTS.md). Lower is
 better. **`loop_overhead` and the other flag-aggressiveness probes
@@ -207,7 +207,7 @@ compiler-flag probes.
 | Benchmark           | Perry |  Rust |   C++ |    Go | Swift |  Java |  Node |   Bun |  Python |
 |---------------------|------:|------:|------:|------:|------:|------:|------:|------:|--------:|
 | fibonacci           |   318 |   330 |   315 |   451 |   406 |   282 |  1022 |   589 |   16054 |
-| loop_data_dependent |   231 |   229 |   247 |   132 |   228 |   231 |   233 |   233 |   10750 |
+| loop_data_dependent |   235 |   229 |   129 |   128 |   233 |   229 |   322 |   232 |   10750 |
 | object_create       |     1 |     0 |     0 |     0 |     0 |     5 |    11 |     6 |     164 |
 | nested_loops        |    18 |     8 |     8 |    10 |     8 |    11 |    18 |    21 |     484 |
 
@@ -215,20 +215,31 @@ compiler-flag probes.
 3-15 ms; Java's HotSpot JIT is ~11% faster from inlining the
 recursive call.
 
-`loop_data_dependent` (median 231 ms for Perry): the genuinely-
+`loop_data_dependent` (median 235 ms for Perry): the genuinely-
 non-foldable f64 microbench (multiplicative carry through `sum`
 plus array reads, 100M iters; LLVM cannot reorder under reassoc
 and cannot vectorize past the sequential dependency — verified at
-the asm level, see [`bench.rs`](polyglot/bench.rs#L122)). When the
-compiler can't fold, **the playing field FLATTENS**: Perry / Rust /
-C++ / Swift / Java / Node / Bun all land within 6 ms of each other
-(228-233 ms) because they're all running the same hardware-bound
-scalar fmul/fadd loop. **Go is the outlier at 132 ms** — Go's
-compiler applies more aggressive scheduling/unrolling on this
-specific kernel; we haven't traced exactly why. This bench answers
-the legitimate "what does Perry actually do, vs what does its flag
-posture do?" question — answer: **competitive with the compiled
-pack on genuine compute work, not 7× faster**.
+the asm level, see [`bench.rs`](polyglot/bench.rs#L122)). The
+sequential dependency on `sum` is preserved across every language
+on the row; the kernel is genuinely non-foldable. **The kernel
+splits the field into two FP-contract clusters:** an *FMA-contract
+pack* at ~128 ms (Go default, C++ `g++ -O3` on Apple Clang — both
+fuse `sum * a + b` into a single `FMADDD` instruction with one
+IEEE-754 rounding instead of two) and a *no-contract pack* at
+229-235 ms (Perry, Rust default `-O`, Swift `-O`, Java without
+`-XX:+UseFMA`, Bun) running scalar `FMUL` + `FADD`, two
+roundings, ~6-8 cycle dependency chain vs FMADDD's ~4. Verified
+at the asm level by inspecting `g++ -O3 bench.cpp` and `rustc -O
+bench.rs` on the same toolchain (LLVM 22 / Apple Clang on
+2026-04-25). LLVM matches the FMA pack with `-ffast-math` or
+`-ffp-contract=fast` — see
+[`polyglot/RESULTS_OPT.md`](polyglot/RESULTS_OPT.md). Node's 322 ms
+is a JIT-warm-up outlier this run (σ=63, p95=447); on quieter
+runs it lands in the no-contract pack alongside Bun. This bench
+answers the legitimate "what does Perry actually do, vs what does
+its flag posture do?" question — answer: **competitive with the
+no-contract compiled pack on genuine compute work, ~1.8× the
+FMA-contract pack**.
 
 `object_create` (1M iters): median 1 ms — within a tick of native
 (Rust/C++/Go/Swift all hit median 0 because their working set fits
@@ -240,7 +251,7 @@ compute-bound; everyone lands at 8-21 ms.
 
 #### Optimization probes (compiler flag-aggressiveness, not runtime perf)
 
-These four cells are *flag-aggressiveness probes*, not runtime perf
+These five cells are *flag-aggressiveness probes*, not runtime perf
 comparisons. They measure whether the compiler applied
 **reassoc + IndVarSimplify + autovectorize** to a trivially-foldable
 accumulator, NOT how fast the resulting loop actually computes
@@ -265,12 +276,16 @@ per-language flag-tuning sweep that backs out this entire result.
 
 The companion `loop_data_dependent` (in the headline table above)
 shows what Perry looks like on the same kind of kernel WHEN THE
-COMPILER CAN'T FOLD: 231 ms, dead-on the 228-233 ms compiled-pack
-median. The 12 ms `loop_overhead` and 14 ms `math_intensive`
-numbers are real, repeatable, obtained via standard release-mode
-builds — but they measure compiler flags, not silicon. A reader
-who treats them as "Perry is 7× faster than C++" without reading
-this paragraph has been misled by the headline.
+COMPILER CAN'T FOLD: 235 ms, dead-on the no-contract pack (Rust /
+Swift / Java / Bun all 229-233 ms). The Go/C++-O3 FMA-contract
+pack at ~128 ms beats us on this kernel because they fuse FMUL +
+FADD into FMADDD; LLVM matches them under `-ffp-contract=fast`,
+which Perry doesn't enable by default. The 12 ms `loop_overhead`
+and 14 ms `math_intensive` numbers are real, repeatable, obtained
+via standard release-mode builds — but they measure compiler
+flags, not silicon. A reader who treats them as "Perry is 7×
+faster than C++" without reading this paragraph has been misled
+by the headline.
 
 **Honest regressions vs the v0.5.164 baseline** (when these benches
 were last refreshed, before gen-GC became default):
@@ -499,8 +514,8 @@ the comparison is honest in both directions.
 - **simdjson beats Perry on time, decisively, on both workloads.**
   This is expected and correct. simdjson is a SIMD-accelerated
   parser purpose-built for JSON parse-throughput; on
-  validate-and-roundtrip it lands at ~25 ms median and on
-  parse-and-iterate at ~26 ms. Perry's lazy tape is a 12-byte-per-
+  validate-and-roundtrip it lands at ~24 ms median and on
+  parse-and-iterate at ~24 ms. Perry's lazy tape is a 12-byte-per-
   value sequential representation; it's competitive with
   general-purpose JSON libraries (nlohmann, serde_json,
   encoding/json) on the right workload, but it does not have
@@ -540,8 +555,19 @@ the comparison is honest in both directions.
 
 ## 2. Compute microbenches — full data
 
-[`benchmarks/polyglot/`](polyglot/) — 10 implementations across 8
-benchmarks. Existing run, last refreshed 2026-04-22 at v0.5.164.
+[`benchmarks/polyglot/`](polyglot/) — 10 implementations across 9
+benchmarks. **Cells in TL;DR's "Compute microbenches" and
+"Optimization probes" tables are RUNS=11 medians from a fresh
+2026-04-25 polyglot run at v0.5.249** (see
+[`RESULTS_AUTO.md`](polyglot/RESULTS_AUTO.md) for per-cell
+distributions: median + p95 + σ + min + max). Perry's compute-suite
+behavior between v0.5.249 and the current v0.5.281 is unchanged —
+the intervening commits are JSON-runtime fixes (NaN equality,
+SSO consumers, ECMAScript number formatting) that don't touch the
+codegen paths these benchmarks exercise; rerunning is on the
+follow-up list but the gap is noise-floor at most. The JSON
+polyglot tables in TL;DR §A and §B were rerun separately and are
+fresh as of 2026-04-25 at v0.5.279.
 
 ### Idiomatic flags table (current)
 
@@ -551,16 +577,16 @@ in the TL;DR above. Compiler details:
 | Language | Compiler | Idiomatic flag |
 |---|---|---|
 | Perry | self-hosted Rust, LLVM 22 | `cargo build --release -p perry` |
-| Rust | rustc 1.85 stable | `cargo build --release` |
-| C++ | clang++ 17 (Apple) | `clang++ -O3 -std=c++17` |
-| Go | go 1.21 | `go build` |
-| Swift | swiftc 6.0 (Apple) | `swiftc -O` |
-| Java | javac 21 + java 21 (HotSpot) | default `java -cp .` |
+| Rust | rustc 1.94.1 stable | `cargo build --release` |
+| C++ | Apple clang 21.0.0 | `clang++ -O3 -std=c++17` |
+| Go | go 1.21.3 | `go build` |
+| Swift | swiftc 6.3.1 (Apple) | `swiftc -O` |
+| Java | OpenJDK 21.0.7 (HotSpot) | default `java -cp .` |
 | Kotlin (JSON only) | kotlinc 2.3.21 | `java -cp ... BenchKt` |
-| Node.js | v20 | `node bench.mjs` (precompiled .mjs via `esbuild`/`tsc`; falls back to `node --experimental-strip-types` if no stripper is on PATH) |
-| Bun | 1.3 | `bun bench.ts` (runs TS source directly — that IS Bun's value prop) |
+| Node.js | v25.8.0 | `node bench.mjs` (precompiled .mjs via `esbuild`/`tsc`; falls back to `node --experimental-strip-types` if no stripper is on PATH) |
+| Bun | 1.3.12 | `bun bench.ts` (runs TS source directly — that IS Bun's value prop) |
 | Static Hermes | shermes 0.13 | `shermes -O` (skipped if not installed) |
-| Python | 3.12 | `python3` |
+| Python | CPython 3.14.3 | `python3` |
 
 Kotlin is JSON-only (not in the compute polyglot table) because the
 compute polyglot runner predates Kotlin support; adding it would
@@ -624,7 +650,17 @@ generational-GC default flipped to ON in v0.5.237 (-21%).
 ### bench_json_roundtrip RSS history
 
 Direct path (`PERRY_JSON_TAPE=0`, 50 iterations of 10k-record parse +
-stringify, peak RSS via `/usr/bin/time -l`):
+stringify, peak RSS via `/usr/bin/time -l`).
+
+> **Methodology note**: rows v0.5.193..v0.5.241 used best-of-5 minimum
+> (the methodology in use when those releases shipped). The
+> v0.5.279 row is RUNS=11 median + worst-observed peak RSS, the same
+> methodology TL;DR §A and §B use today. The "Time (ms)" gap between
+> the v0.5.241 row's 375 ms (best-of-5 min) and the v0.5.279 row's
+> 382 ms (RUNS=11 median) is the noise floor that motivated the
+> methodology change — not a regression. RSS is unchanged because
+> peak occupancy is set by GC trigger geometry, not by aggregation
+> method.
 
 | Version | RSS (MB) | Time (ms) | Change |
 |---|---:|---:|---|
@@ -635,32 +671,46 @@ stringify, peak RSS via `/usr/bin/time -l`):
 | v0.5.235 (C4b-δ, dealloc) | 142 | 358 | dealloc fires but peak is pre-first-GC |
 | v0.5.236 (C4b-δ-tune, ceiling) | 107 | 358 | trigger ceiling stops step doubling past 64 MB |
 | v0.5.237 (gen-gc default ON) | 102 | 372 | minor GC fires by default |
-| v0.5.241 (current, this commit) | **102** | **375** | unchanged from v0.5.237; suite re-run for this README |
+| v0.5.241 (best-of-5 min) | 102 | 375 | unchanged from v0.5.237; last best-of-5 row |
+| **v0.5.279 (current, RUNS=11 median)** | **102** | **382** | RUNS=11 median (p95=389, σ=3.9, [377..389]) |
 
 Default (lazy + gen-gc), the case `bench_json_roundtrip` measures with
-no env vars: **66 ms / 85 MB**. On this specific workload (parse +
-stringify, no intermediate iteration), faster than every other
-TypeScript-input runtime measured here (Node, Bun); slower than
-simdjson (C++ + SIMD, the parse-throughput ceiling). See TL;DR §A
-for the full table and the workload caveats — the lazy tape's win
-is workload-specific, and this is the workload it was designed for.
+no env vars: **70 ms median / 85 MB peak RSS** (RUNS=11; p95=73, σ=1.1,
+[69..73]). On this specific workload (parse + stringify, no
+intermediate iteration), faster than every other TypeScript-input
+runtime measured here (Node, Bun); slower than simdjson (C++ + SIMD,
+the parse-throughput ceiling). See TL;DR §A for the full table and
+the workload caveats — the lazy tape's win is workload-specific, and
+this is the workload it was designed for.
 
-### Other Perry benches (best-of-5 minimum across RUNS=5 quick runs, M1 Max, this commit)
+The 70 ms here matches TL;DR §A's `perry (gen-gc + lazy tape)` row
+within run-to-run noise (75 ms median in §A's 11-run sample, σ=6.9).
+Both numbers come from the same workload on the same v0.5.279 binary;
+the 5 ms gap is the difference between two independent RUNS=11
+samples, and is well inside the σ envelope.
 
-| Benchmark | Time (ms) | Peak RSS (MB) |
-|---|---:|---:|
-| `bench_json_roundtrip` (default, lazy + gen-gc) | 66 | 85 |
-| `bench_json_roundtrip` (`PERRY_JSON_TAPE=0`) | 375 | 102 |
-| `bench_json_roundtrip` (`PERRY_GEN_GC=0`) | 66 | 85 |
-| `bench_json_roundtrip` (both opts off) | 349 | 102 |
-| `bench_json_readonly` (default) | 67 | 81 |
-| `bench_json_readonly` (`PERRY_JSON_TAPE=0`) | 279 | 103 |
-| `07_object_create` | 0 | 6 |
-| `12_binary_trees` | 0 | 6 |
-| `bench_gc_pressure` | 16 | 25 |
-| `04_array_read` | 4 | 211 [^arr] |
-| `05_fibonacci` | 309 | 6 |
-| `08_string_concat` | 0 | 6 |
+### Other Perry benches (RUNS=11, M1 Max, v0.5.279, taskpolicy -t 0 -l 0)
+
+Median + p95 + σ + min + max wall-clock ms, worst-observed peak RSS —
+the same methodology used by TL;DR §A and §B. Refreshed 2026-04-25
+using the same `compute_stats` awk routine as
+[`json_polyglot/run.sh`](json_polyglot/run.sh) over each suite binary
+in [`benchmarks/suite/`](suite/).
+
+| Benchmark | Median (ms) | p95 (ms) | σ | Min | Max | Peak RSS (MB) |
+|---|---:|---:|---:|---:|---:|---:|
+| `bench_json_roundtrip` (default, lazy + gen-gc) | 70 | 73 | 1.1 | 69 | 73 | 85 |
+| `bench_json_roundtrip` (`PERRY_JSON_TAPE=0`) | 382 | 389 | 3.9 | 377 | 389 | 102 |
+| `bench_json_roundtrip` (`PERRY_GEN_GC=0`) | 70 | 71 | 1.0 | 68 | 71 | 85 |
+| `bench_json_roundtrip` (both opts off) | 358 | 360 | 2.0 | 354 | 360 | 102 |
+| `bench_json_readonly` (default) | 66 | 68 | 1.0 | 65 | 68 | 81 |
+| `bench_json_readonly` (`PERRY_JSON_TAPE=0`) | 291 | 309 | 5.7 | 286 | 309 | 104 |
+| `07_object_create` | 0 | 1 | 0.4 | 0 | 1 | 6 |
+| `12_binary_trees` | 1 | 1 | 0.5 | 0 | 1 | 6 |
+| `bench_gc_pressure` | 17 | 21 | 1.1 | 17 | 21 | 25 |
+| `04_array_read` | 5 | 9 | 1.7 | 4 | 9 | 211 [^arr] |
+| `05_fibonacci` | 315 | 333 | 5.5 | 312 | 333 | 6 |
+| `08_string_concat` | 0 | 1 | 0.5 | 0 | 1 | 6 |
 
 [^arr]: Working set, not a leak — index-based fill (`arr[i] = i`) triggers
     doubling reallocation; the last grow temporarily holds both 8M-cap
@@ -676,10 +726,10 @@ Where Perry actually wins, and a one-line "why" per item.
 
 - **JSON validate-and-roundtrip — best in dynamic-typing pack**
   (parse → stringify, no intermediate iteration). Perry lands at
-  **89 ms** median (TL;DR §A) — beats every other dynamic-typing
-  runtime in the table: 2.8× over Bun (252 ms), 4.3× over Node
-  (381 ms), 5.2× over Kotlin server JIT (461 ms). simdjson leads
-  the absolute time at 28 ms — that's the SIMD-accelerated C++
+  **75 ms** median (TL;DR §A) — beats every other dynamic-typing
+  runtime in the table: 3.5× over Bun (259 ms), 5.3× over Node
+  (394 ms), 6.0× over Kotlin server JIT (453 ms). simdjson leads
+  the absolute time at 24 ms — that's the SIMD-accelerated C++
   reference, listed alongside nlohmann/json so the comparison is
   honest in both directions. Perry's win in the dynamic-typing
   cohort comes from the lazy JSON tape (v0.5.204+): parse builds
@@ -688,24 +738,35 @@ Where Perry actually wins, and a one-line "why" per item.
   same fast-path trick simdjson uses with `raw_json()`. See
   [`json-typed-parse-plan.md`](../docs/json-typed-parse-plan.md).
   On parse-and-iterate (TL;DR §B), Perry doesn't lead — simdjson
-  at 25 ms and Rust serde_json at 187 ms both beat Perry's 476 ms,
+  at 24 ms and Rust serde_json at 183 ms both beat Perry's 466 ms,
   and Perry's lazy tape pays overhead it can't amortize when every
   element is touched.
-- **f64-arithmetic flag-aggressiveness probes** (`loop_overhead`,
-  `math_intensive`, `accumulate`) — Perry 3-8× faster than native
-  compilers' default release builds on these microbenches (measures
-  compiler optimization aggressiveness, not runtime performance —
-  see Optimization Probes section), because TypeScript's `number`
-  semantics let LLVM apply `reassoc contract` flags that strict-IEEE
-  languages can't apply by default. C++ `-O3 -ffast-math` closes
-  most of this gap (see [`RESULTS_OPT.md`](polyglot/RESULTS_OPT.md));
-  nothing else on the list can. **Important framing**: these are
-  *flag-aggressiveness probes*, not runtime perf wins on real code.
-  They measure whether the compiler folded the loop, not how fast
-  it actually computes. See the "Optimization probes" subsection
-  below for the explicit honest framing, and the genuinely-non-
-  foldable [`loop_data_dependent`](polyglot/bench.rs#L122) for what
-  Perry looks like when the compiler *can't* fold.
+- **Release-mode defaults expose LLVM optimizations that strict-IEEE
+  languages need explicit flags to enable.** Perry emits f64
+  arithmetic with `reassoc contract` fast-math flags — the minimum
+  IEEE deviations TypeScript's `number` type can't observe (no
+  signalling NaNs, no fenv, no operator-level `-0` strictness) — so
+  LLVM's IndVarSimplify rewrites trivially-foldable accumulators as
+  integer induction variables and the autovectorizer generates
+  `<2 x double>` parallel-accumulator reductions. Rust / C++ / Swift
+  / Go default to IEEE-strict and need `-ffast-math` /
+  `-ffp-contract=fast` / nightly's `fadd_fast` to enable the same
+  pipeline. On
+  [`loop_data_dependent`](polyglot/bench.rs#L122) — the
+  genuinely-non-foldable f64 kernel where the compiler *can't* fold
+  the loop body away — Perry lands at **235 ms median**, dead in
+  the no-contract compiled-pack cluster (Rust 229, Swift 233,
+  Java 229, Bun 232; the FMA-contract pack of Go 128 / C++ `-O3`
+  Apple Clang 129 wins this kernel by fusing FMUL+FADD into FMADDD,
+  which LLVM matches under `-ffp-contract=fast`). The larger gaps
+  Perry shows on `loop_overhead` / `math_intensive` / `accumulate`
+  are *because those kernels are foldable* and Perry's defaults let
+  the optimizer fold them; `clang++ -O3 -ffast-math` closes those
+  gaps to within a millisecond
+  (see [`RESULTS_OPT.md`](polyglot/RESULTS_OPT.md)). Those probe
+  cells live in the TL;DR's "Optimization probes" subsection
+  above — they measure compiler flag posture, not runtime
+  performance, so they aren't on this list.
 - **Object allocation in tight loops** (`object_create`, 1M iters) —
   ties native (0 ms). Working set fits in one arena block; GC never
   fires; the inline bump allocator is ~5 instructions per `new`.
