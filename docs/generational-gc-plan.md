@@ -367,21 +367,6 @@ on-call / review / PR cycle overhead.
 | Generational GC interaction with lazy JSON parse | low | The lazy JSON tape is arena-allocated; it just lives in the nursery initially and promotes if it survives enough minor GCs — same as any other allocation |
 | Rust soundness (shadow stack as `&mut [*mut u8]`) | medium | Use raw pointers + `UnsafeCell`; audit patterns align with `arena.rs`'s existing thread-local `UnsafeCell<Arena>` |
 
-## Follow-ups / parked items
-
-- **Large-object direct promotion:** objects > 16 KB allocate
-  directly in old-gen, bypassing the nursery. Simpler to add after
-  Phase C lands.
-- **Concurrent marking:** old-gen major GC could run concurrently
-  with mutator. Multi-week effort; park until generational itself
-  is stable.
-- **Compacting old-gen:** fragmentation bothers nothing today but
-  might after a few months of real-world use. Defer until measured.
-- **Card-marking write barrier:** per-card dirty bits instead of
-  per-object remembered-set. Better for write-heavy workloads.
-  Defer until we have data showing the simple remembered-set
-  approach is the bottleneck.
-
 ## Contextual lazy JSON — heuristic runtime profiling / `@perry-lazy` pragma
 
 Captured here (orthogonal to generational GC but tracked together):
@@ -410,11 +395,104 @@ is still worth the code cost for the common case.
 
 ## Log
 
-Will be filled in as phases ship.
-
 | Date | Version | Phase | Result |
 |---|---|---|---|
-| TBD | | A — precise root tracking | |
-| TBD | | B — young/old arena split | |
-| TBD | | C — minor GC + write barriers | |
-| TBD | | D — flip default + cleanup | |
+| 2026-04-23 | v0.5.217 | A.1 — runtime shadow-stack scaffolding | `SHADOW_STACK: Vec<u64>` thread-local + 4 C-ABI entries (push/pop/slot_set/slot_get); 5 unit tests cover frame isolation + 16-deep nesting |
+| 2026-04-23 | v0.5.218 | A.2 — codegen push/pop emission | textual ret-rewrite ensures every return site pops; opt-in via `PERRY_SHADOW_STACK=1` |
+| 2026-04-23 | v0.5.219 | A.3a — slot map threading | `collect_pointer_typed_locals` assigns shadow slot indices per function; threaded through `FnCtx` |
+| 2026-04-23 | v0.5.220 | A.3b — slot-set emission | `js_shadow_slot_set(idx, bits)` emitted at every `Stmt::Let` + `Expr::LocalSet` for pointer-typed locals |
+| 2026-04-23 | v0.5.221 | A.4 — GC consumes shadow stack | new 9th root scanner walks every frame's slots; runs in parallel with conservative scanner |
+| 2026-04-23 | v0.5.222 | B — young/old arena split | `OLD_ARENA` thread-local parallel to `ARENA` + `LONGLIVED_ARENA`; `arena_alloc_old` / `arena_alloc_gc_old` non-inline allocator |
+| 2026-04-23 | v0.5.223 | C.1 — write-barrier runtime | `js_write_barrier(parent, child)` C-ABI entry + `REMEMBERED_SET: HashSet<usize>` thread-local |
+| 2026-04-24 | v0.5.224 | C.2 — codegen barrier emission | `js_write_barrier` emitted after generic `Expr::PropertySet`; opt-in via `PERRY_WRITE_BARRIERS=1` |
+| 2026-04-24 | v0.5.225 | C.2 expansion | barrier wired at every remaining heap-store site (PropertySet, IndexSet array elem, IndexSet string-key, LocalSet capture) |
+| 2026-04-24 | v0.5.226 | C.3a — RS scanned as roots | `mark_remembered_set_roots` snapshot+scan during full GC; RS clears post-sweep |
+| 2026-04-24 | v0.5.227 | C.3b — minor GC trace skips old-gen | `gc_collect_minor` + `drain_trace_worklist_minor`; treats old-gen as black leaves bounded by `O(young live + RS roots)` |
+| 2026-04-24 | v0.5.228 | C.4 non-moving — flag-based aging | `GC_FLAG_HAS_SURVIVED` / `GC_FLAG_TENURED` two-bit aging; `bench_json_roundtrip` 80→70 ms time win, RSS unchanged (no compaction yet) |
+| 2026-04-24 | v0.5.229 | C4b.α — forwarding-pointer infra | `GC_FLAG_FORWARDED = 0x80`, `forwarding_address` / `set_forwarding_address` helpers; 3 unit tests pin the data-structure layer |
+| 2026-04-24 | v0.5.230 | C4b.β — pinning + evacuation | `CONS_PINNED` thread-local + `pin_currently_marked_as_conservative`; `evacuate_tenured_nursery_objects` byte-copies non-pinned tenured objects to OLD_ARENA |
+| 2026-04-24 | v0.5.231 | C4b.γ-1 — transitive pinning safety | scanner-discovered + transitively-reached objects pinned; evacuation correctness-safe as a no-op until γ-2 lands |
+| 2026-04-25 | v0.5.234 | C4b.γ-2 — reference rewriting | 7 per-obj-type rewriters + shadow-stack walk + GLOBAL_ROOTS walk; transitive-pinning safety valve removed; evacuation actually moves objects |
+| 2026-04-25 | v0.5.235 | C4b.δ — block deallocation | `arena_reset_empty_blocks` deallocs blocks idle for 2 GC cycles back to the OS; tombstoned slots reused by Arena::alloc slow path |
+| 2026-04-25 | v0.5.236 | C4b.δ-tune — trigger ceiling | `GC_TRIGGER_ABSOLUTE_CEILING` (= initial 64 MB) caps `next_trigger`; `bench_json_roundtrip` direct path 142 → 107 MB (-25%) |
+| 2026-04-25 | v0.5.237 | D.1 — `PERRY_GEN_GC` default ON | `gen_gc_enabled()` inverted; `PERRY_GEN_GC=0` is the bisection escape hatch; `test_memory_json_churn` 115 → 91 MB |
+| 2026-04-25 | v0.5.238 | D.2 prep — `PERRY_SHADOW_STACK` default ON | `shadow_stack_enabled()` inverted; precise JS-frame coverage live for every compiled program; bench impact within noise |
+| 2026-04-25 | v0.5.239 | D — architectural completion | plan Log table updated; conservative-scanner shrink deferred (see "Deferred follow-ups" below) |
+
+**Status:** Phases A / B / C / C4 / C4b / D-architectural — all complete. The
+generational mark-sweep is the default model for every compiled
+Perry program; the architectural roadmap from the original plan is
+shipped end-to-end.
+
+## Deferred follow-ups
+
+The original Phase D scope listed "Conservative scanner shrinks to
+'scan only the C stack below JS frames' (the Rust runtime's local
+variables)" as a sub-goal. Implementing that correctly turns out to
+require platform-specific frame-pointer walking that this plan
+underestimated, and the perf benefit on measured workloads is small
+enough that deferring is the right call. The argument:
+
+**Why it's correctness-sensitive.** The shadow stack precisely
+covers JS frame slots that hold pointer-typed locals — but the JS
+frame's *position on the C stack* is bounded by SP-at-push (low
+boundary) and SP-of-caller-at-call-time (high boundary, = where
+the JS frame ends and the caller's frame begins). The high
+boundary isn't recoverable from `js_shadow_frame_push` alone — it
+requires reading the saved frame-pointer chain from the FP register
+on entry, which is platform-specific (ARM64 vs x86_64) and ABI-
+fragile (Rust calling-convention assumptions).
+
+Naively skipping just by SP-at-push (treating the range
+`[push_SP, next_outer_push_SP)` as "JS frame i") is unsafe because
+that range can include Rust runtime frames sandwiched between JS
+frames — concrete example: JS function A calls `js_array_map` (Rust
+runtime), which calls back into JS callback B. Stack from low to
+high: B's frame, `js_array_map`'s frame, A's frame. If GC fires from
+inside B's call chain and we skip the range
+`[B_push_SP, A_push_SP)`, we miss `js_array_map`'s frame — and that
+frame holds JSValue locals (the array, the callback ptr, the
+current element) that are the only roots keeping those objects
+alive. Live objects get prematurely freed.
+
+**Why deferring is fine.** Conservative scan time is sub-1% of
+total runtime on every measured benchmark — the per-GC-cycle stack
+walk is microseconds against benchmarks running hundreds of
+milliseconds. The "over-promotion" cost from conservative
+false-positives is also small in practice: the conservative-pinning
+policy in C4b means false-positive roots only block evacuation,
+not retention, and most workloads don't have enough tenured objects
+for evacuation to matter much. The big architectural wins from
+generational GC — minor-collection time, write-barrier-driven RS,
+trigger ceiling, block dealloc — all already lived without the
+scanner shrink.
+
+**What a future implementation would look like.** Capture FP at
+`js_shadow_frame_push` entry (`asm!("mov {}, x29", out(reg) fp)`
+on ARM64) and store it alongside the slot count in the shadow
+frame header. At GC time, walk the FP chain to compute precise
+JS frame ranges (`[saved_FP_+_16, caller_saved_FP]` on ARM64),
+union them, and have the conservative scanner skip those address
+ranges. Test with deep alternating JS↔Rust call chains
+(`js_array_map(callback)` patterns) to confirm Rust frames between
+JS frames stay covered.
+
+## Other parked items
+
+- **Large-object direct promotion:** objects > 16 KB allocate
+  directly in old-gen, bypassing the nursery. Simpler to add after
+  Phase C lands.
+- **Concurrent marking:** old-gen major GC could run concurrently
+  with mutator. Multi-week effort; park until generational itself
+  is stable.
+- **Compacting old-gen:** fragmentation bothers nothing today but
+  might after a few months of real-world use. Defer until measured.
+- **Card-marking write barrier:** per-card dirty bits instead of
+  per-object remembered-set. Better for write-heavy workloads.
+  Defer until we have data showing the simple remembered-set
+  approach is the bottleneck.
+- **Flip `PERRY_GEN_GC_EVACUATE=1` default:** evacuation is
+  correctness-safe and tested but a no-op on workloads where
+  nothing tenures (so the work it does is overhead, not benefit).
+  Flipping benefits from production-soak data on programs where
+  evacuation actually fires.

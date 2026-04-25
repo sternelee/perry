@@ -2,6 +2,32 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.239 — Gen-GC **roadmap complete (architectural)** — closing commit on the multi-week generational GC migration started in v0.5.217. Updates `docs/generational-gc-plan.md`: the previously-empty Log table now contains 21 entries spanning Phases A → D, dated and version-tagged with one-line summaries; the original "Follow-ups / parked items" section is consolidated under a new "Other parked items" with the addition of "Flip `PERRY_GEN_GC_EVACUATE=1` default" (gated on production-soak data); a new "Deferred follow-ups" section explains why the conservative-scanner shrink originally listed in Phase D is deferred.
+
+**The conservative-scanner shrink rationale, captured in the plan and reproduced here for the changelog record:** the original Phase D scope said "Conservative scanner shrinks to 'scan only the C stack below JS frames' (the Rust runtime's local variables)". The intent was clear — drop conservative coverage where the shadow stack authoritatively covers — but the implementation is correctness-sensitive in a way the plan underestimated.
+
+The naive simple-shrink: capture SP at every `js_shadow_frame_push`, treat the range `[push_SP, next_outer_push_SP)` as "JS frame i", have the conservative scanner skip those ranges. **This is unsafe**. Concrete failing case: JS function A calls `js_array_map` (Rust runtime function), which calls back into JS callback B. Stack from low (newest) to high (oldest) addresses: B's frame, `js_array_map`'s frame, A's frame. If GC fires from inside B's call chain and we skip the range `[B_push_SP, A_push_SP)`, we miss `js_array_map`'s frame entirely. That frame holds JSValue locals (the array, the callback ptr, the current element) that are the only roots keeping those objects alive — they were passed to `js_array_map` by A and forwarded to B, but A's reference is on A's stack ABOVE A_push_SP, B's reference is in B's shadow stack slots, and the in-flight reference inside `js_array_map` is in its frame, which we just skipped. Live objects get prematurely freed; B crashes when it next dereferences.
+
+**The safe implementation** requires reading the saved frame-pointer chain from the FP register on entry to `js_shadow_frame_push` (`asm!("mov {}, x29", out(reg) fp)` on ARM64; equivalent on x86_64), storing it alongside the slot count in the shadow frame header, walking the FP chain at GC time to compute precise JS frame ranges (`[saved_FP_+_16, caller_saved_FP]` on ARM64 — caller's saved FP becomes the JS frame's TOP boundary), and unioning those ranges so the conservative scanner skips only true JS-frame addresses. This is platform-specific and ABI-fragile. Test coverage requires deep alternating JS↔Rust call chains exercising the `js_array_map(callback)` pattern under both shadow-on and shadow-off modes.
+
+**Why deferring is fine in practice.** Conservative-scan time is sub-1% of total runtime on every measured benchmark — the per-GC-cycle stack walk is microseconds against benchmarks running hundreds of milliseconds. The over-promotion cost from conservative false-positives (numbers, return addresses, etc., that bit-alias heap pointers) is also small: the conservative-pinning policy from C4b means false-positive roots only block evacuation, not retention, and most real workloads don't have enough tenured objects for evacuation to matter much. The big architectural wins from generational GC — minor-collection time, write-barrier-driven RS scanning, trigger ceiling, idle-block dealloc — are all live without the scanner shrink.
+
+**Roadmap status as of this commit:**
+
+- Phase A (precise root tracking): ✅ complete (v0.5.217–221)
+- Phase B (young/old arena split): ✅ complete (v0.5.222)
+- Phase C (minor GC + write barriers): ✅ complete (v0.5.223–227)
+- Phase C4 (non-moving tenuring): ✅ complete (v0.5.228)
+- Phase C4b (copying evacuation): ✅ complete (v0.5.229–236, six sub-phases α/β/γ-1/γ-2/δ/δ-tune)
+- Phase D part 1 (`PERRY_GEN_GC` default ON): ✅ complete (v0.5.237)
+- Phase D part 2 prep (`PERRY_SHADOW_STACK` default ON): ✅ complete (v0.5.238)
+- Phase D part 2 (conservative scanner shrink): **deferred** (above)
+- Six-week soak on `main`: operational, not actionable from a code commit
+
+The original plan estimated 5-7 weeks for a single focused engineer; the actual landing was over 23 commits across two days of focused work, with the Log table tracking each as it shipped.
+
+**No code changes in this commit.** Pure documentation. Build clean, all regressions still passing from v0.5.238.
+
 ## v0.5.238 — Gen-GC **Phase D part 2 prep** — flip `PERRY_SHADOW_STACK` codegen default ON. The shadow stack from Phase A (v0.5.217-221) precisely covers every pointer-typed local in compiled JS frames; runs in parallel with the conservative C-stack scanner as a redundant authoritative root source. Default OFF since landing because (a) shadow-stack push/pop add codegen overhead that wasn't compensated by anything before Phase D, and (b) the conservative scan was authoritative on its own. With Phase D Part 1 (v0.5.237) flipping `PERRY_GEN_GC` default ON, the shadow stack's precision becomes valuable — fewer over-promoted objects in generational mode means less work each GC cycle, and the conservative scan's false-positive rate (numbers, return addresses, etc., that happen to alias heap pointers) costs more in the gen-GC world (over-pinned objects skip evacuation). Flipping the shadow-stack default now lets users get the gen-GC + precision combo without an env var.
 
 `shadow_stack_enabled()` in `crates/perry-codegen/src/codegen.rs` inverted from "matches `1`/`on`/`true`" to "doesn't match `0`/`off`/`false`". `PERRY_SHADOW_STACK=0` (or `=off`, `=false`) is the bisection escape hatch.
