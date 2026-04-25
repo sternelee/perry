@@ -77,6 +77,58 @@ pub const GC_FLAG_TENURED: u8 = 0x20;
 /// to TENURED. Two-bit aging (HAS_SURVIVED → TENURED) gives
 /// PROMOTION_AGE=2 without needing a counter field.
 pub const GC_FLAG_HAS_SURVIVED: u8 = 0x40;
+/// Gen-GC Phase C4b: object has been evacuated (copied) to a new
+/// location. The new address is stored in the **user-payload's
+/// first 8 bytes** (immediately after the GcHeader). Walkers that
+/// encounter a FORWARDED header read the forwarding address and
+/// follow it; ref-rewrite passes update every NaN-boxed pointer
+/// they observe to the forwarded address. Conservative-stack
+/// scans STILL get the old (now-stale) address; objects that
+/// might be conservatively referenced are pinned out of the
+/// evacuation set via `GC_FLAG_PINNED` to avoid corrupting reads
+/// from those words.
+///
+/// This is the last bit in the u8 gc_flags. Adding more flags
+/// requires extending GcHeader (currently 8 bytes total — extending
+/// breaks ABI everywhere; deferred until/unless a future phase
+/// genuinely needs more bits).
+pub const GC_FLAG_FORWARDED: u8 = 0x80;
+
+/// Read the forwarding address embedded in an evacuated object's
+/// user payload. Caller must verify `gc_flags & GC_FLAG_FORWARDED`
+/// is set; reading otherwise returns garbage. The forwarded
+/// address is the **user pointer** of the new location — i.e.
+/// what `arena_alloc_gc_old` returned for the new copy. Callers
+/// that need the new GcHeader subtract `GC_HEADER_SIZE` themselves.
+///
+/// # Safety
+/// `header` must point to a valid GcHeader whose user payload is
+/// at least 8 bytes (every Perry object's payload is — strings
+/// have at least the StringHeader, arrays have ArrayHeader, etc.).
+#[inline]
+pub unsafe fn forwarding_address(header: *const GcHeader) -> *mut u8 {
+    debug_assert!((*header).gc_flags & GC_FLAG_FORWARDED != 0,
+        "forwarding_address called on non-forwarded header");
+    let user_ptr = (header as *const u8).add(GC_HEADER_SIZE) as *const *mut u8;
+    *user_ptr
+}
+
+/// Install a forwarding address in an evacuated object's user
+/// payload and set `GC_FLAG_FORWARDED` on its header. The first 8
+/// bytes of the user payload become the forwarding pointer (the
+/// new user address — what `arena_alloc_gc_old` returned).
+/// Subsequent reads via `forwarding_address` recover the new
+/// location.
+///
+/// # Safety
+/// As `forwarding_address`. The user payload must be at least 8
+/// bytes; this is true for every Perry GC type today.
+#[inline]
+pub unsafe fn set_forwarding_address(header: *mut GcHeader, new_user_addr: *mut u8) {
+    let user_ptr = (header as *mut u8).add(GC_HEADER_SIZE) as *mut *mut u8;
+    *user_ptr = new_user_addr;
+    (*header).gc_flags |= GC_FLAG_FORWARDED;
+}
 
 // Object flags stored in GcHeader._reserved (u16) for Object.freeze/seal/preventExtensions
 pub const OBJ_FLAG_FROZEN: u16 = 0x01;
@@ -2960,6 +3012,62 @@ mod tests {
             let header = header_from_user_ptr(user_ptr);
             assert_ne!((*header).gc_flags & GC_FLAG_TENURED, 0,
                 "tenured stays tenured across subsequent collections");
+        }
+    }
+
+    #[test]
+    fn test_forwarding_pointer_roundtrip() {
+        // Allocate a nursery object, simulate evacuation by copying
+        // its bytes into an old-gen alloc, install the forwarding
+        // address in the nursery header. Read back via
+        // forwarding_address to confirm round-trip.
+        let nursery_user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let old_user = crate::arena::arena_alloc_gc_old(64, 8, GC_TYPE_OBJECT);
+        unsafe {
+            // Pre-condition: not forwarded yet.
+            let nursery_hdr = header_from_user_ptr(nursery_user);
+            assert_eq!((*nursery_hdr).gc_flags & GC_FLAG_FORWARDED, 0);
+            // Install forwarding pointer.
+            set_forwarding_address(nursery_hdr as *mut GcHeader, old_user);
+            // Post-condition: flag set, address readable.
+            assert_ne!((*nursery_hdr).gc_flags & GC_FLAG_FORWARDED, 0);
+            assert_eq!(forwarding_address(nursery_hdr), old_user);
+        }
+    }
+
+    #[test]
+    fn test_forwarding_does_not_disturb_other_flags() {
+        // Setting FORWARDED must preserve every other gc_flags bit.
+        let user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let old = crate::arena::arena_alloc_gc_old(64, 8, GC_TYPE_OBJECT);
+        unsafe {
+            let hdr = header_from_user_ptr(user) as *mut GcHeader;
+            // Set a few unrelated flags.
+            (*hdr).gc_flags |= GC_FLAG_MARKED | GC_FLAG_TENURED | GC_FLAG_HAS_SURVIVED;
+            let before = (*hdr).gc_flags;
+            set_forwarding_address(hdr, old);
+            let after = (*hdr).gc_flags;
+            assert_eq!(after & GC_FLAG_FORWARDED, GC_FLAG_FORWARDED);
+            // Every bit that was set before stays set.
+            assert_eq!(after & before, before, "forwarding installation cleared an existing flag");
+        }
+    }
+
+    #[test]
+    fn test_forwarding_pointer_value_is_8_bytes_at_user_offset_zero() {
+        // The forwarding pointer is stored in the first 8 bytes of
+        // the user payload. This invariant is load-bearing for any
+        // future walker that wants to skip over forwarded objects
+        // by reading the new address inline. Verify by direct
+        // pointer arithmetic.
+        let nursery_user = crate::arena::arena_alloc_gc(64, 8, GC_TYPE_OBJECT);
+        let target = 0x12345678_9ABCDEF0_u64 as *mut u8;
+        unsafe {
+            let hdr = header_from_user_ptr(nursery_user) as *mut GcHeader;
+            set_forwarding_address(hdr, target);
+            // Read directly: user_ptr cast to *const *mut u8.
+            let raw = nursery_user as *const *mut u8;
+            assert_eq!(*raw, target);
         }
     }
 

@@ -229,6 +229,83 @@ allocation paths.
   already die entirely before GC, so minor GC would rarely fire).
 - No test regressions under `PERRY_GEN_GC=1`.
 
+### Phase C4b — Copying evacuation (RSS win)
+
+**Status:** infrastructure landed in v0.5.229 (`GC_FLAG_FORWARDED`,
+`forwarding_address` / `set_forwarding_address` helpers, 3 unit tests
+pinning the data structure). Real copying lands in C4b-β + γ.
+
+**Why this is the architectural boss-fight:** moving an object
+across arenas requires updating every reference to it. Sources of
+references in Perry today:
+- Shadow stack slots (precise, mutable — easy to rewrite)
+- Module globals (precise, mutable — easy)
+- 9 registered root scanners — currently expose `&mut FnMut(f64)`
+  for marking; would need a parallel mutable variant for rewriting
+- Marked arena/malloc objects' fields (mutable; standard heap walk)
+- **Conservative C-stack scan** — discovers candidate pointers by
+  bit-pattern matching memory words. We can't safely rewrite those
+  words (they might not actually be pointers).
+
+**Pinning policy** (the safety lever): any object reached by the
+conservative stack scan must NOT be evacuated. Track via a new
+`GC_FLAG_CONS_PINNED` bit set by the conservative-scan path
+(needs new mark variant: `mark_stack_roots_with_pinning`).
+Evacuation candidates = `MARKED & TENURED & !CONS_PINNED &
+in-nursery`.
+
+**Three sub-steps for C4b:**
+
+#### C4b-α — Forwarding-pointer infrastructure (✅ landed v0.5.229)
+
+Constants + helpers + 3 round-trip tests. No actual evacuation
+yet. Makes the "this object has been moved" data structure
+addressable from elsewhere.
+
+#### C4b-β — Conservative-pinning + evacuation pass
+
+1. Add `GC_FLAG_CONS_PINNED` constant.
+2. New `mark_stack_roots_with_pinning(valid_ptrs)` that sets
+   CONS_PINNED on every object found by conservative scan
+   (intercept at `try_mark_value` callsite from
+   `mark_stack_roots`).
+3. `gc_collect_minor` calls the pinning variant instead of
+   `mark_stack_roots`.
+4. After age-bump, walk arena nursery objects:
+   - Candidate = MARKED + TENURED + !CONS_PINNED + in-nursery.
+   - For each candidate: `arena_alloc_gc_old(size, align, obj_type)`,
+     copy bytes, `set_forwarding_address` on nursery header.
+5. **Don't yet rewrite references.** Compiled code following
+   pointers to evacuated objects WILL crash because their nursery
+   slots now hold forwarding pointers. Gate this whole phase on
+   a temporary `PERRY_GEN_GC_EVACUATE=1` env var so default
+   behavior is untouched.
+
+#### C4b-γ — Reference rewriting
+
+Walk every reference site and rewrite forwarded pointers:
+- Shadow stack: walk `SHADOW_STACK_FRAME_TOP` chain, for each
+  slot's NaN-boxed value, if its pointee is forwarded, write the
+  new address back.
+- Module globals: same pattern over `GLOBAL_ROOTS`.
+- Registered root scanners: extend the API to include a mutable
+  variant (`scan_*_roots_for_rewrite(rewrite_fn)`).
+- All marked arena+malloc objects: walk fields per obj_type using
+  the existing `trace_*` family, but rewriting refs instead of
+  marking.
+- Skip conservative C-stack — the CONS_PINNED policy guarantees
+  evacuated objects have no conservative refs.
+
+After rewriting, dead nursery blocks become reclaimable (none of
+their objects have live references). `arena_reset_empty_blocks`
+already handles this; the only change is that more blocks now
+qualify because their formerly-tenured occupants have moved.
+
+**Ship criterion C4b complete:** `bench_json_roundtrip` direct-
+path RSS ≤70 MB (down from current 109 MB) without time
+regression beyond 10%. Full test corpus clean under
+`PERRY_GEN_GC=1 PERRY_GEN_GC_EVACUATE=1`.
+
 ### Phase D — Flip defaults + clean up conservative scanner
 
 **Scope:**
