@@ -1299,6 +1299,19 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
     crate::notifications::send(title_ptr as *const u8, body_ptr as *const u8);
 }
 
+/// Register for remote (APNs) notifications. `callback` is invoked once with
+/// the device token hex string when iOS/macOS negotiates one.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    crate::notifications::register_remote(callback);
+}
+
+/// Register a handler for foreground remote-notification payloads.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    crate::notifications::on_receive(callback);
+}
+
 // =============================================================================
 // Location (perry/system) — stub on macOS, iOS only
 // =============================================================================

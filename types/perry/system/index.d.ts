@@ -60,6 +60,31 @@ export function preferencesSet(key: string, value: string | number): void;
 /** Send a local notification. */
 export function notificationSend(title: string, body: string): void;
 
+/**
+ * Register for remote (push) notifications.
+ *
+ * The callback fires once when the OS returns a device token. On Apple
+ * platforms the token is formatted as the canonical uppercase hex string
+ * (no spaces, no `<>`) that APNs-side code expects.
+ *
+ * Requires the relevant platform capability:
+ * - iOS/macOS: APNs entitlement (`aps-environment`) + a provisioning profile.
+ * - Android: Firebase Messaging + `google-services.json` (not yet wired).
+ *
+ * No-op on platforms without a push pipeline (tvOS, visionOS, watchOS, GTK4,
+ * Windows, Web).
+ */
+export function notificationRegisterRemote(onToken: (token: string) => void): void;
+
+/**
+ * Register a handler for incoming remote-notification payloads received while
+ * the app is foregrounded. The payload object is the APNs `aps` userInfo
+ * dictionary (or equivalent platform shape) converted to a plain object.
+ *
+ * Background/terminated-app delivery is a separate pipeline (see issue #98).
+ */
+export function notificationOnReceive(cb: (payload: object) => void): void;
+
 // ---------------------------------------------------------------------------
 // Audio input
 // ---------------------------------------------------------------------------

@@ -1552,6 +1552,16 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
 }
 
 #[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(callback: f64) {
+    notifications::register_remote(callback);
+}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
+    notifications::on_receive(callback);
+}
+
+#[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" {
         fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;

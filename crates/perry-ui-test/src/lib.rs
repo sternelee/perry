@@ -250,6 +250,8 @@ pub const FEATURES: &[Feature] = &[
     Feature { name: "perry_system_keychain_get",       category: SystemApi, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
     Feature { name: "perry_system_keychain_delete",    category: SystemApi, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
     Feature { name: "perry_system_notification_send",  category: SystemApi, macos: S, ios: S, android: S, gtk4: S, windows: S, web: S, web_name: None },
+    Feature { name: "perry_system_notification_register_remote", category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
+    Feature { name: "perry_system_notification_on_receive",      category: SystemApi, macos: S, ios: S, android: U, gtk4: U, windows: U, web: U, web_name: None },
 
     // ── Web-Only Functions ───────────────────────────────────────────────
     // These exist only in the web runtime and have no native equivalent.

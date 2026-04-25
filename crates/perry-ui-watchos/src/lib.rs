@@ -671,6 +671,8 @@ pub extern "C" fn perry_ui_hstack_create_with_insets(spacing: f64, top: f64, lef
 #[no_mangle] pub extern "C" fn perry_system_keychain_get(_key: i64) -> f64 { f64::from_bits(0x7FFC_0000_0000_0001) }
 #[no_mangle] pub extern "C" fn perry_system_keychain_delete(_key: i64) {}
 #[no_mangle] pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+#[no_mangle] pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i32) -> i64; }

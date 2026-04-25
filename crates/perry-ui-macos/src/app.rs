@@ -1204,6 +1204,51 @@ define_class!(
         fn application_did_become_active(&self, _notification: &AnyObject) {
             invoke_activate_callback();
         }
+
+        /// APNs handed us a device token (#95). Hex-format it and call the
+        /// closure passed to `notificationRegisterRemote`.
+        #[unsafe(method(application:didRegisterForRemoteNotificationsWithDeviceToken:))]
+        fn did_register_for_remote_notifications(
+            &self,
+            _app: &AnyObject,
+            device_token: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_device_token(
+                    device_token as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// APNs rejected the registration (missing entitlement, network
+        /// error, …). Logged to stderr.
+        #[unsafe(method(application:didFailToRegisterForRemoteNotificationsWithError:))]
+        fn did_fail_to_register_for_remote_notifications(
+            &self,
+            _app: &AnyObject,
+            error: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_registration_failure(
+                    error as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// Foreground remote-notification payload. Background delivery is
+        /// issue #98 (needs `fetchCompletionHandler:` variant).
+        #[unsafe(method(application:didReceiveRemoteNotification:))]
+        fn did_receive_remote_notification(
+            &self,
+            _app: &AnyObject,
+            user_info: &AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_remote_payload(
+                    user_info as *const _ as *mut AnyObject,
+                );
+            }
+        }
     }
 );
 

@@ -1504,6 +1504,12 @@ pub extern "C" fn perry_system_keychain_delete(key_ptr: i64) {
 pub extern "C" fn perry_system_notification_send(_title: i64, _body: i64) {}
 
 #[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+
+#[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" {
         fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8;

@@ -1102,6 +1102,16 @@ pub extern "C" fn perry_system_notification_send(title_ptr: i64, body_ptr: i64) 
     system::notification_send(title_ptr as *const u8, body_ptr as *const u8);
 }
 
+/// Stub: GTK4 has no remote-push pipeline. Symbol exists so TS code that
+/// calls `notificationRegisterRemote` links and runs without crashing — the
+/// callback simply never fires.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
+
+/// Stub: see `perry_system_notification_register_remote` above.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
+
 #[no_mangle]
 pub extern "C" fn perry_system_get_locale() -> i64 {
     extern "C" { fn js_string_from_bytes(ptr: *const u8, len: i64) -> *const u8; }
