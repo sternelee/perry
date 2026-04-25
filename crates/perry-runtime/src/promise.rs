@@ -48,9 +48,15 @@ impl Promise {
     }
 }
 
-// Global task queue for pending promise callbacks
+// Global task queue for pending promise callbacks. Must be FIFO per
+// ECMAScript microtask semantics: `Promise.resolve(1).then(...)` and
+// `Promise.resolve(2).then(...)` registered in source order must run
+// their continuations in source order (1 first, then 2). Using a
+// `Vec` with `.pop()` produces LIFO ordering, breaking every test
+// that prints inside multiple parallel promise chains.
 thread_local! {
-    static TASK_QUEUE: RefCell<Vec<(*mut Promise, f64, bool)>> = RefCell::new(Vec::new());
+    static TASK_QUEUE: RefCell<std::collections::VecDeque<(*mut Promise, f64, bool)>>
+        = RefCell::new(std::collections::VecDeque::new());
 }
 
 /// Allocate a new Promise
@@ -133,7 +139,7 @@ pub extern "C" fn js_promise_resolve(promise: *mut Promise, value: f64) {
         // Schedule callbacks
         if !(*promise).on_fulfilled.is_null() {
             TASK_QUEUE.with(|q| {
-                q.borrow_mut().push((promise, value, true));
+                q.borrow_mut().push_back((promise, value, true));
             });
         }
     }
@@ -227,7 +233,7 @@ pub extern "C" fn js_promise_reject(promise: *mut Promise, reason: f64) {
         // Schedule callbacks
         if !(*promise).on_rejected.is_null() {
             TASK_QUEUE.with(|q| {
-                q.borrow_mut().push((promise, reason, false));
+                q.borrow_mut().push_back((promise, reason, false));
             });
         }
     }
@@ -258,14 +264,14 @@ pub extern "C" fn js_promise_then(
             PromiseState::Fulfilled => {
                 if !on_fulfilled.is_null() {
                     TASK_QUEUE.with(|q| {
-                        q.borrow_mut().push((promise, (*promise).value, true));
+                        q.borrow_mut().push_back((promise, (*promise).value, true));
                     });
                 }
             }
             PromiseState::Rejected => {
                 if !on_rejected.is_null() {
                     TASK_QUEUE.with(|q| {
-                        q.borrow_mut().push((promise, (*promise).reason, false));
+                        q.borrow_mut().push_back((promise, (*promise).reason, false));
                     });
                 }
             }
@@ -323,30 +329,58 @@ pub extern "C" fn js_promise_run_microtasks() -> i32 {
 
     // Then process the task queue
     loop {
-        let task = TASK_QUEUE.with(|q| q.borrow_mut().pop());
+        let task = TASK_QUEUE.with(|q| q.borrow_mut().pop_front());
 
         match task {
             Some((promise, value, is_fulfilled)) => {
                 unsafe {
-                    let result = if is_fulfilled {
-                        let callback = (*promise).on_fulfilled;
-                        if !callback.is_null() {
-                            crate::closure::js_closure_call1(callback, value)
-                        } else {
-                            value
-                        }
+                    let callback = if is_fulfilled {
+                        (*promise).on_fulfilled
                     } else {
-                        let callback = (*promise).on_rejected;
-                        if !callback.is_null() {
-                            crate::closure::js_closure_call1(callback, value)
-                        } else {
-                            value
-                        }
+                        (*promise).on_rejected
                     };
 
-                    // Resolve the next promise in chain
-                    if !(*promise).next.is_null() {
-                        js_promise_resolve((*promise).next, result);
+                    // No callback registered → propagate the value/reason
+                    // to the next promise without invoking anything.
+                    if callback.is_null() {
+                        if !(*promise).next.is_null() {
+                            if is_fulfilled {
+                                js_promise_resolve((*promise).next, value);
+                            } else {
+                                js_promise_reject((*promise).next, value);
+                            }
+                        }
+                        ran += 1;
+                        continue;
+                    }
+
+                    // Wrap the callback in a setjmp so a `throw` inside
+                    // it rejects the next promise instead of crashing
+                    // through `print_uncaught` (TRY_DEPTH would otherwise
+                    // be 0 here — microtask runner has no surrounding
+                    // user-level try block). Same setjmp-from-Rust
+                    // pattern as `gc.rs::mark_stack_roots`.
+                    extern "C" {
+                        fn setjmp(env: *mut i32) -> i32;
+                    }
+                    let buf = crate::exception::js_try_push();
+                    let jumped = setjmp(buf);
+                    if jumped == 0 {
+                        let result = crate::closure::js_closure_call1(callback, value);
+                        crate::exception::js_try_end();
+                        if !(*promise).next.is_null() {
+                            js_promise_resolve((*promise).next, result);
+                        }
+                    } else {
+                        // Callback threw — convert to rejection of next
+                        // promise. Pull the exception value, clear it,
+                        // pop the try block (longjmp doesn't unwind it).
+                        let exc = crate::exception::js_get_exception();
+                        crate::exception::js_clear_exception();
+                        crate::exception::js_try_end();
+                        if !(*promise).next.is_null() {
+                            js_promise_reject((*promise).next, exc);
+                        }
                     }
                 }
                 ran += 1;
