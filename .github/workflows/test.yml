@@ -26,16 +26,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry + target
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -61,16 +82,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: actions/cache@v4
         with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -102,16 +144,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: actions/cache@v4
         with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -183,16 +246,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
         uses: actions/cache@v4
         with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
@@ -345,6 +429,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # macos-14 ships with ~14 GB free disk after the preinstalled Xcode +
+      # iOS/tvOS/watchOS simulator runtime images. Several `cargo build
+      # --release` jobs in this workflow consistently OOM'd at the cache
+      # restore step (`No space left on device` from the runner's own
+      # diagnostic writer, before cargo even started). Wiping the simulator
+      # runtime IMAGES — not the SDKs — reclaims ~15-25 GB without
+      # affecting cross-compile to `aarch64-apple-ios-sim` (that only needs
+      # the SDK, which lives inside the active Xcode app).
+      - name: Free up disk space (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/*Simulator* || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator/Caches/* || true
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "Disk free: ${BEFORE} -> ${AFTER}"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -416,10 +517,14 @@ jobs:
       - name: Cache cargo
         uses: actions/cache@v4
         with:
+          # NOTE: deliberately NOT caching `target/` — on macos-14 runners
+          # (~14 GB free out of the box after preinstalled Xcode + sims) the
+          # restored release artifacts pushed disk usage past the limit and
+          # the runner OOM'd before cargo even started. Registry+git cache
+          # alone gives ~80% of the warm-build win without the disk hit.
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
