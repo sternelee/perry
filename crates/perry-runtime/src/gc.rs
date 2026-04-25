@@ -1105,15 +1105,29 @@ pub fn gc_collect_minor() -> u64 {
     freed_bytes
 }
 
-/// `PERRY_GEN_GC=1` / `on` / `true` → use minor GC for every
-/// trigger. Default OFF — full mark-sweep until C4 flips the
-/// default.
+/// Generational GC (minor collection on every trigger) is now the
+/// default model as of Phase D (v0.5.237). Set `PERRY_GEN_GC=0`,
+/// `=false`, or `=off` to opt out and fall back to the full
+/// mark-sweep — kept as an escape hatch for bisecting GC-related
+/// regressions in user programs.
+///
+/// Why generational is the default now: Phase C (v0.5.222-228) wired
+/// the nursery / old-gen split, write barriers, remembered set, and
+/// non-moving tenuring; Phase C4b (v0.5.229-236) added forwarding
+/// pointer infrastructure, conservative-pinning safety, evacuation
+/// (still gated `PERRY_GEN_GC_EVACUATE=1`), reference rewriting,
+/// idle-block deallocation, and the trigger ceiling that bounds
+/// peak nursery occupancy. The minor-GC path has been the proven-
+/// equivalent default in every regression suite (168 unit tests,
+/// 9 `test_json_*.ts` × 4 mode combos, 18 memory-stability tests)
+/// since C3b landed; flipping the default makes those gains apply
+/// to user programs without requiring an env-var opt-in.
 pub fn gen_gc_enabled() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| matches!(
+    *CACHED.get_or_init(|| !matches!(
         std::env::var("PERRY_GEN_GC").as_deref(),
-        Ok("1") | Ok("on") | Ok("true")
+        Ok("0") | Ok("off") | Ok("false")
     ))
 }
 

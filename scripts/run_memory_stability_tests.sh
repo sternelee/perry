@@ -17,8 +17,8 @@
 #     operations. Test passes ⟺ exit code 0 + correct stdout.
 #
 # Each test runs under THREE GC mode combos:
-#   - default
-#   - PERRY_GEN_GC=1
+#   - default (now generational GC as of Phase D, v0.5.237)
+#   - mark-sweep (PERRY_GEN_GC=0 — bisection escape hatch)
 #   - PERRY_GEN_GC=1 PERRY_WRITE_BARRIERS=1
 # so a regression in any mode is caught.
 #
@@ -84,7 +84,7 @@ run_test() {
 
     local mode_specs=(
         "default|"
-        "gen-gc|PERRY_GEN_GC=1"
+        "mark-sweep|PERRY_GEN_GC=0"
         "gen-gc+wb|PERRY_GEN_GC=1 PERRY_WRITE_BARRIERS=1"
     )
 

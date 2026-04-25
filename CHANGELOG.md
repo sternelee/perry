@@ -2,6 +2,39 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.237 — Gen-GC **Phase D part 1** — flip `PERRY_GEN_GC` default. Generational mark-sweep is now the default model: every Perry program runs minor GC on every collection trigger, with the nursery / old-gen split, write-barrier remembered set, two-bit aging, conservative-pinning safety lever, and the C4b-γ-2 reference-rewriting evacuation infrastructure all live by default. `gen_gc_enabled()` in `crates/perry-runtime/src/gc.rs` inverted from "match `1`/`on`/`true`" to "doesn't match `0`/`off`/`false`". `PERRY_GEN_GC=0` (or `=off`, `=false`) is the bisection escape hatch — kept so anyone who hits a GC-related regression in real code can revert to full mark-sweep without rebuilding.
+
+The decision rationale: every Phase C / C4 / C4b sub-phase has been live as opt-in for the last 9 commits (v0.5.227 through v0.5.236), exercised by the full test corpus (168 runtime unit tests, 9 `test_json_*.ts` × 4 mode combos, 18 memory-stability tests in 3 modes, the bench suite), with measured wins on long-running workloads (`test_memory_json_churn` 115 → 91 MB after this flip — minor GC + trigger ceiling combined). The opt-in posture was right while the infrastructure was being built; with C4b architecturally complete (forwarding pointers, evacuation, rewriting, dealloc, ceiling), keeping it gated buries the wins behind an env-var users have to discover.
+
+`PERRY_GEN_GC_EVACUATE` stays opt-in for now — evacuation is correctness-safe and tested, but the bench-RSS measurement showed it's a no-op on workloads where nothing tenures (so the work the evac pass does is overhead, not benefit). Flipping that default is a separate decision that benefits from production-soak data on the kinds of programs where evacuation actually fires.
+
+`scripts/run_memory_stability_tests.sh` updated to test three modes:
+- `default` (was "the empty env"; now equals gen-gc)
+- `mark-sweep` (was "explicit gen-gc"; now `PERRY_GEN_GC=0` to test the escape hatch)
+- `gen-gc+wb` (unchanged: gen-gc with codegen write barriers)
+
+This way each commit's CI run still exercises both code paths (gen-gc and mark-sweep) instead of testing the same default twice.
+
+**Verified end-to-end on the new default:**
+- `cargo test --release -p perry-runtime --lib`: 168/168 PASS.
+- `test_json_*.ts`: 9/9 byte-for-byte across all 4 mode combos (default / `PERRY_GEN_GC=0` / `PERRY_GEN_GC_EVACUATE=1` / both).
+- Memory-stability suite: 18/18 PASS under default / mark-sweep / gen-gc+wb. **`test_memory_json_churn` drops 115 → 91 MB under the new default** (-21%); all other tests unchanged because their working sets fit under 64 MB so the GC mode doesn't matter.
+- 6/6 PASS under `PERRY_GEN_GC=1 PERRY_GEN_GC_EVACUATE=1` (already covered before; included here for completeness).
+
+**Bench impact:**
+- `bench_json_roundtrip` direct (no lazy): 358 → 372 ms (+4% time), RSS unchanged at 107 MB. Pure overhead from the gen-GC machinery (write-barrier path, age-bumping, evacuation entry) on a workload where almost nothing tenures so the work doesn't pay off. The escape hatch is right there for users who notice this on direct-path JSON-heavy programs.
+- `bench_json_roundtrip` lazy (default since v0.5.210, applies to ≥1KB blobs): 67 ms / 90 MB unchanged.
+- `bench_json_readonly`: 65 ms / 85 MB (~tied).
+- `07_object_create`: 0 ms / 6.5 MB unchanged (working set fits in one block, GC never fires regardless of mode).
+- `12_binary_trees`: unchanged.
+- `bench_gc_pressure`: 17 ms / 26.6 MB unchanged.
+
+**The conservative-scanner shrink — Phase D's second half — is intentionally left for a follow-up.** The plan calls for "scan only the C stack below JS frames" (= the runtime Rust frames; the shadow stack from Phase A covers JS frames precisely). Implementing that requires capturing SP at every JS↔Rust transition and walking only the runtime-active range, with re-entrancy handling for Rust→JS callback chains. It's correctness-sensitive: the shadow stack must cover what the conservative scan stops covering, or live nursery objects get prematurely freed. That's a careful piece of work that benefits from soak time after this default-flip lands.
+
+**Phase D status after this commit**: default flipped (this), conservative scanner shrink (follow-up), six-week soak on `main` (operational, not a code action), docs updated to describe gen-GC as the default model (this commit's CLAUDE.md update). The remaining design work is the scanner shrink; everything else from the original Phase D scope ships here.
+
+`docs/generational-gc-plan.md` will get an addendum on the next pass to mark Phases C / C4 / C4b complete and the default flipped.
+
 ## v0.5.236 — Gen-GC **Phase C4b-δ-tune** — hard ceiling on the next-GC trigger. C4b-δ (v0.5.235) deallocates idle nursery blocks back to the OS, but `bench_json_roundtrip` peak RSS stayed at 142 MB because peak occurred BEFORE the first dealloc fired, with the nursery growing to 115 MB in front of GC #3 thanks to the >90%-freed step-doubling heuristic compounding `next_trigger = arena_total + step` past the initial threshold. The doubling heuristic is correct for tight allocate-and-discard hot loops (`07_object_create`, `12_binary_trees`) where GC is pure overhead and deferring is right — but on growing-working-set benches it inflates peak RSS without bounding the working set.
 
 This commit caps the trigger absolutely, in `crates/perry-runtime/src/gc.rs`:
