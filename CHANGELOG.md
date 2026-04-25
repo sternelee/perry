@@ -2,6 +2,34 @@
 
 Detailed changelog for Perry. See CLAUDE.md for concise summaries.
 
+## v0.5.235 — Gen-GC **Phase C4b-δ** — return idle nursery blocks to the OS. Before this commit, `arena_reset_empty_blocks` reset `block.offset = 0` so the bump allocator could reuse the space, but never `dealloc`'d the underlying memory — once the arena Vec grew, RSS plateaued at peak occupancy forever. v0.5.234's evacuation/rewrite work landed correctness, but the bench RSS never moved because nothing was returning memory to the OS. C4b-δ closes that loop in `crates/perry-runtime/src/arena.rs`:
+
+- `ArenaBlock::dead_cycles` (originally for issue #73's reset grace, since rendered unused) is repurposed as a "consecutive cycles observed idle" counter. `arena_reset_empty_blocks` adds a second pass after the existing reset loop: for each block with `offset == 0`, outside the `keep_low..=current` register-miss window, and not the current allocator target, `dead_cycles += 1`. When `dead_cycles >= DEALLOC_DEAD_CYCLES` (currently 2), the block's allocation goes back via `std::alloc::dealloc` and the slot becomes a tombstone (`data = null, size = 0, offset = 0, dead_cycles = 0`). Threshold of 2 means a block reset on cycle N gets one cycle of bump-allocator reuse opportunity; if it stays idle through cycle N+1, cycle N+1's dealloc loop returns it.
+
+- Block-index semantics stay stable: tombstones leave their slot in the `Vec<ArenaBlock>` so `arena_walk_objects`, `arena_walk_objects_with_block_index`, `general_block_count`, etc. see consistent indices for the rest of the GC cycle. The walkers naturally skip tombstones because `block.offset == 0` for tombstones (their inner `while offset < block.offset` loop never enters). `pointer_in_nursery` / `pointer_in_old_gen` naturally skip them because `addr < base + 0 == base` is never true. `Arena::alloc` fast-paths still use `block.alloc()`, which returns `None` for any tombstone (size=0 ⇒ `aligned_offset + size > self.size` for any positive size).
+
+- `Arena::alloc`'s slow path now scans for tombstoned slots before pushing onto the Vec: `for i in 0..self.blocks.len() { if self.blocks[i].data.is_null() { ... } }`. Found tombstone gets replaced in place with the freshly-allocated `ArenaBlock`. Without this, churning workloads would grow the Vec unboundedly even though most slots were tombstoned. Vec growth is now bounded by peak block count.
+
+- Drop impl skips `data.is_null()` blocks. `dealloc(null, layout)` is UB; the tombstone marker doubles as a "skip" flag at thread shutdown.
+
+- `arena_reset_empty_blocks`'s post-reset `new_current` walk skips tombstones too — the inline allocator can't bump from a deallocated slot. If the only remaining `offset==0` slots are tombstones, `arena.current` stays where it was; the next slow-path alloc tombstone-reuses a slot and updates `current` then.
+
+- Removed redundant `dead_cycles = 0` writes from the existing reset loop — they were defeating the dealloc loop's accumulation. The dealloc loop is now the single source of truth for `dead_cycles`.
+
+- New `[gc-dealloc] freed N blocks (M bytes) back to OS` diag line under `PERRY_GC_DIAG=1`.
+
+**Verified end-to-end:**
+- `cargo test --release -p perry-runtime --lib`: 168/168 PASS.
+- `test_json_*.ts`: 9/9 byte-for-byte match under default / `PERRY_GEN_GC=1` / `PERRY_GEN_GC_EVACUATE=1` / `PERRY_GEN_GC=1 PERRY_GEN_GC_EVACUATE=1`.
+- Memory-stability suite: 18/18 PASS under default / gen-gc / gen-gc+wb; 6/6 PASS under gen-gc+evacuate.
+- `bench_json_roundtrip` direct + `PERRY_GEN_GC=1 PERRY_GEN_GC_EVACUATE=1` + `PERRY_GC_DIAG=1`: dealloc fires 2× (40 blocks / 51 MB, then 29 blocks / 40 MB) for ~91 MB returned to OS across the bench's 3 GC cycles.
+
+**`bench_json_roundtrip` direct-path peak RSS still ~142 MB** (unchanged from pre-C4b-δ). The dealloc fires correctly but AFTER the peak: peak occurs at the moment of the 3rd GC trigger (`pre_in_use=115 MB`), at which point the bump allocator has filled 87 nursery blocks. The dealloc pass happens at the END of that GC, so peak-RSS measurement (lifetime maximum) doesn't see the reduction. Mid-run RSS — the level the program holds in steady state between bursts — drops as designed; long-running services with allocation lulls (HTTP servers between requests, event-loop apps during quiet periods) reclaim memory across them. The bench's allocation pattern (50 tight iterations with no quiet periods) is the worst case for showing peak-RSS gains.
+
+The C4b ship criterion (`bench_json_roundtrip` direct RSS ≤70 MB) is now correctly diagnosed as bottlenecked on GC threshold + adaptive-step policy: the step doubled to 134 MB after a 91% productive sweep, letting the nursery grow to 115 MB before the next collection. To drop peak below 70 MB you'd cap the adaptive step ceiling and/or proactively dealloc within a single GC cycle (background scavenger). Both are GC-policy tuning that's orthogonal to the C4b architectural plan and out of scope here.
+
+**With C4b-δ landed, the C4b architectural roadmap is complete**: forwarding-pointer infrastructure (α, v0.5.229), byte-copy evacuation (β, v0.5.230), conservative pinning safety lever (γ-1, v0.5.231), reference rewriting (γ-2, v0.5.234), block deallocation (δ, this commit). Phase D — flip `PERRY_GEN_GC=1` default + shrink the conservative scanner — remains, gated on the bench-RSS criterion which itself is gated on out-of-scope GC policy tuning.
+
 ## v0.5.234 — Gen-GC **Phase C4b-γ-2** — reference-rewriting walkers complete the evacuation pipeline. The infrastructure landed in v0.5.229 (`GC_FLAG_FORWARDED` + helpers), v0.5.230 wired the byte-copy + conservative pinning, v0.5.231 made it correctness-safe as a no-op via transitive pinning. This commit removes the no-op safety valve and ships the missing rewrite walkers so evacuation actually moves objects without dangling references. Concretely, in `crates/perry-runtime/src/gc.rs`:
 
 - New `try_rewrite_value(bits, valid_ptrs) -> Option<u64>` decodes a NaN-boxed (POINTER/STRING/BIGINT) or raw heap pointer, validates it against the cycle's `ValidPointerSet`, and returns rewritten bits with the new address (preserving the tag byte for tagged inputs) when the target carries `GC_FLAG_FORWARDED`. Returns `None` for non-pointer values (numbers, booleans, undefined, null, SHORT_STRING SSO, INT32, handles), out-of-range raw values, or unforwarded pointers. The decode-then-validate pattern matches `try_mark_value`'s shape so the rewrite walk can run on the same root sources the trace already walked.

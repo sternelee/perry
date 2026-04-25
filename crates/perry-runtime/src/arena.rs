@@ -115,6 +115,14 @@ struct Arena {
 impl Drop for Arena {
     fn drop(&mut self) {
         for block in &self.blocks {
+            // Skip tombstoned slots (gen-GC Phase C4b-δ): C4b-δ
+            // deallocates fully-idle nursery blocks back to the OS
+            // and leaves a `data = null, size = 0` tombstone in the
+            // Vec to keep block-index semantics stable across GC
+            // cycles. `dealloc(null, …)` is UB.
+            if block.data.is_null() {
+                continue;
+            }
             let layout = std::alloc::Layout::from_size_align(block.size, 16).unwrap();
             unsafe { std::alloc::dealloc(block.data, layout); }
         }
@@ -171,9 +179,31 @@ impl Arena {
             }
         }
 
-        // Still no room anywhere — push a fresh block.
-        self.blocks.push(alloc_block(size));
-        self.current = self.blocks.len() - 1;
+        // Still no room anywhere — need a fresh block. C4b-δ:
+        // prefer reusing a tombstoned slot (a block deallocated by
+        // `arena_reset_empty_blocks` after staying idle past the
+        // dealloc threshold) over growing the Vec, so block_idx
+        // semantics stay bounded even on workloads that churn
+        // through nursery blocks.
+        let fresh = alloc_block(size);
+        let mut tomb_idx: Option<usize> = None;
+        for i in 0..self.blocks.len() {
+            if self.blocks[i].data.is_null() {
+                tomb_idx = Some(i);
+                break;
+            }
+        }
+        let new_idx = match tomb_idx {
+            Some(i) => {
+                self.blocks[i] = fresh;
+                i
+            }
+            None => {
+                self.blocks.push(fresh);
+                self.blocks.len() - 1
+            }
+        };
+        self.current = new_idx;
 
         self.blocks[self.current].alloc(size, align)
             .expect("Fresh block should have space")
@@ -879,13 +909,24 @@ pub fn arena_reset_empty_blocks(block_has_live: &[bool]) {
         let current = arena.current;
         let keep_low = current.saturating_sub(4);
         for (i, block) in arena.blocks.iter_mut().enumerate() {
+            // Tombstoned slot (gen-GC Phase C4b-δ): block was
+            // deallocated on a prior cycle. Nothing to reset.
+            if block.data.is_null() {
+                continue;
+            }
             let live = block_has_live.get(i).copied().unwrap_or(false);
             if block.offset == 0 {
-                block.dead_cycles = 0;
+                // Already empty before this cycle's sweep — let the
+                // dealloc-candidate loop below decide whether to
+                // increment `dead_cycles` (offset==0 + outside
+                // recent window ⇒ candidate). Don't write dead_cycles
+                // here: the dealloc loop is the single source of
+                // truth and clearing here would defeat its accumulation.
                 continue;
             }
             if live {
-                block.dead_cycles = 0;
+                // Live this cycle — dealloc loop sees offset != 0
+                // (post-reset still nonzero) and resets dead_cycles=0.
                 continue;
             }
             // Recent block — skip this cycle's reset decision.
@@ -897,7 +938,6 @@ pub fn arena_reset_empty_blocks(block_has_live: &[bool]) {
             // overwrites those handles' backing stores on the very
             // next allocation.
             if i >= keep_low && i <= current {
-                block.dead_cycles = 0;
                 continue;
             }
             // Issue #179: reset OLD observed-dead blocks immediately.
@@ -919,49 +959,137 @@ pub fn arena_reset_empty_blocks(block_has_live: &[bool]) {
             // actually lives.
             reset_block_ranges.push((block.data as usize, block.size));
             block.offset = 0;
-            block.dead_cycles = 0;
+            // Don't write dead_cycles — the dealloc-candidate loop
+            // below sees offset==0 + outside-recent-window and
+            // increments accordingly. Just-reset blocks therefore
+            // start their dead-cycle countdown from this cycle.
         }
-        if reset_block_ranges.is_empty() {
+        if !reset_block_ranges.is_empty() {
+            // Filter the free list: remove entries pointing into any
+            // reset block. The bump allocator will overwrite those
+            // slots, so the free list must not hand them back.
+            crate::gc::ARENA_FREE_LIST.with(|fl| {
+                let mut fl = fl.borrow_mut();
+                fl.retain(|&(ptr, _)| {
+                    let p = ptr as usize;
+                    !reset_block_ranges
+                        .iter()
+                        .any(|&(base, size)| p >= base && p < base + size)
+                });
+                if fl.is_empty() {
+                    crate::gc::ARENA_FREE_LIST_NONEMPTY.with(|c| c.set(false));
+                }
+            });
+        }
+
+        // Gen-GC Phase C4b-δ: deallocate fully-idle blocks back to
+        // the OS. A block becomes a dealloc candidate when:
+        //   - it's not the current allocator target
+        //   - it's outside the `keep_low..=current` register-miss
+        //     window (already excluded from reset above for the
+        //     same reason — the conservative-scan caller-saved-reg
+        //     risk),
+        //   - its offset is zero (no active allocations — either
+        //     reset this cycle or never used since the prior reset),
+        //   - it's not already a tombstone.
+        // Each candidate's `dead_cycles` increments per cycle; once
+        // it reaches `DEALLOC_DEAD_CYCLES`, we hand the underlying
+        // allocation back to glibc/jemalloc/whatever via `dealloc`
+        // and leave a `data = null, size = 0` tombstone in the Vec
+        // so block-index semantics stay stable for the rest of the
+        // GC cycle. Future allocations preferentially reuse
+        // tombstoned slots (`Arena::alloc`'s slow path) before
+        // pushing new entries onto the Vec, so the index space
+        // stays bounded even on workloads that churn nursery blocks.
+        //
+        // Threshold tuning: 2 cycles. A block resets on cycle N
+        // (`dead_cycles=1` after this loop), and on cycle N+1 either
+        // gets reused (offset > 0, dead_cycles back to 0) or stays
+        // idle (`dead_cycles=2` ⇒ dealloc). Two cycles is the
+        // minimum that gives the bump allocator one cycle to reuse
+        // a freshly-reset block before declaring it truly idle —
+        // catches the `bench_json_roundtrip` case (only 2-3 GCs
+        // per run) while still letting tight allocation loops keep
+        // hot blocks alive across consecutive resets.
+        const DEALLOC_DEAD_CYCLES: u32 = 2;
+        let mut deallocated_ranges: Vec<(usize, usize)> = Vec::new();
+        for (i, block) in arena.blocks.iter_mut().enumerate() {
+            if block.data.is_null() { continue; }
+            if i == current { block.dead_cycles = 0; continue; }
+            if i >= keep_low && i <= current { block.dead_cycles = 0; continue; }
+            if block.offset != 0 { block.dead_cycles = 0; continue; }
+            block.dead_cycles += 1;
+            if block.dead_cycles >= DEALLOC_DEAD_CYCLES {
+                let layout = Layout::from_size_align(block.size, 16).unwrap();
+                deallocated_ranges.push((block.data as usize, block.size));
+                std::alloc::dealloc(block.data, layout);
+                block.data = std::ptr::null_mut();
+                block.size = 0;
+                block.offset = 0;
+                block.dead_cycles = 0;
+            }
+        }
+        if !deallocated_ranges.is_empty() {
+            // Drop free-list entries pointing into deallocated
+            // blocks — same reasoning as the reset path, but the
+            // memory is now gone, not just reusable.
+            crate::gc::ARENA_FREE_LIST.with(|fl| {
+                let mut fl = fl.borrow_mut();
+                fl.retain(|&(ptr, _)| {
+                    let p = ptr as usize;
+                    !deallocated_ranges
+                        .iter()
+                        .any(|&(base, size)| p >= base && p < base + size)
+                });
+                if fl.is_empty() {
+                    crate::gc::ARENA_FREE_LIST_NONEMPTY.with(|c| c.set(false));
+                }
+            });
+            if std::env::var_os("PERRY_GC_DIAG").is_some() {
+                let total: usize = deallocated_ranges.iter().map(|&(_, s)| s).sum();
+                eprintln!(
+                    "[gc-dealloc] freed {} blocks ({} bytes) back to OS",
+                    deallocated_ranges.len(), total
+                );
+            }
+        }
+
+        if reset_block_ranges.is_empty() && deallocated_ranges.is_empty() {
             return;
         }
-        // Filter the free list: remove entries pointing into any reset
-        // block. The bump allocator will overwrite those slots, so the
-        // free list must not hand them back.
-        crate::gc::ARENA_FREE_LIST.with(|fl| {
-            let mut fl = fl.borrow_mut();
-            fl.retain(|&(ptr, _)| {
-                let p = ptr as usize;
-                !reset_block_ranges
-                    .iter()
-                    .any(|&(base, size)| p >= base && p < base + size)
-            });
-            if fl.is_empty() {
-                crate::gc::ARENA_FREE_LIST_NONEMPTY.with(|c| c.set(false));
-            }
-        });
+
         // Walk back the `current` index to the first reset block —
-        // i.e., one with `offset == 0`. If we just picked the first
-        // block with any free space we'd land on the live block that
-        // still has 80 bytes left at the end (not enough for a 96-byte
-        // class instance), and the next alloc would push a fresh
-        // block. The reset blocks are the whole point of this routine
-        // — make sure we actually use one.
+        // i.e., one with `offset == 0`. Skip tombstones (data.is_null())
+        // — the inline allocator can't bump from a deallocated slot.
+        // If we just picked the first block with any free space we'd
+        // land on the live block that still has 80 bytes left at the
+        // end (not enough for a 96-byte class instance), and the next
+        // alloc would push a fresh block. The reset blocks are the
+        // whole point of this routine — make sure we actually use one.
         let mut new_current = arena.current;
         for (i, block) in arena.blocks.iter().enumerate() {
-            if block.offset == 0 {
+            if !block.data.is_null() && block.offset == 0 {
                 new_current = i;
                 break;
             }
         }
-        arena.current = new_current;
+        // If `new_current` ended up pointing at a tombstone (the only
+        // remaining offset==0 entries are deallocated slots), keep
+        // `arena.current` where it was — the next `Arena::alloc` slow
+        // path will tombstone-reuse a slot and update `current` then.
+        if !arena.blocks[new_current].data.is_null() {
+            arena.current = new_current;
+        }
         let _ = (n_live, n_total);
         INLINE_STATE.with(|s| {
             let inline = &mut *s.get();
             if !inline.data.is_null() {
                 let block = &arena.blocks[arena.current];
-                inline.data = block.data;
-                inline.offset = block.offset;
-                inline.size = block.size;
+                if !block.data.is_null() {
+                    inline.data = block.data;
+                    inline.offset = block.offset;
+                    inline.size = block.size;
+                }
             }
         });
     });
