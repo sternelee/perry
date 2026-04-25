@@ -35,21 +35,9 @@
     "status": "skip",
     "reason": "Compile failure — TLS connect not implemented"
   },
-  "test_closure_capture_types": {
-    "status": "bug",
-    "reason": "Closure box init: js_box_get null-pointer warnings on first read of captured locals before they're written"
-  },
-  "test_edge_closures": {
-    "status": "bug",
-    "reason": "Closure capture: same null-box pattern as test_closure_capture_types"
-  },
   "test_edge_rest_spread_defaults": {
     "status": "bug",
     "reason": "Rest-parameter array elements interpreted as raw doubles instead of NaN-boxed strings (parts.join() prints scientific-notation numbers)"
-  },
-  "test_edge_scope_hoisting": {
-    "status": "bug",
-    "reason": "Closure capture order: js_box_get null-pointer warnings, then NaN result"
   },
   "test_gap_buffer_ops": {
     "status": "ci-env",

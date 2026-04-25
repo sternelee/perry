@@ -1569,9 +1569,28 @@ fn substitute_locals(expr: &mut Expr, param_map: &HashMap<LocalId, Expr>, next_l
                 substitute_locals(arg, param_map, next_local_id);
             }
         }
-        // Closure expressions - substitute in body as well
-        Expr::Closure { body, .. } => {
+        // Closure expressions - substitute in body AND remap captures.
+        // Without remapping captures, an inlined function whose body
+        // contains a closure ends up with the closure's captures list
+        // referencing the OLD local IDs while the closure body uses the
+        // NEW (remapped) IDs. Codegen then can't resolve the captures in
+        // the inlined-into FnCtx and falls back to `double_literal(0.0)`,
+        // producing null box pointers at runtime (closure-null family).
+        Expr::Closure { body, captures, mutable_captures, .. } => {
             substitute_locals_in_stmts(body, param_map, next_local_id);
+            captures.retain_mut(|id| match param_map.get(id) {
+                Some(Expr::LocalGet(new_id)) => { *id = *new_id; true }
+                // Trivial expr inlined directly; closure body no longer
+                // references this id, so drop the now-orphan capture.
+                Some(_) => false,
+                // Not in param_map → outer/module-level; leave unchanged.
+                None => true,
+            });
+            mutable_captures.retain_mut(|id| match param_map.get(id) {
+                Some(Expr::LocalGet(new_id)) => { *id = *new_id; true }
+                Some(_) => false,
+                None => true,
+            });
         }
         // Native method calls
         Expr::NativeMethodCall { object, args, .. } => {
