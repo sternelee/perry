@@ -5091,8 +5091,26 @@ fn lower_perry_ui_table_call(
     sig: &UiSig,
     args: &[Expr],
 ) -> Result<String> {
-    if args.len() != sig.args.len() {
-        // Mismatched arity — fall back to side-effect lowering only.
+    // Issue #185 Phase C step 4: when a Widget-returning constructor is
+    // called with one extra trailing arg, treat it as an inline `style`
+    // object and apply via `apply_inline_style` after the create call.
+    // Lets every widget in the table (Text, Toggle, Slider, TextField,
+    // Spacer, Divider, ImageFile, ImageSymbol, ProgressView, NavStack,
+    // ZStack, etc.) accept the same React-style ergonomics that Button
+    // already has, with no per-widget code edits.
+    let inline_style_arg: Option<&Expr> =
+        if args.len() == sig.args.len() + 1
+            && matches!(sig.ret, UiReturnKind::Widget)
+        {
+            Some(&args[sig.args.len()])
+        } else {
+            None
+        };
+    let declared_arg_count = sig.args.len();
+
+    if args.len() != declared_arg_count && inline_style_arg.is_none() {
+        // Mismatched arity (and not a trailing-style absorption case)
+        // — fall back to side-effect lowering only.
         for a in args {
             let _ = lower_expr(ctx, a)?;
         }
@@ -5101,12 +5119,13 @@ fn lower_perry_ui_table_call(
 
     // Lower each arg according to its declared kind. Build two parallel
     // vectors so we can pass them through to `blk.call(...)` in one shot
-    // without intermediate borrows.
+    // without intermediate borrows. Iterate the declared sig args only
+    // — the inline-style trailing arg (if present) is consumed below.
     let mut llvm_args: Vec<(crate::types::LlvmType, String)> =
-        Vec::with_capacity(args.len());
+        Vec::with_capacity(declared_arg_count);
     let mut runtime_param_types: Vec<crate::types::LlvmType> =
-        Vec::with_capacity(args.len());
-    for (kind, arg) in sig.args.iter().zip(args.iter()) {
+        Vec::with_capacity(declared_arg_count);
+    for (kind, arg) in sig.args.iter().zip(args.iter().take(declared_arg_count)) {
         match kind {
             UiArgKind::Widget => {
                 // Widgets are NaN-boxed pointers. Lower as JSValue,
@@ -5170,8 +5189,18 @@ fn lower_perry_ui_table_call(
         llvm_args.iter().map(|(t, s)| (*t, s.as_str())).collect();
     match sig.ret {
         UiReturnKind::Widget => {
+            // Scope `blk` so the mutable borrow on `ctx` is released
+            // before the optional `apply_inline_style` call re-borrows.
+            let handle = {
+                let blk = ctx.block();
+                blk.call(I64, sig.runtime, &arg_slices)
+            };
+            // Issue #185 Phase C step 4: apply inline style if a
+            // trailing object literal was passed.
+            if let Some(style_arg) = inline_style_arg {
+                apply_inline_style(ctx, &handle, style_arg)?;
+            }
             let blk = ctx.block();
-            let handle = blk.call(I64, sig.runtime, &arg_slices);
             Ok(nanbox_pointer_inline(blk, &handle))
         }
         UiReturnKind::F64 => {
