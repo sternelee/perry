@@ -220,9 +220,15 @@ pub const MATRIX: &[MatrixRow] = &[
     },
     MatrixRow {
         widget: "*", prop: "hidden",
-        ffi: "perry_ui_widget_set_hidden",
-        // Audit: only Windows currently exports this (others use other gating).
-        statuses: [Missing, Missing, Missing, Missing, Missing, Missing, Missing, Wired, Missing],
+        // Canonical FFI name is `set_widget_hidden` (matches the codegen
+        // dispatch table at `lower_call.rs::NATIVE_MODULE_TABLE` row for
+        // `widgetSetHidden`). The Phase A matrix initially listed the
+        // inverted-word-order name `widget_set_hidden`, which only Windows
+        // exports as a secondary alias — that mis-named the row and made
+        // every other platform appear Missing despite all 8 backends
+        // having `set_widget_hidden`. Fixed in v0.5.301.
+        ffi: "perry_ui_set_widget_hidden",
+        statuses: [Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired, Wired],
     },
     MatrixRow {
         widget: "*", prop: "enabled",

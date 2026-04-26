@@ -16,7 +16,7 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 | `edge_insets` | `perry_ui_widget_set_edge_insets` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
 | `opacity` | `perry_ui_widget_set_opacity` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ~ | ✓ |
 | `tooltip` | `perry_ui_widget_set_tooltip` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| `hidden` | `perry_ui_widget_set_hidden` | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ | ✗ |
+| `hidden` | `perry_ui_set_widget_hidden` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `enabled` | `perry_ui_widget_set_enabled` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
 | `control_size` | `perry_ui_widget_set_control_size` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
 | `hugging` | `perry_ui_widget_set_hugging` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
@@ -81,13 +81,13 @@ Legend: `✓` Wired (real native impl), `~` Stub (symbol exists, no-op), `✗` M
 
 | Platform | Wired | Stub | Missing | Not applicable |
 |---|---|---|---|---|
-| macOS | 42 | 0 | 1 | 0 |
-| iOS | 42 | 0 | 1 | 0 |
-| tvOS | 42 | 0 | 1 | 0 |
-| visionOS | 42 | 0 | 1 | 0 |
-| watchOS | 42 | 0 | 1 | 0 |
-| Android | 42 | 0 | 1 | 0 |
-| GTK4 | 38 | 0 | 5 | 0 |
+| macOS | 43 | 0 | 0 | 0 |
+| iOS | 43 | 0 | 0 | 0 |
+| tvOS | 43 | 0 | 0 | 0 |
+| visionOS | 43 | 0 | 0 | 0 |
+| watchOS | 43 | 0 | 0 | 0 |
+| Android | 43 | 0 | 0 | 0 |
+| GTK4 | 39 | 0 | 4 | 0 |
 | Windows | 38 | 5 | 0 | 0 |
-| Web | 5 | 0 | 38 | 0 |
+| Web | 6 | 0 | 37 | 0 |
 
