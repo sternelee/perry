@@ -6,7 +6,7 @@ use std::cell::RefCell;
 extern "C" {
     fn js_nanbox_get_pointer(value: f64) -> i64;
     fn js_closure_call1(closure: *const u8, arg: f64) -> f64;
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
 }
 
@@ -748,7 +748,7 @@ unsafe extern "C" fn handle_interruption(
     // Invoke JS callback
     let cb = INTERRUPTION_CALLBACK.with(|c| *c.borrow());
     if let Some(closure_f64) = cb {
-        js_stdlib_process_pending();
+        js_run_stdlib_pump();
         js_promise_run_microtasks();
         let closure_ptr = js_nanbox_get_pointer(closure_f64);
         js_closure_call1(closure_ptr as *const u8, callback_arg);

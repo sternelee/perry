@@ -1048,7 +1048,7 @@ thread_local! {
 }
 
 extern "C" {
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
     fn js_callback_timer_tick() -> i32;
     fn js_interval_timer_tick() -> i32;
@@ -1069,7 +1069,7 @@ define_class!(
         fn timer_fired(&self, _sender: &AnyObject) {
             crate::catch_callback_panic("timer callback", std::panic::AssertUnwindSafe(|| {
                 unsafe {
-                    js_stdlib_process_pending();
+                    js_run_stdlib_pump();
                     js_promise_run_microtasks();
                 }
 
@@ -1304,7 +1304,7 @@ pub fn poll_open_file() -> String {
 }
 
 /// Set a recurring timer. interval_ms is in milliseconds.
-/// The timer calls js_stdlib_process_pending() then invokes the callback.
+/// The timer calls js_run_stdlib_pump() then invokes the callback.
 pub fn set_timer(interval_ms: f64, callback: f64) {
     let interval_secs = interval_ms / 1000.0;
 

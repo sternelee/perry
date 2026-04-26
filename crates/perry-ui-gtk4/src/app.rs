@@ -65,7 +65,7 @@ struct AppEntry {
 extern "C" {
     fn js_closure_call0(closure: *const u8) -> f64;
     fn js_nanbox_get_pointer(value: f64) -> i64;
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
 }
 
@@ -274,7 +274,7 @@ pub fn app_run(_app_handle: i64) {
                 glib::timeout_add_local(std::time::Duration::from_millis(ms), move || {
                     // Drain resolved promises, then run microtasks (.then callbacks)
                     unsafe {
-                        js_stdlib_process_pending();
+                        js_run_stdlib_pump();
                         js_promise_run_microtasks();
                     }
                     let ptr = unsafe { js_nanbox_get_pointer(cb) } as *const u8;

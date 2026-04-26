@@ -4,7 +4,7 @@ use objc2::{msg_send, Encode, Encoding, RefEncode};
 use std::cell::RefCell;
 
 extern "C" {
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
     fn js_nanbox_get_pointer(value: f64) -> i64;
     fn js_closure_call2(closure: *const u8, arg1: f64, arg2: f64) -> f64;
@@ -40,7 +40,7 @@ thread_local! {
 unsafe fn invoke_callback(lat: f64, lon: f64) {
     let cb = LOCATION_CALLBACK.with(|c| c.borrow_mut().take());
     if let Some(closure_f64) = cb {
-        js_stdlib_process_pending();
+        js_run_stdlib_pump();
         js_promise_run_microtasks();
         let closure_ptr = js_nanbox_get_pointer(closure_f64);
         js_closure_call2(closure_ptr as *const u8, lat, lon);

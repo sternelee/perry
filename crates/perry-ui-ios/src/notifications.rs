@@ -25,7 +25,7 @@ extern "C" {
     fn js_closure_call1(closure: *const u8, arg0: f64) -> f64;
     fn js_closure_call2(closure: *const u8, arg0: f64, arg1: f64) -> f64;
     fn js_json_parse(text_ptr: *const perry_runtime::string::StringHeader) -> u64;
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
     fn js_is_truthy(value: f64) -> i32;
 }
@@ -99,7 +99,7 @@ unsafe fn dispatch_tap(response: &AnyObject) {
         }
     };
 
-    js_stdlib_process_pending();
+    js_run_stdlib_pump();
     js_promise_run_microtasks();
 
     let ptr = js_nanbox_get_pointer(callback) as *const u8;
@@ -213,7 +213,7 @@ pub unsafe fn dispatch_device_token(device_token: *mut AnyObject) {
         hex.push_str(&format!("{:02X}", b));
     }
 
-    js_stdlib_process_pending();
+    js_run_stdlib_pump();
     js_promise_run_microtasks();
 
     let str_ptr = js_string_from_bytes(hex.as_ptr(), hex.len() as u32);
@@ -267,7 +267,7 @@ pub unsafe fn dispatch_remote_payload(user_info: *mut AnyObject) {
     let length: usize = msg_send![data, length];
     if bytes.is_null() || length == 0 { return; }
 
-    js_stdlib_process_pending();
+    js_run_stdlib_pump();
     js_promise_run_microtasks();
 
     let str_ptr = js_string_from_bytes(bytes, length as u32);

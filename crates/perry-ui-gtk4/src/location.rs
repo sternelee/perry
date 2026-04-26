@@ -9,7 +9,7 @@ use gtk4::glib;
 extern "C" {
     fn js_nanbox_get_pointer(value: f64) -> i64;
     fn js_closure_call2(closure: *const u8, arg1: f64, arg2: f64) -> f64;
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
 }
 
@@ -21,7 +21,7 @@ pub fn request_location(callback: f64) {
 
         glib::MainContext::default().invoke(move || {
             unsafe {
-                js_stdlib_process_pending();
+                js_run_stdlib_pump();
                 js_promise_run_microtasks();
             }
             let ptr = unsafe { js_nanbox_get_pointer(callback) } as *const u8;

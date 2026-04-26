@@ -253,7 +253,7 @@ thread_local! {
 }
 
 extern "C" {
-    fn js_stdlib_process_pending();
+    fn js_run_stdlib_pump();
     fn js_promise_run_microtasks() -> i32;
     fn js_nanbox_get_pointer(value: f64) -> i64;
     fn js_closure_call0(closure: *const u8) -> f64;
@@ -314,7 +314,7 @@ define_class!(
         fn timer_fired(&self, _sender: &AnyObject) {
             // Drain resolved promises, then run microtasks (.then callbacks)
             unsafe {
-                js_stdlib_process_pending();
+                js_run_stdlib_pump();
                 js_promise_run_microtasks();
             }
 
@@ -553,7 +553,7 @@ unsafe fn find_first_responder(view: *const AnyObject) -> *const AnyObject {
 }
 
 /// Set a recurring timer. interval_ms is in milliseconds.
-/// The timer calls js_stdlib_process_pending() then invokes the callback.
+/// The timer calls js_run_stdlib_pump() then invokes the callback.
 pub fn set_timer(interval_ms: f64, callback: f64) {
     let interval_secs = interval_ms / 1000.0;
 
