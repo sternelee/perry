@@ -55,19 +55,48 @@ pub fn set_string(handle: i64, text_ptr: *const u8) {
 }
 
 /// Set the text color of a Text widget.
+///
+/// Phase C step 6/7's inline-style codegen dispatches every `color: ...`
+/// prop through this entry point, regardless of the actual widget class
+/// (`crates/perry-codegen/src/lower_call.rs` ~3231). The codegen comment
+/// states "no-op on widgets that ignore it" — so this function probes
+/// the widget's runtime class and routes appropriately:
+///
+/// - NSTextField → setTextColor: (the original path)
+/// - NSButton    → forward to button::set_text_color (NSButton has no
+///                 `setTextColor:` selector; calling it raises an
+///                 unrecognized-selector ObjC exception, which crosses
+///                 the FFI boundary as a non-unwinding panic and aborts
+///                 the process — exactly the regression seen on
+///                 `docs/examples/ui/styling/{hex_gradient,dynamic_color}.ts`
+///                 before this fix)
+/// - other       → silent no-op (matches the codegen's documented intent)
 pub fn set_color(handle: i64, r: f64, g: f64, b: f64, a: f64) {
-    if let Some(view) = super::get_widget(handle) {
-        unsafe {
-            let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
-            let color: Retained<objc2_app_kit::NSColor> = objc2::msg_send![
-                objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
-                colorWithRed: r as objc2_core_foundation::CGFloat,
-                green: g as objc2_core_foundation::CGFloat,
-                blue: b as objc2_core_foundation::CGFloat,
-                alpha: a as objc2_core_foundation::CGFloat
-            ];
-            tf.setTextColor(Some(&color));
+    let Some(view) = super::get_widget(handle) else { return; };
+    unsafe {
+        if let Some(btn_cls) = objc2::runtime::AnyClass::get(c"NSButton") {
+            let is_btn: bool = objc2::msg_send![&*view, isKindOfClass: btn_cls];
+            if is_btn {
+                drop(view);
+                super::button::set_text_color(handle, r, g, b, a);
+                return;
+            }
         }
+        if let Some(tf_cls) = objc2::runtime::AnyClass::get(c"NSTextField") {
+            let is_tf: bool = objc2::msg_send![&*view, isKindOfClass: tf_cls];
+            if !is_tf {
+                return;
+            }
+        }
+        let tf: &NSTextField = &*(Retained::as_ptr(&view) as *const NSTextField);
+        let color: Retained<objc2_app_kit::NSColor> = objc2::msg_send![
+            objc2::runtime::AnyClass::get(c"NSColor").unwrap(),
+            colorWithRed: r as objc2_core_foundation::CGFloat,
+            green: g as objc2_core_foundation::CGFloat,
+            blue: b as objc2_core_foundation::CGFloat,
+            alpha: a as objc2_core_foundation::CGFloat
+        ];
+        tf.setTextColor(Some(&color));
     }
 }
 
