@@ -162,6 +162,25 @@ impl LlFunction {
         r
     }
 
+    /// Allocate a fixed-size `[count x elem_ty]` array slot in the function
+    /// entry block. Returned register is a `ptr` to the array; index it with
+    /// `gep(elem_ty, reg, [(I64, i)])`.
+    ///
+    /// LLVM lowers a non-entry-block `alloca` as a runtime `sub %rsp, N`
+    /// with no matching restore — every loop iteration through such a block
+    /// permanently shrinks the stack. Issue #167 hit this for the args-array
+    /// allocas in `js_native_call_method` dispatch sites: a tight
+    /// `for (i = 0; i < N; i++) buf.readInt32BE(i*4)` ate ~16 bytes of stack
+    /// per iteration and SIGSEGV'd around iteration 250k–300k. The cure is
+    /// to hoist these allocas to the entry block (executed once at function
+    /// prologue) — what this helper enforces.
+    pub fn alloca_entry_array(&mut self, elem_ty: LlvmType, count: usize) -> String {
+        let r = format!("%r{}", self.reg_counter.next());
+        self.entry_allocas
+            .push(format!("  {} = alloca [{} x {}]", r, count, elem_ty));
+        r
+    }
+
     /// Push a store instruction into the entry-block alloca section.
     /// Used to initialize allocas to a safe default (e.g. TAG_UNDEFINED)
     /// at the top of the function, before any user code runs.

@@ -1198,9 +1198,10 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 let (fb_args_ptr, fb_args_len) = if args.is_empty() {
                     ("null".to_string(), "0".to_string())
                 } else {
+                    // Hoist the args-array alloca to the function entry
+                    // block — see issue #167 and `alloca_entry_array` doc.
                     let n = args.len();
-                    let buf_reg = ctx.block().next_reg();
-                    ctx.block().emit_raw(format!("{} = alloca [{} x double]", buf_reg, n));
+                    let buf_reg = ctx.func.alloca_entry_array(DOUBLE, n);
                     for (i, a_val) in lowered_args.iter().skip(1).enumerate() {
                         let slot = ctx.block().gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
                         ctx.block().store(DOUBLE, a_val, &slot);
@@ -1745,20 +1746,24 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
             let entry = ctx.strings.entry(key_idx);
             let bytes_global = format!("@{}", entry.bytes_global);
             let name_len_str = entry.byte_len.to_string();
-            let blk = ctx.block();
-            // Stack-allocate the args array if any.
+            // Stack-allocate the args array if any. The alloca MUST live in
+            // the function entry block — emitting it into the current block
+            // (which may be a loop body) makes LLVM lower it as a runtime
+            // `sub %rsp, N` that never gets restored, eating the stack at
+            // ~16 bytes/iteration. See issue #167.
             let (args_ptr, args_len_str) = if lowered_args.is_empty() {
                 ("null".to_string(), "0".to_string())
             } else {
                 let n = lowered_args.len();
-                let buf_reg = blk.next_reg();
-                blk.emit_raw(format!("{} = alloca [{} x double]", buf_reg, n));
+                let buf_reg = ctx.func.alloca_entry_array(DOUBLE, n);
+                let blk = ctx.block();
                 for (i, v) in lowered_args.iter().enumerate() {
                     let slot = blk.gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
                     blk.store(DOUBLE, v, &slot);
                 }
                 (buf_reg, n.to_string())
             };
+            let blk = ctx.block();
             return Ok(blk.call(
                 DOUBLE,
                 "js_native_call_method",
