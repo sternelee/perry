@@ -3332,10 +3332,35 @@ fn apply_inline_style(
                     &[(I64, handle), (I64, &n_str)],
                 );
             }
+            "gradient" => {
+                // Phase C step 6: `{ angle, stops: [c1, c2] }` →
+                // `widgetSetBackgroundGradient(handle, r1, g1, b1, a1,
+                //   r2, g2, b2, a2, angle)`. The runtime FFI is 2-color
+                // only; if more stops are passed, we use the first two.
+                if let Some((angle, c1, c2)) = extract_gradient_obj(ctx, val)? {
+                    let (r1, g1, b1, a1) = c1;
+                    let (r2, g2, b2, a2) = c2;
+                    ctx.pending_declares.push((
+                        "perry_ui_widget_set_background_gradient".to_string(),
+                        DOUBLE,
+                        vec![I64, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE, DOUBLE],
+                    ));
+                    ctx.block().call(
+                        DOUBLE,
+                        "perry_ui_widget_set_background_gradient",
+                        &[
+                            (I64, handle),
+                            (DOUBLE, &r1), (DOUBLE, &g1), (DOUBLE, &b1), (DOUBLE, &a1),
+                            (DOUBLE, &r2), (DOUBLE, &g2), (DOUBLE, &b2), (DOUBLE, &a2),
+                            (DOUBLE, &angle),
+                        ],
+                    );
+                }
+            }
             _ => {
-                // Unknown / not-yet-supported key (e.g., gradient, or a
-                // string color awaiting runtime parseColor). Lower for
-                // side effects but skip setter emission.
+                // Unknown / not-yet-supported key (runtime expressions
+                // for color, or other dynamic shapes). Lower for side
+                // effects but skip setter emission.
                 let _ = lower_expr(ctx, val)?;
             }
         }
@@ -3351,6 +3376,18 @@ fn extract_perry_color(
     ctx: &mut FnCtx<'_>,
     val: &Expr,
 ) -> Result<Option<(String, String, String, String)>> {
+    // Issue #185 Phase C step 6: string-literal color parsing at HIR
+    // time. Hex (#RGB / #RGBA / #RRGGBB / #RRGGBBAA) and a few common
+    // named colors lower directly to 4 baked-in float literals — no
+    // runtime cost. Runtime expressions still fall through to step-7
+    // territory.
+    if let Expr::String(s) = val {
+        if let Some(rgba) = parse_color_string(s) {
+            return Ok(Some(rgba));
+        }
+        return Ok(None);
+    }
+
     let Some(props) = extract_options_fields(ctx, val) else {
         return Ok(None);
     };
@@ -3369,6 +3406,77 @@ fn extract_perry_color(
         }
     }
     Ok(Some((r, g, b, a)))
+}
+
+/// Parse a CSS color string at compile time (issue #185 Phase C step 6).
+/// Supports `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA` hex forms + a small
+/// set of named colors. Returns 4 channel values as f64-formatted
+/// strings ready for direct emission in LLVM IR.
+fn parse_color_string(s: &str) -> Option<(String, String, String, String)> {
+    let lower = s.trim().to_ascii_lowercase();
+    let named = match lower.as_str() {
+        "white" => Some((1.0, 1.0, 1.0, 1.0)),
+        "black" => Some((0.0, 0.0, 0.0, 1.0)),
+        "red" => Some((1.0, 0.0, 0.0, 1.0)),
+        "green" => Some((0.0, 0.502, 0.0, 1.0)),
+        "blue" => Some((0.0, 0.0, 1.0, 1.0)),
+        "yellow" => Some((1.0, 1.0, 0.0, 1.0)),
+        "cyan" => Some((0.0, 1.0, 1.0, 1.0)),
+        "magenta" => Some((1.0, 0.0, 1.0, 1.0)),
+        "gray" | "grey" => Some((0.502, 0.502, 0.502, 1.0)),
+        "transparent" => Some((0.0, 0.0, 0.0, 0.0)),
+        _ => None,
+    };
+    if let Some((r, g, b, a)) = named {
+        return Some((fmt_float(r), fmt_float(g), fmt_float(b), fmt_float(a)));
+    }
+    if let Some(hex) = lower.strip_prefix('#') {
+        let parse_pair = |s: &str| u8::from_str_radix(s, 16).ok().map(|b| b as f64 / 255.0);
+        let parse_nibble = |c: char| c.to_digit(16).map(|n| (n as f64) * 17.0 / 255.0);
+        match hex.len() {
+            3 => {
+                let chs: Vec<char> = hex.chars().collect();
+                let r = parse_nibble(chs[0])?;
+                let g = parse_nibble(chs[1])?;
+                let b = parse_nibble(chs[2])?;
+                return Some((fmt_float(r), fmt_float(g), fmt_float(b), "1.0".to_string()));
+            }
+            4 => {
+                // #RGBA shorthand — each nibble doubled, 4 channels.
+                let chs: Vec<char> = hex.chars().collect();
+                let r = parse_nibble(chs[0])?;
+                let g = parse_nibble(chs[1])?;
+                let b = parse_nibble(chs[2])?;
+                let a = parse_nibble(chs[3])?;
+                return Some((fmt_float(r), fmt_float(g), fmt_float(b), fmt_float(a)));
+            }
+            6 => {
+                let r = parse_pair(&hex[0..2])?;
+                let g = parse_pair(&hex[2..4])?;
+                let b = parse_pair(&hex[4..6])?;
+                return Some((fmt_float(r), fmt_float(g), fmt_float(b), "1.0".to_string()));
+            }
+            8 => {
+                let r = parse_pair(&hex[0..2])?;
+                let g = parse_pair(&hex[2..4])?;
+                let b = parse_pair(&hex[4..6])?;
+                let a = parse_pair(&hex[6..8])?;
+                return Some((fmt_float(r), fmt_float(g), fmt_float(b), fmt_float(a)));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Format an f64 as an LLVM-IR-compatible literal (always at least one
+/// digit after the decimal point).
+fn fmt_float(x: f64) -> String {
+    if x.fract() == 0.0 {
+        format!("{:.1}", x)
+    } else {
+        format!("{}", x)
+    }
 }
 
 /// Extract a per-side padding object `{top?, right?, bottom?, left?}`
@@ -3429,6 +3537,49 @@ fn extract_shadow_obj(
         }
     }
     Ok(Some((cr, cg, cb, ca, blur, dx, dy)))
+}
+
+/// Phase C step 6: extract a `{ angle, stops: [c1, c2, ...] }` gradient
+/// object into `(angle, color1_rgba, color2_rgba)`. Runtime FFI is
+/// 2-color only; extra stops are ignored. Missing stops default to
+/// fully transparent black so the resulting gradient renders cleanly.
+fn extract_gradient_obj(
+    ctx: &mut FnCtx<'_>,
+    val: &Expr,
+) -> Result<Option<(String, (String, String, String, String), (String, String, String, String))>> {
+    let Some(props) = extract_options_fields(ctx, val) else {
+        return Ok(None);
+    };
+    let mut angle = "0.0".to_string();
+    let transparent = (
+        "0.0".to_string(),
+        "0.0".to_string(),
+        "0.0".to_string(),
+        "0.0".to_string(),
+    );
+    let mut c1 = transparent.clone();
+    let mut c2 = transparent;
+    for (key, v) in &props {
+        match key.as_str() {
+            "angle" => angle = lower_expr(ctx, v)?,
+            "stops" => {
+                if let Expr::Array(elems) = v {
+                    if let Some(first) = elems.first() {
+                        if let Some(rgba) = extract_perry_color(ctx, first)? {
+                            c1 = rgba;
+                        }
+                    }
+                    if let Some(second) = elems.get(1) {
+                        if let Some(rgba) = extract_perry_color(ctx, second)? {
+                            c2 = rgba;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(Some((angle, c1, c2)))
 }
 
 /// Build a Headers handle from an inline object literal `{ "k": "v", ... }`.
