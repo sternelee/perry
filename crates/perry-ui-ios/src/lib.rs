@@ -1598,6 +1598,14 @@ pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
     notifications::on_receive(callback);
 }
 
+/// Background-delivery handler (#98). The closure registered here fires from
+/// `application:didReceiveRemoteNotification:fetchCompletionHandler:`; iOS's
+/// completion handler is invoked once the user's returned Promise settles.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(callback: f64) {
+    notifications::on_background_receive(callback);
+}
+
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_interval(
     id_ptr: i64,

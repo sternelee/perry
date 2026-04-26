@@ -15,11 +15,20 @@ import org.json.JSONObject
  *   thereafter) → forwards the token string to native via
  *   `PerryBridge.nativeNotificationToken`, which dispatches to the JS
  *   closure registered with `notificationRegisterRemote`.
- * - `onMessageReceived` fires for every push payload while the app is
- *   foregrounded → serializes the data + notification fields to JSON and
- *   forwards via `PerryBridge.nativeNotificationReceive`. Background
- *   delivery (`fetchCompletionHandler:` equivalent) is `#98` territory and
- *   isn't wired here.
+ * - `onMessageReceived` fires for every push payload that reaches the
+ *   service (FCM doesn't natively distinguish foreground vs background at
+ *   this layer — both hit the same callback). Serializes the data +
+ *   notification fields to JSON, then forwards via:
+ *     - `PerryBridge.nativeNotificationReceive` for any handler registered
+ *       via `notificationOnReceive` — matches the foreground iOS shape.
+ *     - `PerryBridge.nativeNotificationBackgroundReceive` for any handler
+ *       registered via `notificationOnBackgroundReceive` (#98) — the
+ *       Promise-returning shape that the iOS
+ *       `application:didReceiveRemoteNotification:fetchCompletionHandler:`
+ *       delegate uses to gate its `UIBackgroundFetchResult` signal.
+ *   When the user's process isn't running yet (cold-start delivery), both
+ *   calls hit `UnsatisfiedLinkError`; logged and dropped — Application-level
+ *   native-lib loading is a #98 follow-up.
  */
 class PerryFirebaseMessagingService : FirebaseMessagingService() {
     override fun onNewToken(token: String) {
@@ -40,6 +49,11 @@ class PerryFirebaseMessagingService : FirebaseMessagingService() {
             PerryBridge.nativeNotificationReceive(json)
         } catch (e: UnsatisfiedLinkError) {
             Log.w("PerryFirebase", "nativeNotificationReceive unavailable", e)
+        }
+        try {
+            PerryBridge.nativeNotificationBackgroundReceive(json)
+        } catch (e: UnsatisfiedLinkError) {
+            // Same cold-start case; the foreground branch already logged.
         }
     }
 

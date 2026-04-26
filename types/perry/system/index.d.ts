@@ -81,9 +81,33 @@ export function notificationRegisterRemote(onToken: (token: string) => void): vo
  * the app is foregrounded. The payload object is the APNs `aps` userInfo
  * dictionary (or equivalent platform shape) converted to a plain object.
  *
- * Background/terminated-app delivery is a separate pipeline (see issue #98).
+ * Background/terminated-app delivery uses `notificationOnBackgroundReceive`.
  */
 export function notificationOnReceive(cb: (payload: object) => void): void;
+
+/**
+ * Register a handler for remote-notification payloads delivered while the app
+ * is backgrounded or terminated (#98). The callback returns a `Promise<void>`
+ * that signals when the work is finished — the OS hands us a fixed budget
+ * (~30s on iOS) before the process is suspended; calling the OS completion
+ * handler before the Promise resolves would cut that work off mid-flight.
+ *
+ * Backed by `application:didReceiveRemoteNotification:fetchCompletionHandler:`
+ * on iOS and `FirebaseMessagingService.onMessageReceived` on Android. On both
+ * platforms the OS completion signal is sent only after the returned Promise
+ * resolves; if it rejects, the iOS path reports `UIBackgroundFetchResultFailed`
+ * and the Android path logs the error.
+ *
+ * The Android pipeline currently requires the app's process to already be
+ * loaded (the FCM service running inside the warm process). True cold-start
+ * delivery (FCM waking a terminated app) is tracked as a #98 follow-up.
+ *
+ * No-op on macOS/tvOS/visionOS/watchOS/GTK4/Windows/Web — those platforms
+ * have no equivalent background-delivery pipeline.
+ */
+export function notificationOnBackgroundReceive(
+    cb: (payload: object) => Promise<void>,
+): void;
 
 /**
  * Schedule a local notification to fire on a trigger. The `id` lets you

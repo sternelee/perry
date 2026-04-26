@@ -1003,6 +1003,17 @@ pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
     system::notification_on_receive(callback);
 }
 
+/// Real impl (#98): register the JS closure that fires for background FCM
+/// payloads. Routes through the same `PerryFirebaseMessagingService`
+/// pipeline as foreground delivery — Android doesn't split the two at the
+/// service layer — so the callback fires for every payload that reaches
+/// `nativeNotificationBackgroundReceive`. See system.rs for the v1
+/// trade-offs around Promise gating and cold-start.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(callback: f64) {
+    system::notification_on_background_receive(callback);
+}
+
 /// Schedule a fire-after-N-seconds notification via AlarmManager (#96).
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_interval(

@@ -1058,6 +1058,12 @@ pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
 
+/// Stub (#98): WNS background delivery isn't wired here yet (separate from
+/// the toast pipeline). Symbol exists so cross-platform user code linking
+/// against perry-ui-windows resolves cleanly. Callback is silently dropped.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+
 /// Stub: ToastNotifier.AddToSchedule wiring is a separate PR (#96 follow-up).
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_interval(

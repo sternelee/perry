@@ -5233,6 +5233,8 @@ static PERRY_SYSTEM_TABLE: &[UiSig] = &[
             args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
     UiSig { method: "notificationOnReceive", runtime: "perry_system_notification_on_receive",
             args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "notificationOnBackgroundReceive", runtime: "perry_system_notification_on_background_receive",
+            args: &[UiArgKind::Closure], ret: UiReturnKind::Void },
     UiSig { method: "notificationCancel", runtime: "perry_system_notification_cancel",
             args: &[UiArgKind::Str], ret: UiReturnKind::Void },
     UiSig { method: "notificationOnTap", runtime: "perry_system_notification_on_tap",

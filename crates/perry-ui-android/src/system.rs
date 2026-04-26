@@ -314,6 +314,15 @@ static NOTIFICATION_REMOTE_TOKEN_KEY: std::sync::atomic::AtomicI64 =
 static NOTIFICATION_RECEIVE_KEY: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 
+/// FCM background payload-receive callback key (#98). Set via
+/// `notification_on_background_receive` and read by
+/// `Java_com_perry_app_PerryBridge_nativeNotificationBackgroundReceive` when
+/// the FCM service runs (which is what Android calls for both foreground and
+/// background data-payload delivery — there's no native distinction at the
+/// FCM layer, unlike iOS's split delegate methods).
+static NOTIFICATION_BACKGROUND_RECEIVE_KEY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(0);
+
 /// Store the JS closure that fires when a notification is tapped (#97).
 /// The closure is stashed in `crate::callback::register` so the global
 /// callback table keeps it alive across GC; the returned key is saved in
@@ -386,6 +395,21 @@ pub fn notification_on_receive(callback: f64) {
     NOTIFICATION_RECEIVE_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Register the JS closure that fires for background FCM payloads (#98).
+/// FCM doesn't natively distinguish foreground from background delivery in
+/// the service callback — `onMessageReceived` runs for both — so the
+/// background callback fires for every payload that crosses the service.
+/// If both `notificationOnReceive` and `notificationOnBackgroundReceive` are
+/// registered, both fire (the foreground one first, then the background
+/// one). The cold-start case (process not yet loaded) hits the
+/// `UnsatisfiedLinkError` branch in `PerryFirebaseMessagingService` and is
+/// logged; wiring `Application.onCreate` to load the native lib at process
+/// spawn is a #98 follow-up.
+pub fn notification_on_background_receive(callback: f64) {
+    let key = crate::callback::register(callback);
+    NOTIFICATION_BACKGROUND_RECEIVE_KEY.store(key, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// JNI: FCM device token (#95). Looks up the registered remote-token
 /// callback and invokes it with the token NaN-boxed string.
 #[no_mangle]
@@ -428,6 +452,48 @@ pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationReceive(
         f64::from_bits(bits)
     };
     crate::callback::invoke1(key, payload_value);
+}
+
+/// JNI: FCM background push (#98). Same JSON→object shape as
+/// `nativeNotificationReceive`. The user's callback may return a Promise;
+/// `crate::callback::invoke1` runs the microtask pump after the call so any
+/// `.then` chains attached synchronously fire before this method returns
+/// — that gives the user's async work a window to complete inside the FCM
+/// service's own runtime budget. We don't gate the JNI return on the
+/// Promise actually settling (no UIBackgroundFetchResult equivalent on
+/// Android), so deeply-nested awaits past the pump's drain may be cut off
+/// when the OS suspends the process; v1 limitation, document for users.
+#[no_mangle]
+pub extern "C" fn Java_com_perry_app_PerryBridge_nativeNotificationBackgroundReceive(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    payload_json: jni::objects::JString,
+) {
+    let key = NOTIFICATION_BACKGROUND_RECEIVE_KEY.load(std::sync::atomic::Ordering::Relaxed);
+    if key == 0 { return; }
+    let rust_str: String = env.get_string(&payload_json).map(|s| s.into()).unwrap_or_default();
+    let bytes = rust_str.as_bytes();
+
+    extern "C" {
+        fn js_json_parse(text_ptr: *const u8) -> u64;
+        fn js_promise_run_microtasks() -> i32;
+    }
+    let payload_value = unsafe {
+        let str_ptr = js_string_from_bytes(bytes.as_ptr(), bytes.len());
+        let bits = js_json_parse(str_ptr);
+        f64::from_bits(bits)
+    };
+    crate::callback::invoke1(key, payload_value);
+
+    // Drive the microtask pump a few times so an async callback that awaits
+    // already-resolved Promises (e.g., a cached value, an in-memory write)
+    // gets a chance to finish before we hand control back to the FCM service.
+    // Each tick may schedule new work, so loop until it stabilizes (or we hit
+    // the cap, to keep this call bounded).
+    for _ in 0..8 {
+        let drained = unsafe { js_promise_run_microtasks() };
+        if drained == 0 { break; }
+    }
 }
 
 /// Schedule a fire-after-N-seconds notification via PerryBridge (#96).

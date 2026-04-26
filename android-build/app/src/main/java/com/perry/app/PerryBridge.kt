@@ -833,6 +833,18 @@ object PerryBridge {
     @JvmStatic
     external fun nativeNotificationReceive(payloadJson: String)
 
+    /// Forwarded by `PerryFirebaseMessagingService.onMessageReceived` (#98)
+    /// for every push payload that reaches the FCM service — Android's
+    /// equivalent to iOS's
+    /// `application:didReceiveRemoteNotification:fetchCompletionHandler:`
+    /// path. Same JSON-payload shape as `nativeNotificationReceive`. The
+    /// Rust side runs the user's Promise-returning callback and pumps
+    /// microtasks until the synchronously-attached chain quiesces; the FCM
+    /// service then returns and Android's normal background-runtime
+    /// budget governs how much further async work can complete.
+    @JvmStatic
+    external fun nativeNotificationBackgroundReceive(payloadJson: String)
+
     // --- Notifications (#94) ---
 
     /**

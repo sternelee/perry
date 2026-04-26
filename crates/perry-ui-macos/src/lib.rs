@@ -1332,6 +1332,16 @@ pub extern "C" fn perry_system_notification_on_receive(callback: f64) {
     crate::notifications::on_receive(callback);
 }
 
+/// Background-receive (#98) — no-op on macOS. Desktop apps don't have an
+/// equivalent of `application:didReceiveRemoteNotification:fetchCompletionHandler:`;
+/// the foreground delegate fires for both foregrounded and background app
+/// states (NSApplication doesn't suspend background processes the way iOS
+/// does), so user code targeting macOS should register `notificationOnReceive`
+/// instead. Stub kept so cross-platform user code linking in macOS doesn't
+/// fail to resolve the symbol.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_interval(
     id_ptr: i64,

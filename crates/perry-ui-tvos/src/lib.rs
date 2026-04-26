@@ -1544,6 +1544,12 @@ pub extern "C" fn perry_system_notification_register_remote(_callback: f64) {}
 #[no_mangle]
 pub extern "C" fn perry_system_notification_on_receive(_callback: f64) {}
 
+/// Background-receive (#98) — no-op on tvOS. Apple TV doesn't deliver
+/// silent push to backgrounded apps the way iOS does; the symbol exists so
+/// cross-platform user code links cleanly.
+#[no_mangle]
+pub extern "C" fn perry_system_notification_on_background_receive(_callback: f64) {}
+
 #[no_mangle]
 pub extern "C" fn perry_system_notification_schedule_interval(
     _id_ptr: i64, _title_ptr: i64, _body_ptr: i64, _seconds: f64, _repeats: f64,

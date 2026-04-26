@@ -120,8 +120,7 @@ define_class!(
             }
         }
 
-        /// Foreground remote-notification payload. Background delivery needs
-        /// the `fetchCompletionHandler:` variant — that's #98.
+        /// Foreground remote-notification payload.
         #[unsafe(method(application:didReceiveRemoteNotification:))]
         fn did_receive_remote_notification(
             &self,
@@ -131,6 +130,25 @@ define_class!(
             unsafe {
                 crate::notifications::dispatch_remote_payload(
                     user_info as *const _ as *mut AnyObject,
+                );
+            }
+        }
+
+        /// Background remote-notification payload (#98). UIKit always passes
+        /// a non-null completion handler block; we forward it to the
+        /// notifications module so the user's returned Promise can gate the
+        /// `UIBackgroundFetchResult` signal.
+        #[unsafe(method(application:didReceiveRemoteNotification:fetchCompletionHandler:))]
+        fn did_receive_remote_notification_with_completion(
+            &self,
+            _app: &AnyObject,
+            user_info: &AnyObject,
+            completion: *mut AnyObject,
+        ) {
+            unsafe {
+                crate::notifications::dispatch_remote_payload_with_completion(
+                    user_info as *const _ as *mut AnyObject,
+                    completion,
                 );
             }
         }

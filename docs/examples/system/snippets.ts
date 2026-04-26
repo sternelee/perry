@@ -21,7 +21,8 @@ import {
     keychainSave, keychainGet, keychainDelete,
     preferencesGet, preferencesSet,
     notificationSend, notificationCancel,
-    notificationRegisterRemote, notificationOnReceive, notificationOnTap,
+    notificationRegisterRemote, notificationOnReceive,
+    notificationOnBackgroundReceive, notificationOnTap,
     audioStart, audioStop, audioGetLevel, audioGetPeak, audioGetWaveform,
 } from "perry/system"
 
@@ -96,6 +97,19 @@ notificationOnReceive((payload: object) => {
     console.log(`got remote payload: ${JSON.stringify(payload)}`)
 })
 // ANCHOR_END: notification-remote
+
+// ANCHOR: notification-background
+// Background delivery (#98). The OS runs this when a remote notification
+// arrives and the app is backgrounded (or terminated, on iOS). The
+// returned Promise gates iOS's `UIBackgroundFetchResult` signal — keeping
+// the process alive until the work is actually done.
+notificationOnBackgroundReceive(async (payload: object) => {
+    // Mirror the payload locally so the next foreground launch can show it.
+    preferencesSet("last-bg-payload", JSON.stringify(payload))
+    // Real apps would hit a server here:
+    //   await fetch(`https://api.example.com/ack`, { method: "POST", body: ... })
+})
+// ANCHOR_END: notification-background
 
 // ANCHOR: audio
 const ok = audioStart() // 1 on success, 0 on failure
