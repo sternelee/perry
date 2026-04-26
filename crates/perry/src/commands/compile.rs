@@ -7139,20 +7139,54 @@ pub fn run_with_parse_cache(
                        .arg(stdlib)
                        .arg("-Wl,--no-whole-archive");
                 }
-                // GTK4 libraries via pkg-config
-                if let Ok(output) = Command::new("pkg-config").args(["--libs", "gtk4"]).output() {
+                // GTK4 libraries via pkg-config. The fallback fires in two
+                // distinct cases: pkg-config not installed (spawn fails), OR
+                // installed but `gtk4.pc` not on the search path (exit != 0
+                // — happens e.g. on Ubuntu hosts where libgtk-4-dev is split
+                // across packages, or when PKG_CONFIG_PATH is locked down).
+                // Pre-fix the second case silently emitted no GTK link flags
+                // and the link bombed with hundreds of `g_object_unref` /
+                // `gtk_widget_*` undefined references (#181).
+                let mut got_gtk_libs = false;
+                let pc_out = Command::new("pkg-config").args(["--libs", "gtk4"]).output();
+                if let Ok(ref output) = pc_out {
                     if output.status.success() {
                         let libs = String::from_utf8_lossy(&output.stdout);
                         for flag in libs.trim().split_whitespace() {
                             cmd.arg(flag);
                         }
+                        got_gtk_libs = true;
                     }
-                } else {
-                    // Fallback: link GTK4 libraries directly
-                    cmd.arg("-lgtk-4")
-                       .arg("-lgobject-2.0")
-                       .arg("-lglib-2.0")
-                       .arg("-lgio-2.0");
+                }
+                if !got_gtk_libs {
+                    // Mirrors what `pkg-config --libs gtk4` returns on a
+                    // standard libgtk-4-dev install. Pre-fix only listed the
+                    // glib/gio core, which left pango/cairo/gdk_pixbuf
+                    // undefined.
+                    eprintln!(
+                        "Warning: `pkg-config --libs gtk4` did not return GTK4 \
+                         linker flags ({}). Falling back to a hardcoded GTK4 \
+                         link set — install `libgtk-4-dev` (Debian/Ubuntu) or \
+                         `gtk4-devel` (Fedora/RHEL) and ensure pkg-config can \
+                         find `gtk4.pc` to silence this warning.",
+                        match &pc_out {
+                            Err(e) => format!("pkg-config not runnable: {e}"),
+                            Ok(o) if !o.status.success() => format!(
+                                "pkg-config exited {}: {}",
+                                o.status.code().unwrap_or(-1),
+                                String::from_utf8_lossy(&o.stderr).trim()
+                            ),
+                            Ok(_) => "no output".to_string(),
+                        }
+                    );
+                    for lib in [
+                        "-lgtk-4", "-lgio-2.0", "-lgobject-2.0", "-lglib-2.0",
+                        "-lpangocairo-1.0", "-lpango-1.0", "-lharfbuzz",
+                        "-lgdk_pixbuf-2.0", "-lcairo-gobject", "-lcairo",
+                        "-lgraphene-1.0",
+                    ] {
+                        cmd.arg(lib);
+                    }
                 }
                 // PulseAudio for audio capture (only needed with UI)
                 cmd.arg("-lpulse-simple")
