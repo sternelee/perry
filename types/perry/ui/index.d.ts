@@ -43,6 +43,114 @@ export interface Window {
     onFocusLost(callback: () => void): void;
 }
 
+/**
+ * RGBA color in 0..=1 floats.
+ *
+ * The FFI surface uses 4-float colors throughout (`(r, g, b, a)`), and the
+ * `style: { ... }` API of issue #185 will accept these objects directly.
+ * The string forms (CSS hex / rgb / hsl / named colors) are parsed by
+ * `parseColor` from the `perry-styling` companion package.
+ */
+export interface PerryColor {
+    r: number;
+    g: number;
+    b: number;
+    a?: number;
+}
+
+/**
+ * Cross-platform style descriptor for issue #185 Phase C.
+ *
+ * **Status:** Type surface only — the inline `Button("Save", onPress, { style })`
+ * codegen pass is in development. Right now use the individual setters
+ * (`widgetSetBackgroundColor`, `widgetSetBorderColor`, `setCornerRadius`,
+ * etc.) and pass `StyleProps` shapes around as plain typed objects for
+ * IDE autocomplete and future-compatibility — the same prop names map
+ * 1:1 to setters, so code authored against `StyleProps` today will keep
+ * working once the inline syntax lands.
+ *
+ * Every prop here is currently wired on macOS / iOS / tvOS / visionOS /
+ * watchOS / Android / Web; GTK4 has 4 gaps (issue #202) and Windows has
+ * 5 deferred-paint stubs (shadow, opacity, borders, text decoration —
+ * tracked in `crates/perry-ui/src/styling_matrix.rs`).
+ *
+ * Color values currently accept either a raw `PerryColor` object or a
+ * CSS string (hex / rgb / hsl / named) — string parsing happens at
+ * widget-construction time via `parseColor`.
+ */
+export interface StyleProps {
+    /** Solid background color. Maps to `widgetSetBackgroundColor`. */
+    backgroundColor?: string | PerryColor;
+
+    /** Foreground / text color. Maps to `textSetColor` (text widgets) or
+     *  `buttonSetTextColor` (buttons). */
+    color?: string | PerryColor;
+
+    /** Border color. Maps to `widgetSetBorderColor`. Joint state with
+     *  `borderWidth` — sets a default 1px width if width isn't also
+     *  provided, so a single setter still produces a visible border. */
+    borderColor?: string | PerryColor;
+
+    /** Border width in pixels. Maps to `widgetSetBorderWidth`. Joint
+     *  state with `borderColor`. */
+    borderWidth?: number;
+
+    /** Corner radius in pixels. Maps to `setCornerRadius`. */
+    borderRadius?: number;
+
+    /** Padding. A single number applies to all four sides; an object
+     *  picks per-side (top / right / bottom / left). Maps to
+     *  `widgetSetEdgeInsets`. */
+    padding?: number | {
+        top?: number;
+        right?: number;
+        bottom?: number;
+        left?: number;
+    };
+
+    /** Font size in points. Maps to `textSetFontSize`. */
+    fontSize?: number;
+
+    /** Font weight (numeric, e.g. 400 = regular, 700 = bold). Maps to
+     *  `textSetFontWeight`. */
+    fontWeight?: number;
+
+    /** Font family name (e.g. "Menlo", "system", "monospaced"). Maps to
+     *  `textSetFontFamily`. */
+    fontFamily?: string;
+
+    /** Opacity in 0.0..=1.0. Maps to `widgetSetOpacity`. */
+    opacity?: number;
+
+    /** Drop shadow. Maps to `widgetSetShadow`. `offset.y` is positive
+     *  downward, matching CSS `box-shadow` and CALayer semantics. */
+    shadow?: {
+        color?: string | PerryColor;
+        blur?: number;
+        offsetX?: number;
+        offsetY?: number;
+    };
+
+    /** Text decoration. Maps to `textSetDecoration`. */
+    textDecoration?: "none" | "underline" | "strikethrough";
+
+    /** Linear gradient. Maps to `widgetSetBackgroundGradient`. */
+    gradient?: {
+        angle: number;
+        stops: Array<string | PerryColor>;
+    };
+
+    /** Whether the widget is hidden from layout. Maps to `widgetSetHidden`. */
+    hidden?: boolean;
+
+    /** Whether the widget accepts user interaction. Maps to
+     *  `widgetSetEnabled`. */
+    enabled?: boolean;
+
+    /** Hover tooltip text. Maps to `widgetSetTooltip`. */
+    tooltip?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Constructors
 // ---------------------------------------------------------------------------
