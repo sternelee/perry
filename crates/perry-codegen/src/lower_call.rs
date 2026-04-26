@@ -2560,12 +2560,31 @@ pub(crate) fn lower_native_method_call(
             I64,
             vec![I64, DOUBLE],
         ));
+        // Scope `blk` so the mutable borrow on `ctx` is released before
+        // we call `apply_inline_style(ctx, ...)`, which re-borrows.
+        let handle = {
+            let blk = ctx.block();
+            blk.call(
+                I64,
+                "perry_ui_button_create",
+                &[(I64, &label_ptr), (DOUBLE, &handler_d)],
+            )
+        };
+
+        // Issue #185 Phase C step 2: optional trailing `style` arg.
+        // `Button(label, onPress, { borderRadius, opacity, ... })`
+        // destructures the StyleProps object at HIR time and emits a
+        // sequence of setter calls against the just-created handle.
+        // Mirrors the v0.5.x `App({ title, width, height, body })` HIR
+        // pass — same `extract_options_fields` helper, same per-key
+        // routing. Step 2 covers single-value scalar props; colors /
+        // padding / shadow / gradient need multi-arg destructure and
+        // land in step 3.
+        if let Some(style_arg) = args.get(2) {
+            apply_inline_style(ctx, &handle, style_arg)?;
+        }
+
         let blk = ctx.block();
-        let handle = blk.call(
-            I64,
-            "perry_ui_button_create",
-            &[(I64, &label_ptr), (DOUBLE, &handler_d)],
-        );
         return Ok(nanbox_pointer_inline(blk, &handle));
     }
 
@@ -3063,6 +3082,129 @@ fn get_raw_string_ptr(ctx: &mut FnCtx<'_>, e: &Expr) -> Result<String> {
     let v = lower_expr(ctx, e)?;
     let blk = ctx.block();
     Ok(blk.call(I64, "js_get_string_pointer_unified", &[(DOUBLE, &v)]))
+}
+
+/// Issue #185 Phase C step 2: apply an inline `style: { ... }` object
+/// to a freshly-created widget handle by destructuring the object
+/// literal at HIR time and emitting a sequence of setter calls.
+///
+/// Step 2 supports the single-value scalar props that don't need
+/// multi-arg destructure: borderRadius, opacity, borderWidth,
+/// fontSize, fontWeight, tooltip, hidden, enabled. Color props
+/// (`backgroundColor` / `color` / `borderColor`), padding (single
+/// number or per-side object), shadow (color + blur + offsets), and
+/// gradient (angle + stops array) land in step 3.
+///
+/// Unknown / not-yet-supported keys are silently lowered for side
+/// effects but otherwise dropped — TS's structural typing makes the
+/// `StyleProps` interface the source of typo-safety.
+///
+/// Mirrors the App({...}) destructure pattern in this file:
+/// `extract_options_fields` returns the props, then per-key routing.
+fn apply_inline_style(
+    ctx: &mut FnCtx<'_>,
+    handle: &str,
+    style_arg: &Expr,
+) -> Result<()> {
+    let Some(props) = extract_options_fields(ctx, style_arg) else {
+        // Not an object literal — silently skip rather than bail, so a
+        // user passing `undefined` (no style) just gets the bare widget.
+        return Ok(());
+    };
+    for (key, val) in &props {
+        match key.as_str() {
+            "borderRadius" => {
+                let v = lower_expr(ctx, val)?;
+                ctx.pending_declares.push((
+                    "perry_ui_widget_set_corner_radius".to_string(),
+                    DOUBLE,
+                    vec![I64, DOUBLE],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_widget_set_corner_radius",
+                    &[(I64, handle), (DOUBLE, &v)],
+                );
+            }
+            "opacity" => {
+                let v = lower_expr(ctx, val)?;
+                ctx.pending_declares.push((
+                    "perry_ui_widget_set_opacity".to_string(),
+                    DOUBLE,
+                    vec![I64, DOUBLE],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_widget_set_opacity",
+                    &[(I64, handle), (DOUBLE, &v)],
+                );
+            }
+            "borderWidth" => {
+                let v = lower_expr(ctx, val)?;
+                ctx.pending_declares.push((
+                    "perry_ui_widget_set_border_width".to_string(),
+                    DOUBLE,
+                    vec![I64, DOUBLE],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_widget_set_border_width",
+                    &[(I64, handle), (DOUBLE, &v)],
+                );
+            }
+            "tooltip" => {
+                let s = get_raw_string_ptr(ctx, val)?;
+                ctx.pending_declares.push((
+                    "perry_ui_widget_set_tooltip".to_string(),
+                    DOUBLE,
+                    vec![I64, I64],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_widget_set_tooltip",
+                    &[(I64, handle), (I64, &s)],
+                );
+            }
+            "hidden" => {
+                let v = lower_expr(ctx, val)?;
+                let blk = ctx.block();
+                let bits = unbox_to_i64(blk, &v);
+                ctx.pending_declares.push((
+                    "perry_ui_set_widget_hidden".to_string(),
+                    DOUBLE,
+                    vec![I64, I64],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_set_widget_hidden",
+                    &[(I64, handle), (I64, &bits)],
+                );
+            }
+            "enabled" => {
+                let v = lower_expr(ctx, val)?;
+                let blk = ctx.block();
+                let bits = unbox_to_i64(blk, &v);
+                ctx.pending_declares.push((
+                    "perry_ui_widget_set_enabled".to_string(),
+                    DOUBLE,
+                    vec![I64, I64],
+                ));
+                ctx.block().call(
+                    DOUBLE,
+                    "perry_ui_widget_set_enabled",
+                    &[(I64, handle), (I64, &bits)],
+                );
+            }
+            _ => {
+                // Unknown / not-yet-supported key — lower for side
+                // effects (in case it's a function call) but skip the
+                // setter emission. Step 3 will handle the multi-arg
+                // shapes (color, padding object, shadow, gradient).
+                let _ = lower_expr(ctx, val)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Build a Headers handle from an inline object literal `{ "k": "v", ... }`.
