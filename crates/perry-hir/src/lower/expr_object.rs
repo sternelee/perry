@@ -13,17 +13,17 @@
 //! Pattern matches `expr_misc.rs` and `expr_function.rs`: free
 //! `pub(super) fn` helpers, recursion through `super::lower_expr`.
 
-use anyhow::{anyhow, Result};
-use perry_types::{FuncId, LocalId, Type};
+use anyhow::Result;
+use perry_types::{LocalId, Type};
 use swc_ecma_ast as ast;
 
 use crate::analysis::{closure_uses_this, collect_assigned_locals_stmt, collect_local_refs_stmt};
-use crate::ir::{ArrayElement, BinaryOp, EnumValue, Expr, Function, Param, Stmt};
+use crate::ir::{EnumValue, Expr, Function, Param, Stmt};
 use crate::lower_decl::lower_block_stmt;
 use crate::lower_patterns::{
-    get_param_default, get_pat_name, is_destructuring_pattern, is_rest_param,
+    get_param_default, get_pat_name, is_rest_param,
 };
-use crate::lower_types::{extract_param_type_with_ctx, extract_ts_type_with_ctx, infer_type_from_expr};
+use crate::lower_types::{extract_param_type_with_ctx, extract_ts_type_with_ctx};
 
 use super::{lower_expr, LoweringContext};
 

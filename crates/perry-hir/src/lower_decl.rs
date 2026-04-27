@@ -2852,7 +2852,7 @@ pub(crate) fn lower_body_stmt(ctx: &mut LoweringContext, stmt: &ast::Stmt) -> Re
                     collect_assigned_locals_stmt(stmt, &mut all_assigned);
                 }
                 let assigned_set: std::collections::HashSet<LocalId> = all_assigned.into_iter().collect();
-                let mut mutable_captures: Vec<LocalId> = captures.iter()
+                let mutable_captures: Vec<LocalId> = captures.iter()
                     .filter(|id| assigned_set.contains(id) || ctx.var_hoisted_ids.contains(id))
                     .copied()
                     .collect();

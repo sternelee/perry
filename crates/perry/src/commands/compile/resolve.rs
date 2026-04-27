@@ -345,7 +345,7 @@ pub(super) fn resolve_with_extensions(base: &Path) -> Option<PathBuf> {
     // TypeScript extensions to try (in order of preference)
     let ts_extensions = [".ts", ".tsx", ".mts"];
     // JavaScript extensions (fallback)
-    let js_extensions = [".js", ".mjs", ".cjs"];
+    let _js_extensions = [".js", ".mjs", ".cjs"];
     // All extensions in order of preference
     let all_extensions = [".ts", ".tsx", ".mts", ".js", ".mjs", ".cjs", ".json"];
 

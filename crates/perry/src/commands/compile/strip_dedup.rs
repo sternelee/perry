@@ -235,7 +235,7 @@ pub(super) fn strip_duplicate_objects_from_lib(lib_path: &PathBuf) -> Result<Pat
     };
 
     // Determine the UI crate name from the staticlib filename
-    let ui_crate_name = lib_path.file_stem()
+    let _ui_crate_name = lib_path.file_stem()
         .and_then(|f| f.to_str())
         .unwrap_or("");
 

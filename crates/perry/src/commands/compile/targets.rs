@@ -14,8 +14,7 @@
 //! `apple_sdk_version` etc.).
 
 use anyhow::{anyhow, Result};
-use perry_hir::Module as HirModule;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

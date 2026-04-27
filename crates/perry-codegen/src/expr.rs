@@ -7975,7 +7975,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
 
         Expr::ChildProcessSpawnBackground { command, args, log_file, env_json } => {
             let cmd_box = lower_expr(ctx, command)?;
-            let args_box = if let Some(a) = args {
+            let _args_box = if let Some(a) = args {
                 lower_expr(ctx, a)?
             } else {
                 double_literal(0.0)

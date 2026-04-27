@@ -3,12 +3,10 @@
 use anyhow::{anyhow, Result};
 use clap::Args;
 use perry_hir::{Module as HirModule, ModuleKind};
-use perry_transform::{inline_functions, transform_generators};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::OutputFormat;
 
@@ -29,16 +27,15 @@ pub use parse_cache::ParseCache;
 use parse_cache::parse_cached;
 use strip_dedup::strip_duplicate_objects_from_lib;
 use library_search::{
-    build_geisterhand_libs, collect_library_candidates, find_geisterhand_lib,
+    build_geisterhand_libs,
     find_geisterhand_library, find_geisterhand_runtime, find_geisterhand_ui,
-    find_jsruntime_library, find_lld_link, find_library, find_library_with_candidates,
+    find_jsruntime_library, find_lld_link, find_library,
     find_llvm_tool, find_msvc_lib_paths, find_msvc_link_exe, find_perry_windows_sdk,
     find_runtime_library, find_stdlib_library, find_ui_library, windows_pe_subsystem_flag,
-    xwin_sysroot_lib_paths,
 };
 use targets::{
     apple_sdk_version, compile_for_android_widget, compile_for_ios_widget,
-    compile_for_wasm, compile_for_watchos_widget, compile_for_wearos_tile, compile_for_web,
+    compile_for_wasm, compile_for_watchos_widget, compile_for_wearos_tile,
     compile_metallib_for_bundle, find_visionos_swift_runtime, find_watchos_swift_runtime,
     generate_js_bundle, lookup_bundle_id_from_toml,
 };
@@ -49,13 +46,11 @@ use collect_modules::collect_modules;
 use link::build_and_run_link;
 pub use resolve::find_perry_workspace_root;
 use resolve::{
-    is_declaration_file, is_js_file, is_ts_file,
+    is_declaration_file, is_js_file,
     cached_resolve_import, compute_module_prefix, discover_extension_entries,
-    extract_compile_package_dir, find_file_dep_in_package_json, find_node_modules,
-    has_perry_native_library, has_perry_native_module, is_in_compile_package,
-    is_in_perry_native_package, parse_native_library_manifest, parse_package_specifier,
-    resolve_exports, resolve_import, resolve_package_entry, resolve_package_source_entry,
-    resolve_with_extensions,
+    extract_compile_package_dir,
+    has_perry_native_library, is_in_compile_package,
+    is_in_perry_native_package, parse_native_library_manifest, parse_package_specifier, resolve_import,
 };
 
 /// Result of a successful compilation
@@ -1529,7 +1524,7 @@ pub fn run_with_parse_cache(
     let needs_js_runtime = ctx.needs_js_runtime || args.enable_js_runtime;
 
     // Compile native modules in parallel using rayon
-    use rayon::prelude::*;
+    
 
     // Snapshot i18n data from main thread so rayon workers can access it.
     // The `default_locale_idx` is required by the LLVM backend to resolve
@@ -2044,7 +2039,7 @@ pub fn run_with_parse_cache(
 
     // Parallel write phase. Returns one Result per write so we can
     // bail on the first I/O error after the par_iter finishes.
-    use rayon::prelude::*;
+    
     let write_results: Vec<Result<(), std::io::Error>> = to_write
         .par_iter()
         .map(|(obj_path, object_code)| fs::write(obj_path, object_code))
@@ -2234,7 +2229,7 @@ pub fn run_with_parse_cache(
             }
         }
         // Platform detection for nm tool and symbol prefix
-        let is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
+        let _is_ios = matches!(target.as_deref(), Some("ios-simulator") | Some("ios"));
         let is_android = matches!(target.as_deref(), Some("android"));
         let is_linux = matches!(target.as_deref(), Some("linux")) || (!cfg!(target_os = "macos") && !cfg!(target_os = "windows") && target.is_none());
         let is_windows = matches!(target.as_deref(), Some("windows")) || (cfg!(target_os = "windows") && target.is_none());
@@ -2325,7 +2320,7 @@ pub fn run_with_parse_cache(
     // Phase J: bitcode link — merge user .ll + runtime/stdlib .bc into one
     // optimized object via llvm-link → opt → llc. This replaces both the
     // per-module clang -c step AND the archive linking.
-    let bitcode_linked = if bitcode_link && optimized_libs.runtime_bc.is_some() {
+    let _bitcode_linked = if bitcode_link && optimized_libs.runtime_bc.is_some() {
         if matches!(format, OutputFormat::Text) {
             println!("Using LLVM bitcode link (whole-program LTO)");
         }
@@ -2499,7 +2494,7 @@ pub fn run_with_parse_cache(
     let is_android = matches!(target.as_deref(), Some("android"));
     let is_linux = matches!(target.as_deref(), Some("linux"))
         || (target.is_none() && cfg!(target_os = "linux"));
-    let is_windows = matches!(target.as_deref(), Some("windows"))
+    let _is_windows = matches!(target.as_deref(), Some("windows"))
         || (target.is_none() && cfg!(target_os = "windows"));
     // is_watchos / is_tvos are defined below (near jsruntime_lib).
     // The is_cross_* bindings used to live here, but they're now derived
@@ -2920,7 +2915,7 @@ pub fn run_with_parse_cache(
                         ) {
                             let ipad_start = plist.find("<key>UISupportedInterfaceOrientations~ipad</key>").unwrap();
                             // Find end of iPhone array
-                            let iphone_section = &plist[start..ipad_start];
+                            let _iphone_section = &plist[start..ipad_start];
                             plist = format!(
                                 "{}{}\n    {}",
                                 &plist[..start],

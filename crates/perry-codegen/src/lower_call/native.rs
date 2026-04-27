@@ -17,16 +17,14 @@
 use anyhow::{bail, Result};
 use perry_dispatch::{ArgKind as UiArgKind, ReturnKind as UiReturnKind};
 use perry_hir::Expr;
-use perry_types::Type as HirType;
 
-use crate::expr::{lower_expr, nanbox_pointer_inline, nanbox_string_inline, unbox_to_i64, FnCtx};
+use crate::expr::{lower_expr, nanbox_pointer_inline, unbox_to_i64, FnCtx};
 use crate::nanbox::{double_literal, POINTER_MASK_I64};
-use crate::types::{DOUBLE, I32, I64};
+use crate::types::{DOUBLE, I64};
 
 use super::{
     apply_inline_style, collect_closure_introduced_ids, extract_options_fields,
-    find_outer_writes_stmt, get_raw_string_ptr, is_abort_controller_expr,
-    lower_abort_controller_call, lower_fetch_native_method, lower_native_module_dispatch,
+    find_outer_writes_stmt, get_raw_string_ptr, lower_fetch_native_method, lower_native_module_dispatch,
     lower_notification_schedule, lower_perry_ui_table_call, native_module_lookup,
     perry_i18n_table_lookup, perry_plugin_instance_method_lookup, perry_plugin_table_lookup,
     perry_system_table_lookup, perry_ui_instance_method_lookup, perry_ui_table_lookup,

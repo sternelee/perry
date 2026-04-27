@@ -4055,7 +4055,7 @@ fn lower_stmt(
                         ctxt: Default::default(),
                     };
                     let mutable = false;
-                    let is_var = false;
+                    let _is_var = false;
                     for decl in &fake_var.decls {
                         if let Some(init) = &decl.init {
                             match &decl.name {
@@ -6112,7 +6112,7 @@ fn try_lower_widget_decl(
     let mut placeholder: Option<Vec<(String, WidgetPlaceholderValue)>> = None;
     let mut family_param_name: Option<String> = None;
     let mut app_group: Option<String> = None;
-    let mut reload_after_seconds: Option<u32> = None;
+    let reload_after_seconds: Option<u32> = None;
 
     for prop in &config_obj.props {
         let kv = match prop {

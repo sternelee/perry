@@ -11,15 +11,13 @@
 //! use a hash-keyed target dir so consecutive runs with the same
 //! profile are no-ops after the first build.
 
-use anyhow::Result;
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::commands::stdlib_features::{compute_required_features, features_to_cargo_arg};
 use crate::OutputFormat;
 
-use super::{djb2_hash, find_perry_workspace_root, rust_target_triple, CompilationContext};
+use super::{find_perry_workspace_root, rust_target_triple, CompilationContext};
 
 pub struct OptimizedLibs {
     /// Path to the rebuilt `libperry_runtime.a` (or `perry_runtime.lib`).

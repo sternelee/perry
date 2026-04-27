@@ -10,10 +10,10 @@
 //! `new (someFn)(args)` form via `Expr::NewDynamic`.
 
 use anyhow::{anyhow, Result};
-use perry_types::{LocalId, Type};
+use perry_types::LocalId;
 use swc_ecma_ast as ast;
 
-use crate::ir::{typed_array_kind_for_name, Expr};
+use crate::ir::Expr;
 use crate::lower_decl::lower_class_from_ast;
 use crate::lower_types::extract_ts_type_with_ctx;
 

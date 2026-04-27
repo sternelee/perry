@@ -9,7 +9,7 @@
 //! (regular object vs class static vs enum vs builtin namespace) then
 //! emit the right HIR variant.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use perry_types::Type;
 use swc_ecma_ast as ast;
 

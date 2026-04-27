@@ -18,8 +18,6 @@
 //!    IO-error degradation, lock-free shared `&self` access (each
 //!    cache key is per-module so writes never conflict).
 
-use perry_codegen::CompileOptions;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -10,13 +10,12 @@
 //! V2.2 codegen cache key derivation.
 
 use anyhow::{anyhow, Result};
-use perry_hir::{lower_module_with_class_id_and_types, requires_stdlib, ModuleKind};
+use perry_hir::ModuleKind;
 use perry_transform::{inline_functions, transform_generators};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::commands::typecheck::resolve_types_for_file;
 use crate::OutputFormat;
 
 use super::{

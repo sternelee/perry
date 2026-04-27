@@ -24,7 +24,7 @@ use crate::lower_types::extract_ts_type_with_ctx;
 
 use super::{
     extract_typed_parse_source_order, is_generator_call_expr, is_widget_modifier_name,
-    lower_expr, lower_expr_assignment, resolve_typed_parse_ty, try_desugar_reactive_animate,
+    lower_expr, resolve_typed_parse_ty, try_desugar_reactive_animate,
     try_desugar_reactive_text, LoweringContext,
 };
 
@@ -2576,9 +2576,9 @@ pub(super) fn lower_call(ctx: &mut LoweringContext, call: &ast::CallExpr) -> Res
                             // This handles cases where the array is a property of an object, not a local variable
                             if let ast::Expr::Member(obj_member) = member.obj.as_ref() {
                                 if let ast::MemberProp::Ident(obj_prop_ident) = &obj_member.prop {
-                                    let property_name = obj_prop_ident.sym.to_string();
+                                    let _property_name = obj_prop_ident.sym.to_string();
                                     // Lower the object expression (e.g., 'this' or a local variable)
-                                    let object_expr = lower_expr(ctx, &obj_member.obj)?;
+                                    let _object_expr = lower_expr(ctx, &obj_member.obj)?;
 
                                     match method_name {
                                         "push" => {
