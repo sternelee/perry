@@ -18,6 +18,7 @@ pub mod canvas;
 pub mod navstack;
 pub mod lazyvstack;
 pub mod image;
+pub mod splitview;
 
 use gtk4::prelude::*;
 use gtk4::Widget;
@@ -596,6 +597,129 @@ pub fn set_alignment(handle: i64, alignment: i64) {
                 }
             }
         }
+    }
+}
+
+/// Remove a single child widget from its parent. Mirrors macOS
+/// `perry_ui_widget_remove_child`. Dispatches by parent container kind:
+/// Box uses `remove(&child)`; ScrolledWindow / Frame inner-box / Overlay
+/// each clear by their own API. The handle stays registered (we don't
+/// shrink the WIDGETS vec, since handles are positional indices) — only
+/// the GTK4 parent link is severed, mirroring NSView's
+/// `removeFromSuperview`.
+pub fn remove_child(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        if let Some(container) = parent.downcast_ref::<gtk4::Box>() {
+            if child.parent().as_ref() == Some(container.upcast_ref::<Widget>()) {
+                container.remove(&child);
+            }
+        } else if let Some(scrolled) = parent.downcast_ref::<gtk4::ScrolledWindow>() {
+            if scrolled.child().as_ref() == Some(&child) {
+                scrolled.set_child(None::<&Widget>);
+            }
+        } else if let Some(overlay) = parent.downcast_ref::<gtk4::Overlay>() {
+            if overlay.child().as_ref() == Some(&child) {
+                overlay.set_child(None::<&Widget>);
+            } else {
+                overlay.remove_overlay(&child);
+            }
+        } else if let Some(frame) = parent.downcast_ref::<gtk4::Frame>() {
+            if let Some(inner) = frame.child() {
+                if let Some(inner_box) = inner.downcast_ref::<gtk4::Box>() {
+                    if child.parent().as_ref() == Some(inner_box.upcast_ref::<Widget>()) {
+                        inner_box.remove(&child);
+                    }
+                }
+            }
+        } else if child.parent().is_some() {
+            child.unparent();
+        }
+    }
+}
+
+/// Reorder a child within its parent container by positional index.
+/// Mirrors macOS `perry_ui_widget_reorder_child(parent, from, to)` —
+/// the macOS impl walks `arrangedSubviews` and uses `insertArrangedSubview:atIndex:`.
+/// On GTK4 we walk `parent.first_child()` siblings to locate the child at
+/// `from_index`, then walk again to find the anchor sibling at `to_index`,
+/// and call `Box::reorder_child_after(&child, anchor)`. Out-of-range
+/// indices are clamped: from > N-1 → no-op; to >= N → moves to the end.
+pub fn reorder_child(parent_handle: i64, from_index: i64, to_index: i64) {
+    let Some(parent) = get_widget(parent_handle) else { return };
+    let Some(container) = parent.downcast_ref::<gtk4::Box>() else { return };
+
+    // Snapshot the sibling list (positional, before mutation).
+    let mut siblings: Vec<Widget> = Vec::new();
+    let mut cur = container.first_child();
+    while let Some(c) = cur {
+        siblings.push(c.clone());
+        cur = c.next_sibling();
+    }
+    let n = siblings.len() as i64;
+    if from_index < 0 || from_index >= n {
+        return;
+    }
+    let child = siblings[from_index as usize].clone();
+    let to = to_index.clamp(0, n - 1);
+    if to == from_index {
+        return;
+    }
+    // `reorder_child_after(child, sibling)` — sibling=None places child first.
+    if to == 0 {
+        container.reorder_child_after(&child, None::<&Widget>);
+    } else {
+        // The anchor is the sibling that should end up immediately *before* child.
+        // After removal of child from position `from`, the sibling currently at
+        // `to` (when moving forward) or `to-1` (when moving back) is the right anchor.
+        let anchor_idx = if to > from_index { to as usize } else { (to - 1).max(0) as usize };
+        let anchor = siblings[anchor_idx].clone();
+        container.reorder_child_after(&child, Some(&anchor));
+    }
+}
+
+/// Add an overlay child on top of a parent. Mirrors macOS
+/// `perry_ui_widget_add_overlay` (which uses plain `addSubview`, so the
+/// child floats above arranged subviews). On GTK4 the natural primitive
+/// is `gtk4::Overlay::add_overlay`. If the parent isn't already an
+/// `Overlay`, we cannot retroactively wrap it in one (GTK4 widgets have a
+/// single immutable parent slot), so we log a warning and fall through to
+/// `add_child` — the user will still see their widget, just not floating
+/// above siblings. Use a `ZStack` (which is backed by `gtk4::Overlay`) as
+/// the parent for true overlay semantics.
+pub fn add_overlay(parent_handle: i64, child_handle: i64) {
+    if let (Some(parent), Some(child)) = (get_widget(parent_handle), get_widget(child_handle)) {
+        if child.parent().is_some() {
+            child.unparent();
+        }
+        if let Some(overlay) = parent.downcast_ref::<gtk4::Overlay>() {
+            overlay.add_overlay(&child);
+        } else {
+            eprintln!(
+                "perry-ui-gtk4: widget_add_overlay on non-Overlay parent — \
+                 falling back to add_child. Wrap the parent in a ZStack for true overlay."
+            );
+            add_child(parent_handle, child_handle);
+        }
+    }
+}
+
+/// Position + size an overlay child. Mirrors macOS
+/// `perry_ui_widget_set_overlay_frame` (CGRect on a subview). GTK4's
+/// layout model is constraint-based, not absolute-frame, so we approximate
+/// using `halign/valign = Start` + start/top margins for the (x, y) offset
+/// and `set_size_request(w, h)` for the size. This works correctly when
+/// the parent is a `gtk4::Overlay` (the common case for floating widgets)
+/// because Overlay honors child halign/valign. For other parent types the
+/// approximation may not produce pixel-perfect positioning — true
+/// absolute-frame semantics on a non-Overlay parent need a `gtk4::Fixed`
+/// wrapper, deferred until a use case surfaces.
+pub fn set_overlay_frame(handle: i64, x: f64, y: f64, w: f64, h: f64) {
+    if let Some(widget) = get_widget(handle) {
+        widget.set_halign(gtk4::Align::Start);
+        widget.set_valign(gtk4::Align::Start);
+        widget.set_margin_start(x as i32);
+        widget.set_margin_top(y as i32);
+        widget.set_size_request(w as i32, h as i32);
     }
 }
 

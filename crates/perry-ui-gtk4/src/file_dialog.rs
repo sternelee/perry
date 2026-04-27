@@ -11,16 +11,43 @@ extern "C" {
 /// Open a file dialog. Calls callback with the selected file path (NaN-boxed string).
 /// If user cancels, callback is called with TAG_UNDEFINED.
 pub fn open_dialog(callback: f64) {
+    open_dialog_with_action(
+        callback,
+        "Open File",
+        FileChooserAction::Open,
+        "Open",
+    );
+}
+
+/// Open a folder picker. Calls callback with the selected directory path
+/// (NaN-boxed string). If user cancels, callback is called with TAG_UNDEFINED.
+/// Mirrors macOS `perry_ui_open_folder_dialog` (NSOpenPanel with
+/// `canChooseDirectories: YES, canChooseFiles: NO`).
+pub fn open_folder_dialog(callback: f64) {
+    open_dialog_with_action(
+        callback,
+        "Choose Folder",
+        FileChooserAction::SelectFolder,
+        "Choose",
+    );
+}
+
+fn open_dialog_with_action(
+    callback: f64,
+    title: &str,
+    action: FileChooserAction,
+    accept_label: &str,
+) {
     // Get the active window
     let window: Option<Window> = None; // No parent window reference in GTK4 static context
 
     let dialog = FileChooserDialog::new(
-        Some("Open File"),
+        Some(title),
         window.as_ref(),
-        FileChooserAction::Open,
+        action,
         &[
             ("Cancel", ResponseType::Cancel),
-            ("Open", ResponseType::Accept),
+            (accept_label, ResponseType::Accept),
         ],
     );
 

@@ -281,6 +281,21 @@ pub extern "C" fn perry_ui_zstack_create() -> i64 {
     widgets::zstack::create()
 }
 
+/// Create a SplitView (horizontal split-pane). Mirrors macOS
+/// `perry_ui_splitview_create` (`NSSplitView`). On GTK4 backed by
+/// `gtk::Paned` — supports exactly 2 children (vs N on macOS).
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_create(left_width: f64) -> i64 {
+    widgets::splitview::create(left_width)
+}
+
+/// Add a child to a SplitView. First call → start child, second →
+/// end child, third+ → no-op + warning (GTK4 `Paned` cap).
+#[no_mangle]
+pub extern "C" fn perry_ui_splitview_add_child(parent: i64, child: i64, index: f64) {
+    widgets::splitview::add_child(parent, child, index as i64);
+}
+
 /// Create a LazyVStack.
 #[no_mangle]
 pub extern "C" fn perry_ui_lazyvstack_create(count: f64, render_closure: f64) -> i64 {
@@ -344,6 +359,36 @@ pub extern "C" fn perry_ui_widget_add_child_at(parent_handle: i64, child_handle:
 #[no_mangle]
 pub extern "C" fn perry_ui_widget_clear_children(handle: i64) {
     widgets::clear_children(handle);
+}
+
+/// Remove a single child from its parent. Mirrors macOS
+/// `perry_ui_widget_remove_child` (NSView `removeFromSuperview`).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_remove_child(parent_handle: i64, child_handle: i64) {
+    widgets::remove_child(parent_handle, child_handle);
+}
+
+/// Reorder a child within its parent by positional index. Mirrors macOS
+/// `perry_ui_widget_reorder_child` — args are f64 to match the macOS
+/// signature, internally cast to i64.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_reorder_child(parent_handle: i64, from_index: f64, to_index: f64) {
+    widgets::reorder_child(parent_handle, from_index as i64, to_index as i64);
+}
+
+/// Add an overlay child on top of a parent. Mirrors macOS
+/// `perry_ui_widget_add_overlay`. On GTK4 the parent must be an `Overlay`
+/// (i.e. a `ZStack`) for the overlay to truly float above siblings.
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_add_overlay(parent_handle: i64, child_handle: i64) {
+    widgets::add_overlay(parent_handle, child_handle);
+}
+
+/// Position + size an overlay child. Mirrors macOS
+/// `perry_ui_widget_set_overlay_frame` (CGRect on a subview).
+#[no_mangle]
+pub extern "C" fn perry_ui_widget_set_overlay_frame(handle: i64, x: f64, y: f64, w: f64, h: f64) {
+    widgets::set_overlay_frame(handle, x, y, w, h);
 }
 
 // =============================================================================
@@ -774,6 +819,12 @@ pub extern "C" fn perry_ui_clipboard_write(text_ptr: i64) {
 #[no_mangle]
 pub extern "C" fn perry_ui_open_file_dialog(callback: f64) {
     file_dialog::open_dialog(callback);
+}
+
+/// Open a folder picker. Mirrors macOS `perry_ui_open_folder_dialog`.
+#[no_mangle]
+pub extern "C" fn perry_ui_open_folder_dialog(callback: f64) {
+    file_dialog::open_folder_dialog(callback);
 }
 
 /// Open a save file dialog.
