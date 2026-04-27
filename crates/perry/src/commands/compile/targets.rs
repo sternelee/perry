@@ -1,0 +1,824 @@
+//! Per-target compile orchestrators.
+//!
+//! Tier 2.1 follow-up (v0.5.340) — extracts the platform-specific
+//! "compile_for_*" functions (iOS / watchOS / android / wearOS / web /
+//! WASM widget builds) from `compile.rs`, plus their supporting
+//! helpers (`generate_js_bundle`, `find_watchos_swift_runtime`,
+//! `find_visionos_swift_runtime`, `apple_sdk_version`,
+//! `lookup_bundle_id_from_toml`, `compile_metallib_for_bundle`).
+//!
+//! All entry points are `pub(super) fn` so the parent `compile.rs`
+//! orchestrator can dispatch to them via `targets::compile_for_*`.
+//! The supporting helpers stay `pub(super)` for use elsewhere in
+//! `compile.rs` (Apple-specific link command construction reads
+//! `apple_sdk_version` etc.).
+
+use anyhow::{anyhow, Result};
+use perry_hir::Module as HirModule;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use crate::OutputFormat;
+
+use super::{CompilationContext, CompileArgs, CompileResult};
+
+pub(super) fn generate_js_bundle(ctx: &CompilationContext, output_dir: &Path) -> Result<PathBuf> {
+    let bundle_path = output_dir.join("__perry_js_bundle.js");
+
+    let mut bundle = String::new();
+    bundle.push_str("// Auto-generated JS bundle by Perry\n");
+    bundle.push_str("// This file contains all JavaScript modules needed at runtime\n\n");
+
+    bundle.push_str("globalThis.__COMPILETS_MODULES = {};\n\n");
+
+    for (specifier, module) in &ctx.js_modules {
+        // Escape the source code for embedding
+        let escaped_source = module.source
+            .replace('\\', "\\\\")
+            .replace('`', "\\`")
+            .replace("${", "\\${");
+
+        bundle.push_str(&format!(
+            "globalThis.__COMPILETS_MODULES[{:?}] = `{}`;\n",
+            specifier, escaped_source
+        ));
+    }
+
+    fs::write(&bundle_path, &bundle)?;
+    Ok(bundle_path)
+}
+
+/// Compile for iOS widget target: emit SwiftUI source for WidgetKit extension
+pub(super) fn compile_for_ios_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    let app_bundle_id = args.app_bundle_id.as_deref()
+        .ok_or_else(|| anyhow!("--app-bundle-id is required for ios-widget target"))?;
+
+    // Collect all widget declarations from all modules
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Generating WidgetKit extension ({} widget{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    // Determine output directory
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("widget");
+        PathBuf::from(format!("{}_widget", stem))
+    };
+
+    // Create output directory
+    fs::create_dir_all(&output_dir)?;
+
+    // Generate SwiftUI for each widget
+    let mut all_swift_files: Vec<(String, String)> = Vec::new();
+    let mut all_info_plists: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_swiftui::compile_widget(widget, app_bundle_id)?;
+
+        for (filename, source) in &bundle.swift_files {
+            let swift_path = output_dir.join(filename);
+            fs::write(&swift_path, source)?;
+            all_swift_files.push((filename.clone(), source.clone()));
+        }
+
+        // Write Info.plist
+        let plist_path = output_dir.join("Info.plist");
+        fs::write(&plist_path, &bundle.info_plist)?;
+        all_info_plists.push(("Info.plist".to_string(), bundle.info_plist.clone()));
+    }
+
+    // Report results
+    let total_size: usize = all_swift_files.iter()
+        .map(|(_, s)| s.len())
+        .sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("Widget extension generated: {}/", output_dir.display());
+            for (name, source) in &all_swift_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  Info.plist");
+            println!("Total: {:.1} KB SwiftUI source", total_size as f64 / 1024.0);
+            println!();
+            println!("To build the widget extension:");
+            let sdk = if args.target.as_deref() == Some("ios-widget-simulator") {
+                "iphonesimulator"
+            } else {
+                "iphoneos"
+            };
+            println!("  xcrun --sdk {} swiftc -target arm64-apple-ios17.0 \\", sdk);
+            for (name, _) in &all_swift_files {
+                println!("    {}/{} \\", output_dir.display(), name);
+            }
+            println!("    -framework WidgetKit -framework SwiftUI \\");
+            println!("    -o {}/WidgetExtension", output_dir.display());
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"ios-widget\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    let target_str = args.target.as_deref().unwrap_or("ios-widget").to_string();
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: target_str,
+        bundle_id: Some(app_bundle_id.to_string()),
+        is_dylib: false,
+        codegen_cache_stats: None,
+    })
+}
+
+/// Compile for watchOS widget target: emit SwiftUI + native timeline (accessory families)
+pub(super) fn compile_for_watchos_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    let app_bundle_id = args.app_bundle_id.as_deref()
+        .ok_or_else(|| anyhow!("--app-bundle-id is required for watchos-widget target"))?;
+
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Generating watchOS WidgetKit extension ({} complication{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("widget");
+        PathBuf::from(format!("{}_watchos_widget", stem))
+    };
+
+    fs::create_dir_all(&output_dir)?;
+
+    let mut all_swift_files: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_swiftui::compile_widget(widget, app_bundle_id)?;
+
+        for (filename, source) in &bundle.swift_files {
+            let swift_path = output_dir.join(filename);
+            fs::write(&swift_path, source)?;
+            all_swift_files.push((filename.clone(), source.clone()));
+        }
+
+        let plist_path = output_dir.join("Info.plist");
+        fs::write(&plist_path, &bundle.info_plist)?;
+    }
+
+    let total_size: usize = all_swift_files.iter().map(|(_, s)| s.len()).sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("watchOS complication generated: {}/", output_dir.display());
+            for (name, source) in &all_swift_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  Info.plist");
+            println!("Total: {:.1} KB SwiftUI source", total_size as f64 / 1024.0);
+            println!();
+            println!("To build the watchOS widget extension:");
+            let sdk = if args.target.as_deref() == Some("watchos-widget-simulator") {
+                "watchsimulator"
+            } else {
+                "watchos"
+            };
+            println!("  xcrun --sdk {} swiftc -target arm64-apple-watchos9.0 \\", sdk);
+            for (name, _) in &all_swift_files {
+                println!("    {}/{} \\", output_dir.display(), name);
+            }
+            println!("    -framework WidgetKit -framework SwiftUI \\");
+            println!("    -o {}/WidgetExtension", output_dir.display());
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"watchos-widget\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    let target_str = args.target.as_deref().unwrap_or("watchos-widget").to_string();
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: target_str,
+        bundle_id: Some(app_bundle_id.to_string()),
+        is_dylib: false,
+        codegen_cache_stats: None,
+    })
+}
+
+/// Find the PerryWatchApp.swift runtime file.
+pub(super) fn find_watchos_swift_runtime() -> Option<PathBuf> {
+    // 1. Check next to the perry binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("swift").join("PerryWatchApp.swift");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            // Also check ../lib/perry/swift/
+            if let Some(prefix) = dir.parent() {
+                let candidate = prefix.join("lib").join("perry").join("swift").join("PerryWatchApp.swift");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    // 2. Check in the source tree (development builds)
+    let source_candidate = PathBuf::from("crates/perry-ui-watchos/swift/PerryWatchApp.swift");
+    if source_candidate.exists() {
+        return Some(source_candidate);
+    }
+
+    None
+}
+
+pub(super) fn find_visionos_swift_runtime() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join("swift").join("PerryVisionApp.swift");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            if let Some(prefix) = dir.parent() {
+                let candidate = prefix.join("lib").join("perry").join("swift").join("PerryVisionApp.swift");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    let source_candidate = PathBuf::from("crates/perry-ui-visionos/swift/PerryVisionApp.swift");
+    if source_candidate.exists() {
+        return Some(source_candidate);
+    }
+
+    None
+}
+
+pub(super) fn apple_sdk_version(sdk: &str) -> Option<String> {
+    let output = Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-version"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    let version = version.trim();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version.to_string())
+    }
+}
+
+/// Look up bundle_id from perry.toml for a specific section (e.g., "watchos", "ios", "app")
+pub(super) fn lookup_bundle_id_from_toml(input: &std::path::Path, section: &str) -> Option<String> {
+    let mut dir = input.canonicalize().ok()?;
+    for _ in 0..5 {
+        dir = dir.parent()?.to_path_buf();
+        let toml_path = dir.join("perry.toml");
+        if toml_path.exists() {
+            let data = fs::read_to_string(&toml_path).ok()?;
+            let doc: toml::Table = data.parse().ok()?;
+            let bid = doc.get(section)
+                .and_then(|s| s.get("bundle_id"))
+                .or_else(|| doc.get("bundle_id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if bid.is_some() {
+                return bid;
+            }
+        }
+    }
+    None
+}
+
+/// Compile all `metal_sources` declared across `ctx.native_libraries` into a
+/// single `<app_dir>/default.metallib`. Each `.metal` file is compiled to an
+/// intermediate `.air` via `xcrun -sdk <sdk> metal -c`, then all `.air` files
+/// are linked into `default.metallib` via `xcrun -sdk <sdk> metallib`. That's
+/// the path SwiftUI's `ShaderLibrary.default` (and `MTLDevice.makeDefaultLibrary()`)
+/// loads at runtime.
+///
+/// Deduplicates by canonical source path — shared manifests (e.g., the same
+/// package.json seen by multiple imported modules) only compile each shader
+/// once. No-op if no native lib declares `metal_sources`.
+pub(super) fn compile_metallib_for_bundle(
+    ctx: &CompilationContext,
+    target: Option<&str>,
+    app_dir: &Path,
+    format: OutputFormat,
+) -> Result<()> {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    for native_lib in &ctx.native_libraries {
+        if let Some(ref tc) = native_lib.target_config {
+            for src in &tc.metal_sources {
+                let canonical = src.canonicalize().unwrap_or_else(|_| src.clone());
+                if seen.insert(canonical) {
+                    sources.push((src.clone(), native_lib.module.clone()));
+                }
+            }
+        }
+    }
+    if sources.is_empty() {
+        return Ok(());
+    }
+
+    let metal_sdk = match target {
+        Some("watchos-simulator") => "watchsimulator",
+        Some("watchos") => "watchos",
+        Some("ios-simulator") => "iphonesimulator",
+        Some("ios") => "iphoneos",
+        Some("tvos-simulator") => "appletvsimulator",
+        Some("tvos") => "appletvos",
+        other => return Err(anyhow!(
+            "metal_sources is only supported on ios/tvos/watchos (got {:?})",
+            other
+        )),
+    };
+
+    let air_dir = std::env::temp_dir()
+        .join(format!("perry_metal_{}", std::process::id()));
+    std::fs::create_dir_all(&air_dir).ok();
+
+    let mut air_files: Vec<PathBuf> = Vec::new();
+    for (src, module) in &sources {
+        if !src.exists() {
+            return Err(anyhow!(
+                "Metal source not found: {} (declared in {}'s nativeLibrary.metal_sources)",
+                src.display(),
+                module
+            ));
+        }
+        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("shader");
+        let air_out = air_dir.join(format!("{}.air", stem));
+        let status = Command::new("xcrun")
+            .args(["-sdk", metal_sdk, "metal", "-c"])
+            .arg(src)
+            .arg("-o")
+            .arg(&air_out)
+            .status()?;
+        if !status.success() {
+            return Err(anyhow!("Failed to compile Metal shader: {}", src.display()));
+        }
+        match format {
+            OutputFormat::Text => println!("Compiled Metal shader: {}", src.display()),
+            OutputFormat::Json => {}
+        }
+        air_files.push(air_out);
+    }
+
+    let metallib_out = app_dir.join("default.metallib");
+    let mut link_cmd = Command::new("xcrun");
+    link_cmd.args(["-sdk", metal_sdk, "metallib", "-o"])
+        .arg(&metallib_out);
+    for air in &air_files {
+        link_cmd.arg(air);
+    }
+    let status = link_cmd.status()?;
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to link Metal library into {}",
+            metallib_out.display()
+        ));
+    }
+
+    match format {
+        OutputFormat::Text => println!("Wrote Metal library: {}", metallib_out.display()),
+        OutputFormat::Json => {}
+    }
+
+    Ok(())
+}
+
+/// Compile for Android widget target: emit Kotlin/Glance source + JNI bridge
+pub(super) fn compile_for_android_widget(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    let app_package = args.app_bundle_id.as_deref().unwrap_or("com.perry.widget");
+
+    match format {
+        OutputFormat::Text => println!("Generating Android Glance widget ({} widget{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("widget");
+        PathBuf::from(format!("{}_android_widget", stem))
+    };
+
+    fs::create_dir_all(&output_dir)?;
+    fs::create_dir_all(output_dir.join("xml"))?;
+
+    let mut all_kotlin_files: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_glance::compile_widget_glance(widget, app_package)?;
+
+        for (filename, source) in &bundle.kotlin_files {
+            let kt_path = output_dir.join(filename);
+            fs::write(&kt_path, source)?;
+            all_kotlin_files.push((filename.clone(), source.clone()));
+        }
+
+        // Write widget_info XML
+        let safe_name = widget.kind.rsplit('.').next().unwrap_or("widget").to_lowercase();
+        let xml_path = output_dir.join("xml").join(format!("widget_info_{}.xml", safe_name));
+        fs::write(&xml_path, &bundle.widget_info_xml)?;
+
+        // Write manifest snippet
+        let manifest_path = output_dir.join("AndroidManifest_snippet.xml");
+        fs::write(&manifest_path, &bundle.manifest_snippet)?;
+    }
+
+    let total_size: usize = all_kotlin_files.iter().map(|(_, s)| s.len()).sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("Android Glance widget generated: {}/", output_dir.display());
+            for (name, source) in &all_kotlin_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  xml/widget_info_*.xml");
+            println!("  AndroidManifest_snippet.xml");
+            println!("Total: {:.1} KB Kotlin source", total_size as f64 / 1024.0);
+            println!();
+            println!("Add the generated files to your Android/Gradle project:");
+            println!("  1. Copy *.kt files to app/src/main/java/{}/", app_package.replace('.', "/"));
+            println!("  2. Copy xml/ to app/src/main/res/xml/");
+            println!("  3. Merge AndroidManifest_snippet.xml into your AndroidManifest.xml");
+            println!("  4. Add Glance dependency: implementation \"androidx.glance:glance-appwidget:1.1.0\"");
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"android-widget\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: "android-widget".to_string(),
+        bundle_id: Some(app_package.to_string()),
+        is_dylib: false,
+        codegen_cache_stats: None,
+    })
+}
+
+/// Compile for Wear OS tile target: emit Kotlin Tiles source + JNI bridge
+pub(super) fn compile_for_wearos_tile(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    let mut widgets: Vec<&perry_hir::ir::WidgetDecl> = Vec::new();
+    for (_, hir_module) in &ctx.native_modules {
+        for widget in &hir_module.widgets {
+            widgets.push(widget);
+        }
+    }
+
+    if widgets.is_empty() {
+        return Err(anyhow!("No Widget() declarations found. Import {{ Widget }} from 'perry/widget' and call Widget({{...}})."));
+    }
+
+    let app_package = args.app_bundle_id.as_deref().unwrap_or("com.perry.tile");
+
+    match format {
+        OutputFormat::Text => println!("Generating Wear OS tile ({} tile{})...",
+            widgets.len(), if widgets.len() == 1 { "" } else { "s" }),
+        OutputFormat::Json => {}
+    }
+
+    let output_dir = if let Some(ref out) = args.output {
+        out.clone()
+    } else {
+        let stem = args.input.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("tile");
+        PathBuf::from(format!("{}_wearos_tile", stem))
+    };
+
+    fs::create_dir_all(&output_dir)?;
+
+    let mut all_kotlin_files: Vec<(String, String)> = Vec::new();
+
+    for widget in &widgets {
+        let bundle = perry_codegen_wear_tiles::compile_widget_wear_tile(widget, app_package)?;
+
+        for (filename, source) in &bundle.kotlin_files {
+            let kt_path = output_dir.join(filename);
+            fs::write(&kt_path, source)?;
+            all_kotlin_files.push((filename.clone(), source.clone()));
+        }
+
+        let manifest_path = output_dir.join("AndroidManifest_snippet.xml");
+        fs::write(&manifest_path, &bundle.manifest_snippet)?;
+    }
+
+    let total_size: usize = all_kotlin_files.iter().map(|(_, s)| s.len()).sum();
+
+    match format {
+        OutputFormat::Text => {
+            println!("Wear OS tile generated: {}/", output_dir.display());
+            for (name, source) in &all_kotlin_files {
+                println!("  {} ({:.1} KB)", name, source.len() as f64 / 1024.0);
+            }
+            println!("  AndroidManifest_snippet.xml");
+            println!("Total: {:.1} KB Kotlin source", total_size as f64 / 1024.0);
+            println!();
+            println!("Add the generated files to your Wear OS/Gradle project:");
+            println!("  1. Copy *.kt files to app/src/main/java/{}/", app_package.replace('.', "/"));
+            println!("  2. Merge AndroidManifest_snippet.xml into your AndroidManifest.xml");
+            println!("  3. Add dependencies:");
+            println!("     implementation \"com.google.android.horologist:horologist-tiles:0.6.5\"");
+            println!("     implementation \"androidx.wear.tiles:tiles-material:1.4.0\"");
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"widgets\": {}, \"size\": {}, \"target\": \"wearos-tile\"}}",
+                output_dir.display(), widgets.len(), total_size);
+        }
+    }
+
+    Ok(CompileResult {
+        output_path: output_dir,
+        target: "wearos-tile".to_string(),
+        bundle_id: Some(app_package.to_string()),
+        is_dylib: false,
+        codegen_cache_stats: None,
+    })
+}
+
+/// Compile for web target: emit JavaScript + HTML instead of native code
+pub(super) fn compile_for_web(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    match format {
+        OutputFormat::Text => println!("Generating JavaScript for web target..."),
+        OutputFormat::Json => {}
+    }
+
+    let entry_path = args.input.canonicalize().unwrap_or_else(|_| args.input.clone());
+
+    // Build topologically sorted module list (dependencies before dependents)
+    let mut sorted_paths: Vec<PathBuf> = Vec::new();
+    {
+        let mut path_to_deps: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let mut deps = Vec::new();
+            for import in &hir_module.imports {
+                if let Some(ref resolved) = import.resolved_path {
+                    let resolved_path = PathBuf::from(resolved);
+                    if ctx.native_modules.contains_key(&resolved_path) {
+                        deps.push(resolved_path);
+                    }
+                }
+            }
+            path_to_deps.insert(path.clone(), deps);
+        }
+
+        let mut visited_set: HashSet<PathBuf> = HashSet::new();
+        let mut visiting_set: HashSet<PathBuf> = HashSet::new();
+
+        fn topo_visit(
+            path: &PathBuf,
+            deps: &HashMap<PathBuf, Vec<PathBuf>>,
+            visited: &mut HashSet<PathBuf>,
+            visiting: &mut HashSet<PathBuf>,
+            sorted: &mut Vec<PathBuf>,
+        ) {
+            if visited.contains(path) || visiting.contains(path) { return; }
+            visiting.insert(path.clone());
+            if let Some(module_deps) = deps.get(path) {
+                for dep in module_deps {
+                    topo_visit(dep, deps, visited, visiting, sorted);
+                }
+            }
+            visiting.remove(path);
+            visited.insert(path.clone());
+            sorted.push(path.clone());
+        }
+
+        let mut all: Vec<PathBuf> = ctx.native_modules.keys().cloned().collect();
+        all.sort();
+        for path in &all {
+            topo_visit(path, &path_to_deps, &mut visited_set, &mut visiting_set, &mut sorted_paths);
+        }
+    }
+
+    // Ensure entry module is last
+    if let Some(pos) = sorted_paths.iter().position(|p| *p == entry_path) {
+        sorted_paths.remove(pos);
+    }
+    sorted_paths.push(entry_path.clone());
+
+    // Build module list for JS codegen
+    let modules: Vec<(String, perry_hir::Module)> = sorted_paths.iter()
+        .filter_map(|path| {
+            ctx.native_modules.get(path).map(|m| (m.name.clone(), m.clone()))
+        })
+        .collect();
+
+    // Determine output title from entry filename
+    let title = args.input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Perry App");
+
+    // Minify by default for web target (--minify flag is auto-enabled)
+    let minify = true;
+    let html = perry_codegen_js::compile_modules_to_html(&modules, title, minify)?;
+
+    // Determine output path
+    let output_path = if let Some(ref out) = args.output {
+        if out.extension().is_none() {
+            out.with_extension("html")
+        } else {
+            out.clone()
+        }
+    } else {
+        let stem = args.input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+        PathBuf::from(format!("{}.html", stem))
+    };
+
+    fs::write(&output_path, &html)?;
+
+    let file_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+    match format {
+        OutputFormat::Text => {
+            println!("Web output: {} ({:.1} KB)", output_path.display(), file_size as f64 / 1024.0);
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"size\": {}, \"target\": \"web\"}}",
+                output_path.display(), file_size);
+        }
+    }
+
+    Ok(CompileResult {
+        output_path,
+        target: "web".to_string(),
+        bundle_id: None,
+        is_dylib: false,
+        codegen_cache_stats: None,
+    })
+}
+
+/// Compile for WebAssembly target: emit WASM binary + JS runtime bridge
+pub(super) fn compile_for_wasm(ctx: &CompilationContext, args: &CompileArgs, format: OutputFormat) -> Result<CompileResult> {
+    match format {
+        OutputFormat::Text => println!("Generating WebAssembly..."),
+        OutputFormat::Json => {}
+    }
+
+    let entry_path = args.input.canonicalize().unwrap_or_else(|_| args.input.clone());
+
+    // Build topologically sorted module list (same as web target)
+    let mut sorted_paths: Vec<PathBuf> = Vec::new();
+    {
+        let mut path_to_deps: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for (path, hir_module) in &ctx.native_modules {
+            let mut deps = Vec::new();
+            for import in &hir_module.imports {
+                if let Some(ref resolved) = import.resolved_path {
+                    let resolved_path = PathBuf::from(resolved);
+                    if ctx.native_modules.contains_key(&resolved_path) {
+                        deps.push(resolved_path);
+                    }
+                }
+            }
+            path_to_deps.insert(path.clone(), deps);
+        }
+
+        let mut visited_set: HashSet<PathBuf> = HashSet::new();
+        let mut visiting_set: HashSet<PathBuf> = HashSet::new();
+
+        fn topo_visit_wasm(
+            path: &PathBuf,
+            deps: &HashMap<PathBuf, Vec<PathBuf>>,
+            visited: &mut HashSet<PathBuf>,
+            visiting: &mut HashSet<PathBuf>,
+            sorted: &mut Vec<PathBuf>,
+        ) {
+            if visited.contains(path) || visiting.contains(path) { return; }
+            visiting.insert(path.clone());
+            if let Some(module_deps) = deps.get(path) {
+                for dep in module_deps {
+                    topo_visit_wasm(dep, deps, visited, visiting, sorted);
+                }
+            }
+            visiting.remove(path);
+            visited.insert(path.clone());
+            sorted.push(path.clone());
+        }
+
+        let mut all: Vec<PathBuf> = ctx.native_modules.keys().cloned().collect();
+        all.sort();
+        for path in &all {
+            topo_visit_wasm(path, &path_to_deps, &mut visited_set, &mut visiting_set, &mut sorted_paths);
+        }
+    }
+
+    // Ensure entry module is last
+    if let Some(pos) = sorted_paths.iter().position(|p| *p == entry_path) {
+        sorted_paths.remove(pos);
+    }
+    sorted_paths.push(entry_path.clone());
+
+    let modules: Vec<(String, perry_hir::Module)> = sorted_paths.iter()
+        .filter_map(|path| {
+            ctx.native_modules.get(path).map(|m| (m.name.clone(), m.clone()))
+        })
+        .collect();
+
+    let title = args.input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Perry App");
+
+    let minify = args.minify;
+
+    // Determine output format: .html (default) or .wasm (raw binary)
+    let output_path = if let Some(ref out) = args.output {
+        if out.extension().map_or(false, |e| e == "wasm") {
+            out.clone()
+        } else if out.extension().is_none() {
+            out.with_extension("html")
+        } else {
+            out.clone()
+        }
+    } else {
+        let stem = args.input.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+        PathBuf::from(format!("{}.html", stem))
+    };
+
+    if output_path.extension().map_or(false, |e| e == "wasm") {
+        // Raw WASM binary output
+        let wasm = perry_codegen_wasm::compile_modules_to_wasm(&modules)?;
+        fs::write(&output_path, &wasm)?;
+    } else {
+        // HTML with embedded WASM
+        let html = perry_codegen_wasm::compile_modules_to_wasm_html(&modules, title, minify)?;
+        fs::write(&output_path, &html)?;
+    }
+
+    let file_size = fs::metadata(&output_path).map(|m| m.len()).unwrap_or(0);
+    match format {
+        OutputFormat::Text => {
+            println!("WASM output: {} ({:.1} KB)", output_path.display(), file_size as f64 / 1024.0);
+        }
+        OutputFormat::Json => {
+            println!("{{\"output\": \"{}\", \"size\": {}, \"target\": \"wasm\"}}",
+                output_path.display(), file_size);
+        }
+    }
+
+    Ok(CompileResult {
+        output_path,
+        target: "wasm".to_string(),
+        bundle_id: None,
+        is_dylib: false,
+        codegen_cache_stats: None,
+    })
+}
