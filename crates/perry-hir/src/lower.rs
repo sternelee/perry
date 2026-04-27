@@ -9,6 +9,14 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ir::*;
 
+// Tier 2.3 (v0.5.337): pilot extraction of small `lower_expr` arms.
+// Eight self-contained AST variants (Cond, Await, SuperProp, Update,
+// Tpl, Seq, MetaProp, Yield) moved to `lower/expr_misc.rs` as free
+// functions; the `lower_expr` match arms below collapse to one-line
+// delegations. Same pattern as Tier 2.1 (compile.rs split) and 2.2
+// (ui_styling extracted from lower_call.rs).
+mod expr_misc;
+
 /// Context for lowering, tracks variable bindings
 pub struct LoweringContext {
     /// Counter for generating unique local IDs
@@ -9918,12 +9926,7 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 other => Err(anyhow!("Unsupported assignment target: {:?}", other)),
             }
         }
-        ast::Expr::Cond(cond) => {
-            let condition = Box::new(lower_expr(ctx, &cond.test)?);
-            let then_expr = Box::new(lower_expr(ctx, &cond.cons)?);
-            let else_expr = Box::new(lower_expr(ctx, &cond.alt)?);
-            Ok(Expr::Conditional { condition, then_expr, else_expr })
-        }
+        ast::Expr::Cond(cond) => expr_misc::lower_cond(ctx, cond),
         ast::Expr::Array(array) => {
             // Check if any elements are spread elements
             let has_spread = array.elems.iter()
@@ -11152,135 +11155,10 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
                 is_async: fn_expr.function.is_async,
             })
         }
-        ast::Expr::Await(await_expr) => {
-            let inner = Box::new(lower_expr(ctx, &await_expr.arg)?);
-            Ok(Expr::Await(inner))
-        }
-        ast::Expr::SuperProp(super_prop) => {
-            // super.property access - used in super.method() calls
-            // When used as a call target, the Call expression will detect this
-            // For now, we'll error on direct property access (super.prop without call)
-            match &super_prop.prop {
-                ast::SuperProp::Ident(_ident) => {
-                    // This is typically used in Call expressions like super.method()
-                    // We return a placeholder that will be handled specially
-                    crate::lower_bail!(
-                        super_prop.span,
-                        "Direct super property access not yet supported, use super.method()"
-                    );
-                }
-                ast::SuperProp::Computed(_) => {
-                    crate::lower_bail!(
-                        super_prop.span,
-                        "Computed super property access not supported"
-                    );
-                }
-            }
-        }
-        ast::Expr::Update(update) => {
-            // Handle ++x, x++, --x, x--
-            let binary_op = match update.op {
-                ast::UpdateOp::PlusPlus => BinaryOp::Add,
-                ast::UpdateOp::MinusMinus => BinaryOp::Sub,
-            };
-
-            match update.arg.as_ref() {
-                // Simple identifier: x++ or ++x
-                ast::Expr::Ident(ident) => {
-                    let name = ident.sym.to_string();
-                    let id = ctx.lookup_local(&name)
-                        .ok_or_else(|| anyhow!("Undefined variable in update expression: {}", name))?;
-                    let op = match update.op {
-                        ast::UpdateOp::PlusPlus => UpdateOp::Increment,
-                        ast::UpdateOp::MinusMinus => UpdateOp::Decrement,
-                    };
-                    Ok(Expr::Update {
-                        id,
-                        op,
-                        prefix: update.prefix,
-                    })
-                }
-                // Member expression: this.count++ or obj.prop++ or obj[key]++
-                ast::Expr::Member(member) => {
-                    let object = lower_expr(ctx, &member.obj)?;
-                    match &member.prop {
-                        ast::MemberProp::Ident(ident) => {
-                            let property = ident.sym.to_string();
-                            // Desugar: this.count++ becomes (tmp = this.count, this.count = tmp + 1, tmp)
-                            // For prefix ++this.count becomes (this.count = this.count + 1, this.count)
-                            // We simplify to just: this.count = this.count + 1
-                            // The return value semantics are handled at codegen
-                            Ok(Expr::PropertyUpdate {
-                                object: Box::new(object),
-                                property,
-                                op: binary_op,
-                                prefix: update.prefix,
-                            })
-                        }
-                        ast::MemberProp::PrivateName(priv_name) => {
-                            let property = format!("#{}", priv_name.name);
-                            Ok(Expr::PropertyUpdate {
-                                object: Box::new(object),
-                                property,
-                                op: binary_op,
-                                prefix: update.prefix,
-                            })
-                        }
-                        ast::MemberProp::Computed(comp) => {
-                            // Computed property: obj[key]++
-                            let index = lower_expr(ctx, &comp.expr)?;
-                            Ok(Expr::IndexUpdate {
-                                object: Box::new(object),
-                                index: Box::new(index),
-                                op: binary_op,
-                                prefix: update.prefix,
-                            })
-                        }
-                    }
-                }
-                _ => Err(anyhow!("Update expression only supports identifiers and member expressions")),
-            }
-        }
-        ast::Expr::Tpl(tpl) => {
-            // Template literal: `Hello, ${name}!`
-            // quasis = ["Hello, ", "!"], exprs = [name]
-            // We desugar this to string concatenation
-
-            if tpl.quasis.is_empty() {
-                return Ok(Expr::String(String::new()));
-            }
-
-            // Start with the first quasi
-            let first_raw = tpl.quasis.first()
-                .map(|q| q.raw.as_ref())
-                .unwrap_or("");
-            let mut result = Expr::String(unescape_template(first_raw));
-
-            // Interleave expressions and remaining quasis
-            for (i, expr) in tpl.exprs.iter().enumerate() {
-                let lowered = lower_expr(ctx, expr)?;
-                // Concatenate: result + toString(expr)
-                result = Expr::Binary {
-                    op: BinaryOp::Add,
-                    left: Box::new(result),
-                    right: Box::new(lowered),
-                };
-
-                // Add the next quasi (if it's non-empty)
-                if let Some(quasi) = tpl.quasis.get(i + 1) {
-                    let quasi_str: &str = quasi.raw.as_ref();
-                    if !quasi_str.is_empty() {
-                        result = Expr::Binary {
-                            op: BinaryOp::Add,
-                            left: Box::new(result),
-                            right: Box::new(Expr::String(unescape_template(quasi_str))),
-                        };
-                    }
-                }
-            }
-
-            Ok(result)
-        }
+        ast::Expr::Await(await_expr) => expr_misc::lower_await(ctx, await_expr),
+        ast::Expr::SuperProp(super_prop) => expr_misc::lower_super_prop(ctx, super_prop),
+        ast::Expr::Update(update) => expr_misc::lower_update(ctx, update),
+        ast::Expr::Tpl(tpl) => expr_misc::lower_tpl(ctx, tpl),
         ast::Expr::OptChain(opt_chain) => {
             // Optional chaining: obj?.prop or obj?.[index] or obj?.method()
             // Convert to: obj == null ? undefined : obj.prop
@@ -11443,58 +11321,9 @@ pub(crate) fn lower_expr(ctx: &mut LoweringContext, expr: &ast::Expr) -> Result<
             // TypeScript generic instantiation (func<Type>) - at runtime, just the expression
             lower_expr(ctx, &ts_inst.expr)
         }
-        ast::Expr::Seq(seq) => {
-            // Comma operator: evaluate all expressions left-to-right, return the last value
-            // e.g., (a++, b++, c) evaluates a++, then b++, then returns c
-            // All expressions must be evaluated for side effects (e.g., for-loop updates: it3--, i++)
-            let mut exprs = Vec::new();
-            for expr in &seq.exprs {
-                exprs.push(lower_expr(ctx, expr)?);
-            }
-            if exprs.len() == 1 {
-                Ok(exprs.pop().unwrap())
-            } else {
-                Ok(Expr::Sequence(exprs))
-            }
-        }
-        ast::Expr::MetaProp(meta_prop) => {
-            // import.meta expression
-            // We only support import.meta itself - property access (.url) is handled in Member expr
-            // For now, return a placeholder object that will be handled in property access
-            match meta_prop.kind {
-                ast::MetaPropKind::ImportMeta => {
-                    // Return the file:// URL directly for import.meta.url
-                    // Since import.meta is typically accessed via .url, we generate the URL here
-                    let file_url = format!("file://{}", ctx.source_file_path);
-                    Ok(Expr::Object(vec![
-                        ("url".to_string(), Expr::String(file_url)),
-                    ]))
-                }
-                ast::MetaPropKind::NewTarget => {
-                    // Inside a class constructor, `new.target` evaluates to the
-                    // class itself. We approximate this with a small object
-                    // literal `{ name: <class_name> }` so:
-                    //   - `new.target ? a : b` is truthy → takes the `a` branch
-                    //   - `new.target.name` returns the class name string
-                    // Outside a constructor (e.g., a regular function called
-                    // without `new`), `new.target` is `undefined`.
-                    if let Some(class_name) = ctx.in_constructor_class.clone() {
-                        Ok(Expr::Object(vec![
-                            ("name".to_string(), Expr::String(class_name)),
-                        ]))
-                    } else {
-                        Ok(Expr::Undefined)
-                    }
-                }
-            }
-        }
-        ast::Expr::Yield(y) => {
-            let value = match &y.arg {
-                Some(arg) => Some(Box::new(lower_expr(ctx, arg)?)),
-                None => None,
-            };
-            Ok(Expr::Yield { value, delegate: y.delegate })
-        }
+        ast::Expr::Seq(seq) => expr_misc::lower_seq(ctx, seq),
+        ast::Expr::MetaProp(meta_prop) => expr_misc::lower_meta_prop(ctx, meta_prop),
+        ast::Expr::Yield(y) => expr_misc::lower_yield(ctx, y),
         ast::Expr::TaggedTpl(tagged) => {
             // Tagged template literals: tag`Hello ${name},${42}!`
             // Two cases:
