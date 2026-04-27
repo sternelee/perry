@@ -3062,6 +3062,13 @@ impl JsEmitter {
             "ProgressView" | "progressview_create" => "perry_ui_progressview_create",
             "Image" | "image_create" => "perry_ui_image_create",
             "Picker" | "picker_create" => "perry_ui_picker_create",
+            // Table (issue #192)
+            "Table" | "table_create" => "perry_ui_table_create",
+            "tableSetColumnHeader" => "perry_ui_table_set_column_header",
+            "tableSetColumnWidth" => "perry_ui_table_set_column_width",
+            "tableUpdateRowCount" => "perry_ui_table_update_row_count",
+            "tableSetOnRowSelect" => "perry_ui_table_set_on_row_select",
+            "tableGetSelectedRow" => "perry_ui_table_get_selected_row",
             // Camera (issue #191) — browser stubs in wasm_runtime.js return
             // 0 / -1 since there's no DOM equivalent for live capture; the
             // dispatch entries here exist so the JS-target compile resolves

@@ -5266,6 +5266,32 @@ const PERRY_UI_TABLE: &[UiSig] = &[
     UiSig { method: "scrollviewSetOffset", runtime: "perry_ui_scrollview_set_offset",
             args: &[UiArgKind::Widget, UiArgKind::F64], ret: UiReturnKind::Void },
 
+    // ---- Table (issue #192) ----
+    // NSTableView-backed scrollable table. Real implementation lives in
+    // `perry-ui-macos`; iOS / Android / GTK4 / Windows / tvOS / visionOS /
+    // watchOS export no-op stubs (returns handle 0, all setters no-op).
+    // The render closure is `(row: number, col: number) => Widget` —
+    // returns a Text/HStack/etc. that becomes the cell view. Free-function
+    // call shape mirrors `pickerAddItem` / `pickerSetSelected` rather
+    // than the `picker.addItem(...)` method form, matching the existing
+    // wasm/js dispatch tables that already route `tableSetColumnHeader`
+    // and friends.
+    UiSig { method: "Table", runtime: "perry_ui_table_create",
+            args: &[UiArgKind::F64, UiArgKind::F64, UiArgKind::Closure],
+            ret: UiReturnKind::Widget },
+    UiSig { method: "tableSetColumnHeader", runtime: "perry_ui_table_set_column_header",
+            args: &[UiArgKind::Widget, UiArgKind::I64Raw, UiArgKind::Str],
+            ret: UiReturnKind::Void },
+    UiSig { method: "tableSetColumnWidth", runtime: "perry_ui_table_set_column_width",
+            args: &[UiArgKind::Widget, UiArgKind::I64Raw, UiArgKind::F64],
+            ret: UiReturnKind::Void },
+    UiSig { method: "tableUpdateRowCount", runtime: "perry_ui_table_update_row_count",
+            args: &[UiArgKind::Widget, UiArgKind::I64Raw], ret: UiReturnKind::Void },
+    UiSig { method: "tableSetOnRowSelect", runtime: "perry_ui_table_set_on_row_select",
+            args: &[UiArgKind::Widget, UiArgKind::Closure], ret: UiReturnKind::Void },
+    UiSig { method: "tableGetSelectedRow", runtime: "perry_ui_table_get_selected_row",
+            args: &[UiArgKind::Widget], ret: UiReturnKind::I64AsF64 },
+
     // ---- Camera (issue #191) ----
     // Live camera preview widget. Real implementations live in
     // `perry-ui-ios` (AVCaptureSession) and `perry-ui-android` (Camera2).

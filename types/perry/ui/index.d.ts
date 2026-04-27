@@ -499,6 +499,43 @@ export function tabbarAddTab(tabBar: Widget, title: string, content: Widget): vo
 export function tabbarSetSelected(tabBar: Widget, index: number): void;
 
 // ---------------------------------------------------------------------------
+// Table (issue #192)
+// ---------------------------------------------------------------------------
+
+/**
+ * Multi-column scrollable table. Real implementation lives on **macOS**
+ * (`NSTableView` + `NSScrollView`); the **Web** target uses an HTML
+ * `<table>`. Other targets (iOS, Android, Linux/GTK4, Windows, tvOS,
+ * visionOS, watchOS) link no-op stubs so cross-platform code compiles
+ * everywhere — the table renders nothing and `tableGetSelectedRow`
+ * returns `-1`.
+ *
+ * The render callback receives `(row, col)` and must return a `Widget`
+ * (typically `Text(...)`). The runtime resolves the returned handle as
+ * the cell view, which lets cells render images, stacks, or composites
+ * — not just plain strings.
+ *
+ * Compare with `LazyVStack` (`Layout`) which is single-column but works
+ * on every native target today.
+ */
+export function Table(rowCount: number, colCount: number, renderCell: (row: number, col: number) => Widget): Widget;
+
+/** Set the header title of column `col` (0-based). */
+export function tableSetColumnHeader(table: Widget, col: number, title: string): void;
+
+/** Set the pixel width of column `col` (0-based). */
+export function tableSetColumnWidth(table: Widget, col: number, width: number): void;
+
+/** Update the total row count and reload the visible cells. */
+export function tableUpdateRowCount(table: Widget, count: number): void;
+
+/** Register a row-select callback. The callback receives the 0-based row index. */
+export function tableSetOnRowSelect(table: Widget, callback: (row: number) => void): void;
+
+/** Return the index of the currently selected row, or `-1` if none. */
+export function tableGetSelectedRow(table: Widget): number;
+
+// ---------------------------------------------------------------------------
 // Camera (issue #191)
 // ---------------------------------------------------------------------------
 
