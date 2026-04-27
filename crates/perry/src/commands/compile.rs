@@ -1432,6 +1432,22 @@ fn collect_library_candidates(name: &str, target: Option<&str>) -> Vec<PathBuf> 
         // Also check directories relative to the perry executable.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
+                // Cross-compile targets are in ../../target/<triple>/release/ relative
+                // to the perry binary (which is in target/release/). Check this
+                // BEFORE the exe-dir bundled-install lookups below — in an
+                // in-tree dev build, `target/release/libperry_ui_ios.a` is the
+                // host-platform (macOS) artifact left over from a native build,
+                // and would shadow the freshly cross-compiled iOS lib in
+                // `target/aarch64-apple-ios-sim/release/`.
+                if let Some(target_dir) = dir.parent() {
+                    candidates.push(target_dir.join(triple).join("release").join(name));
+                    candidates.push(target_dir.join(triple).join("debug").join(name));
+                }
+                // When cargo install'd, check the original source tree's target dir
+                let source_target = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target").join(triple).join("release").join(name);
+                candidates.push(source_target);
+
                 // For iOS targets, check the exe directory for libs with _ios naming:
                 // - Libs already named with _ios (e.g. libperry_ui_ios.a) → direct lookup
                 // - Libs using _ios suffix convention (e.g. libperry_runtime.a stored as
@@ -1468,16 +1484,6 @@ fn collect_library_candidates(name: &str, target: Option<&str>) -> Vec<PathBuf> 
                         candidates.push(dir.join(&tvos_name));
                     }
                 }
-                // Cross-compile targets are in ../../target/<triple>/release/ relative
-                // to the perry binary (which is in target/release/)
-                if let Some(target_dir) = dir.parent() {
-                    candidates.push(target_dir.join(triple).join("release").join(name));
-                    candidates.push(target_dir.join(triple).join("debug").join(name));
-                }
-                // When cargo install'd, check the original source tree's target dir
-                let source_target = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../target").join(triple).join("release").join(name);
-                candidates.push(source_target);
             }
         }
     } else {

@@ -80,12 +80,19 @@ pub fn compile_ll_to_object(ll_text: &str, target_triple: Option<&str>) -> Resul
         // -funsafe-math-optimizations: allows reassociation + reciprocal
         // -fno-math-errno: skip errno checks on math functions
         // (Do NOT use -ffinite-math-only or -ffast-math)
-        .arg("-fno-math-errno")
-        // Use native CPU features for better codegen on the build machine.
-        // ARM uses -mcpu=native; x86 uses -march=native.
-        // Cross-compilation overrides this via -target.
-        .arg(if cfg!(target_arch = "aarch64") { "-mcpu=native" } else { "-march=native" })
-        .arg(&ll_path)
+        .arg("-fno-math-errno");
+    // Native CPU tuning: only when building for the host. The flag name
+    // (`-mcpu` vs `-march`) is also arch-specific, and clang rejects
+    // `-mcpu=` for x86 targets and `-march=` for arm targets — so when
+    // cross-compiling we skip it entirely and let clang's `-target`
+    // default suffice. (Without this guard, an aarch64 macOS host
+    // cross-building for `x86_64-unknown-linux-gnu` would pass
+    // `-mcpu=native` to a clang invocation aimed at x86, which fails
+    // with `unsupported option '-mcpu='`.)
+    if target_triple.is_none() {
+        cmd.arg(if cfg!(target_arch = "aarch64") { "-mcpu=native" } else { "-march=native" });
+    }
+    cmd.arg(&ll_path)
         .arg("-o")
         .arg(&obj_path);
     if let Some(triple) = target_triple {
