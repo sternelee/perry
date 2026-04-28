@@ -1770,10 +1770,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         // branch is almost always trivially
                         // well-predicted (same array for the loop's
                         // duration; LLVM can often hoist the check).
+                        //
+                        // Issue #233: also detect FORWARDED arrays
+                        // (post-grow stale pointers from async-fn
+                        // parameter handoff). Same routing — slow
+                        // path's `clean_arr_ptr` follows the chain.
                         let gc_type_addr = blk.sub(I64, &arr_handle, "8");
                         let gc_type_ptr = blk.inttoptr(I64, &gc_type_addr);
                         let gc_type = blk.load(I8, &gc_type_ptr);
                         let is_lazy = blk.icmp_eq(I8, &gc_type, "9");
+                        let gc_flags_addr = blk.sub(I64, &arr_handle, "7");
+                        let gc_flags_ptr = blk.inttoptr(I64, &gc_flags_addr);
+                        let gc_flags = blk.load(I8, &gc_flags_ptr);
+                        let fwd_bits = blk.and(I8, &gc_flags, "128"); // GC_FLAG_FORWARDED
+                        let is_fwd = blk.icmp_ne(I8, &fwd_bits, "0");
+                        let needs_slow = blk.or(I1, &is_lazy, &is_fwd);
 
                         let lazy_idx = ctx.new_block("bidx.lazy");
                         let fast_idx = ctx.new_block("bidx.fast");
@@ -1781,7 +1792,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                         let lazy_label = ctx.block_label(lazy_idx);
                         let fast_label = ctx.block_label(fast_idx);
                         let merge_label = ctx.block_label(merge_idx);
-                        ctx.block().cond_br(&is_lazy, &lazy_label, &fast_label);
+                        ctx.block().cond_br(&needs_slow, &lazy_label, &fast_label);
 
                         ctx.current_block = lazy_idx;
                         let lazy_blk = ctx.block();
@@ -1842,6 +1853,17 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let gc_type_ptr = blk.inttoptr(I64, &gc_type_addr);
                 let gc_type = blk.load(I8, &gc_type_ptr);
                 let is_lazy = blk.icmp_eq(I8, &gc_type, "9"); // GC_TYPE_LAZY_ARRAY
+                // Issue #233: also detect FORWARDED arrays (post-grow
+                // stale pointers from async-fn parameter handoff). The
+                // slow path's `clean_arr_ptr` follows forwarding
+                // chains. Same lazy_idx branch (slow path) handles
+                // both shapes correctly.
+                let gc_flags_addr = blk.sub(I64, &arr_handle, "7");
+                let gc_flags_ptr = blk.inttoptr(I64, &gc_flags_addr);
+                let gc_flags = blk.load(I8, &gc_flags_ptr);
+                let fwd_bits = blk.and(I8, &gc_flags, "128"); // GC_FLAG_FORWARDED
+                let is_fwd = blk.icmp_ne(I8, &fwd_bits, "0");
+                let needs_slow = blk.or(I1, &is_lazy, &is_fwd);
 
                 let lazy_idx = ctx.new_block("arr.lazy");
                 let fast_idx = ctx.new_block("arr.fast");
@@ -1849,7 +1871,7 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 let lazy_label = ctx.block_label(lazy_idx);
                 let fast_label = ctx.block_label(fast_idx);
                 let merge_label = ctx.block_label(merge_idx);
-                ctx.block().cond_br(&is_lazy, &lazy_label, &fast_label);
+                ctx.block().cond_br(&needs_slow, &lazy_label, &fast_label);
 
                 // Lazy branch: js_array_get_f64 → clean_arr_ptr →
                 // force_materialize_lazy → element load on the
@@ -2014,13 +2036,21 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let lazy_gc_type_ptr = ctx.block().inttoptr(I64, &lazy_gc_type_addr);
             let lazy_gc_type = ctx.block().load(I8, &lazy_gc_type_ptr);
             let is_lazy = ctx.block().icmp_eq(I8, &lazy_gc_type, "9"); // GC_TYPE_LAZY_ARRAY
+            // Issue #233: also detect FORWARDED arrays (post-grow
+            // stale pointers from async-fn parameter handoff).
+            let lazy_gc_flags_addr = ctx.block().sub(I64, &obj_handle, "7");
+            let lazy_gc_flags_ptr = ctx.block().inttoptr(I64, &lazy_gc_flags_addr);
+            let lazy_gc_flags = ctx.block().load(I8, &lazy_gc_flags_ptr);
+            let lazy_fwd_bits = ctx.block().and(I8, &lazy_gc_flags, "128");
+            let is_lazy_fwd = ctx.block().icmp_ne(I8, &lazy_fwd_bits, "0");
+            let lazy_needs_slow = ctx.block().or(I1, &is_lazy, &is_lazy_fwd);
             let num_lazy_idx = ctx.new_block("iget.num.lazy");
             let num_fast_idx = ctx.new_block("iget.num.fast");
             let num_inner_merge_idx = ctx.new_block("iget.num.merge");
             let num_lazy_lbl = ctx.block_label(num_lazy_idx);
             let num_fast_lbl = ctx.block_label(num_fast_idx);
             let num_inner_merge_lbl = ctx.block_label(num_inner_merge_idx);
-            ctx.block().cond_br(&is_lazy, &num_lazy_lbl, &num_fast_lbl);
+            ctx.block().cond_br(&lazy_needs_slow, &num_lazy_lbl, &num_fast_lbl);
 
             ctx.current_block = num_lazy_idx;
             let v_num_lazy = ctx.block().call(
@@ -2210,7 +2240,20 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             let is_array = ctx.block().icmp_eq(I8, &gc_type, "1"); // GC_TYPE_ARRAY
             let is_string = ctx.block().icmp_eq(I8, &gc_type, "3"); // GC_TYPE_STRING
             let has_length = ctx.block().or(I1, &is_array, &is_string);
-            ctx.block().cond_br(&has_length, &fast_label, &slow_label);
+            // Issue #233: a FORWARDED array's first 4 bytes are no
+            // longer length but the lower 32 bits of the forwarding
+            // pointer. Route those to the slow path
+            // (`js_value_length_f64`) which recognizes the flag and
+            // follows the chain. GcHeader layout: byte 0 = obj_type,
+            // byte 1 = gc_flags. Read the flags byte at handle-7
+            // (handle-8 is obj_type) and reject if FORWARDED (0x80).
+            let gc_flags_addr = ctx.block().sub(I64, &recv_handle, "7");
+            let gc_flags_ptr = ctx.block().inttoptr(I64, &gc_flags_addr);
+            let gc_flags = ctx.block().load(I8, &gc_flags_ptr);
+            let fwd_bits = ctx.block().and(I8, &gc_flags, "128"); // GC_FLAG_FORWARDED = 0x80
+            let not_forwarded = ctx.block().icmp_eq(I8, &fwd_bits, "0");
+            let take_fast = ctx.block().and(I1, &has_length, &not_forwarded);
+            ctx.block().cond_br(&take_fast, &fast_label, &slow_label);
 
             ctx.current_block = fast_idx;
             let fast_len_i32 = ctx.block().safe_load_i32_from_ptr(&recv_handle);
@@ -9086,22 +9129,57 @@ fn lower_index_set_fast(
     let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
     let idx_i32 = blk.fptosi(DOUBLE, idx_double, I32);
 
-    // Load length from offset 0 (null-guarded).
-    let length = blk.safe_load_i32_from_ptr(&arr_handle);
-    let in_bounds = blk.icmp_ult(I32, &idx_i32, &length);
+    // Issue #233: detect FORWARDED arrays (post-grow stale pointers
+    // from async-fn parameter handoff) and route to the realloc slow
+    // path. The slow path's `js_array_set_f64_extend` →
+    // `clean_arr_ptr_mut` follows the forwarding chain and writes
+    // into the live new array. Without this guard, length+capacity
+    // read at offsets 0/4 would be the lower 32 bits of the
+    // forwarding pointer (garbage) and the inline element store at
+    // arr+8+idx*8 would corrupt unrelated memory.
+    let gc_flags_addr = blk.sub(I64, &arr_handle, "7");
+    let gc_flags_ptr = blk.inttoptr(I64, &gc_flags_addr);
+    let gc_flags = blk.load(I8, &gc_flags_ptr);
+    let fwd_bits = blk.and(I8, &gc_flags, "128"); // GC_FLAG_FORWARDED
+    let is_fwd = blk.icmp_ne(I8, &fwd_bits, "0");
 
+    let fwd_idx = ctx.new_block("idxset.fwd");
+    let nofwd_idx = ctx.new_block("idxset.nofwd");
     let inbounds_idx = ctx.new_block("idxset.inbounds");
     let check_cap_idx = ctx.new_block("idxset.check_cap");
     let extend_inline_idx = ctx.new_block("idxset.extend_inline");
     let realloc_idx = ctx.new_block("idxset.realloc");
     let merge_idx = ctx.new_block("idxset.merge");
 
+    let fwd_label = ctx.block_label(fwd_idx);
+    let nofwd_label = ctx.block_label(nofwd_idx);
     let inbounds_label = ctx.block_label(inbounds_idx);
     let check_cap_label = ctx.block_label(check_cap_idx);
     let extend_inline_label = ctx.block_label(extend_inline_idx);
     let realloc_label = ctx.block_label(realloc_idx);
     let merge_label = ctx.block_label(merge_idx);
 
+    ctx.block().cond_br(&is_fwd, &fwd_label, &nofwd_label);
+
+    // FORWARDED branch: same shape as the realloc slow path —
+    // js_array_set_f64_extend handles forwarding via clean_arr_ptr.
+    ctx.current_block = fwd_idx;
+    {
+        let blk = ctx.block();
+        let new_handle = blk.call(
+            I64,
+            "js_array_set_f64_extend",
+            &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, val_double)],
+        );
+        let new_box = nanbox_pointer_inline(blk, &new_handle);
+        blk.store(DOUBLE, &new_box, &slot);
+        blk.br(&merge_label);
+    }
+
+    ctx.current_block = nofwd_idx;
+    // Load length from offset 0 (null-guarded).
+    let length = ctx.block().safe_load_i32_from_ptr(&arr_handle);
+    let in_bounds = ctx.block().icmp_ult(I32, &idx_i32, &length);
     ctx.block().cond_br(&in_bounds, &inbounds_label, &check_cap_label);
 
     // Helper: compute element_ptr = arr_ptr + 8 + idx*8 and emit a store.

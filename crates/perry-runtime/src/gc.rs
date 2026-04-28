@@ -1929,6 +1929,22 @@ fn extract_ptr_from_bits(bits: u64) -> usize {
 /// Elements may be NaN-boxed JSValues OR raw I64 pointers (codegen stores raw I64 for
 /// is_pointer/is_array/is_string typed arrays via js_array_set_jsvalue).
 unsafe fn trace_array(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet, worklist: &mut Vec<*mut GcHeader>) {
+    // Issue #233: a runtime-installed FORWARDED flag (from
+    // js_array_grow) means this user_ptr's first 8 bytes hold the
+    // forwarding pointer instead of length+capacity. Tracing it as
+    // an array would either bail (corrupt sanity check) or scan
+    // garbage as JSValues. Push the forwarding target on the
+    // worklist so the live new array stays marked, and return.
+    let header = (user_ptr as *const u8).sub(GC_HEADER_SIZE) as *const GcHeader;
+    if (*header).gc_flags & GC_FLAG_FORWARDED != 0 {
+        let new_user = forwarding_address(header) as usize;
+        if new_user >= 0x1000 {
+            let new_header = header_from_user_ptr(new_user as *const u8);
+            worklist.push(new_header);
+        }
+        return;
+    }
+
     let arr = user_ptr as *const crate::array::ArrayHeader;
     let length = (*arr).length;
     let capacity = (*arr).capacity;
@@ -2673,6 +2689,14 @@ unsafe fn rewrite_slot(slot: *mut u64, valid_ptrs: &ValidPointerSet) {
 }
 
 unsafe fn rewrite_array_fields(user_ptr: *mut u8, valid_ptrs: &ValidPointerSet) {
+    // Issue #233: skip FORWARDED arrays — their first 8 bytes hold a
+    // forwarding pointer, not length+capacity. The forwarder itself
+    // has no element fields to rewrite; the new location's fields
+    // are handled by its own rewrite_array_fields visit.
+    let header = (user_ptr as *const u8).sub(GC_HEADER_SIZE) as *const GcHeader;
+    if (*header).gc_flags & GC_FLAG_FORWARDED != 0 {
+        return;
+    }
     let arr = user_ptr as *const crate::array::ArrayHeader;
     let length = (*arr).length;
     let capacity = (*arr).capacity;

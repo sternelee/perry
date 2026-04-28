@@ -57,6 +57,38 @@ fn clean_arr_ptr(arr: *const ArrayHeader) -> *const ArrayHeader {
         }
         arr
     };
+    // Issue #233: follow GC_FLAG_FORWARDED forwarding chains. When
+    // an array grows (js_array_grow) we install a forwarding pointer
+    // at the OLD location so any stale reference — e.g. an async
+    // function's caller still holding the pre-grow pointer in its
+    // parameter slot — resolves to the current head instead of
+    // observing a defunct array whose first 8 bytes (length+capacity)
+    // now hold the forwarding pointer. Without this, push beyond
+    // initial capacity (16) silently became a no-op for the caller
+    // because the new array lived at a different address that the
+    // caller's slot was never updated to. The chain is short in
+    // practice (1-2 grows) but cap depth at 64 to defend against
+    // cycles from corrupted GC state.
+    let mut cleaned = cleaned;
+    unsafe {
+        let mut steps = 0u32;
+        while (cleaned as usize) >= crate::gc::GC_HEADER_SIZE + 0x1000 {
+            let gc_header = (cleaned as *const u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
+            if (*gc_header).gc_flags & crate::gc::GC_FLAG_FORWARDED == 0 {
+                break;
+            }
+            let new_user = crate::gc::forwarding_address(gc_header) as u64;
+            if new_user < HEAP_MIN || new_user >= HEAP_MAX {
+                return std::ptr::null();
+            }
+            cleaned = new_user as *const ArrayHeader;
+            steps += 1;
+            if steps > 64 {
+                return std::ptr::null();
+            }
+        }
+    }
     // Issue #179 Phase 2: lazy arrays have a GcHeader with
     // obj_type == GC_TYPE_LAZY_ARRAY. Their layout's first two u32s
     // are (magic, cached_length) rather than (length, capacity) —
@@ -527,6 +559,10 @@ pub extern "C" fn js_array_set_f64_extend(arr: *mut ArrayHeader, index: u32, val
 #[no_mangle]
 pub extern "C" fn js_array_grow(arr: *mut ArrayHeader, min_capacity: u32) -> *mut ArrayHeader {
     if arr.is_null() || (arr as usize) < 0x1000 { return js_array_alloc(min_capacity); }
+    // Issue #233: resolve any existing forwarding chain before deciding
+    // whether to grow — caller may pass a stale pre-grow pointer.
+    let arr = clean_arr_ptr_mut(arr);
+    if arr.is_null() { return js_array_alloc(min_capacity); }
     unsafe {
         let old_capacity = (*arr).capacity;
         if min_capacity <= old_capacity {
@@ -538,12 +574,38 @@ pub extern "C" fn js_array_grow(arr: *mut ArrayHeader, min_capacity: u32) -> *mu
         let old_size = array_byte_size(old_capacity as usize);
         let new_size = array_byte_size(new_capacity as usize);
 
-        // Allocate new from arena and copy old data
-        // Old memory is abandoned (bump allocator never frees individually)
+        // Allocate new from arena and copy old data.
         let new_ptr = arena_alloc_gc(new_size, 8, crate::gc::GC_TYPE_ARRAY) as *mut ArrayHeader;
         ptr::copy_nonoverlapping(arr as *const u8, new_ptr as *mut u8, old_size);
 
         (*new_ptr).capacity = new_capacity;
+
+        // Issue #233: install a forwarding pointer at the OLD location
+        // so any stale reference (e.g. an async function's caller still
+        // holding the pre-grow pointer in its parameter slot) resolves
+        // to the new head via clean_arr_ptr's GC_FLAG_FORWARDED follow.
+        // Reuses the GC's existing evac-forwarding mechanism — first 8
+        // bytes of payload (length+capacity) become the new user ptr.
+        // Only valid for arena-allocated arrays (which have a GcHeader
+        // 8 bytes before the user pointer); guard with a heap-bounds
+        // check that mirrors clean_arr_ptr's HEAP_MIN to skip pointers
+        // that don't have a real GcHeader behind them (e.g. test-mode
+        // synthetic pointers, longlived-arena edge cases).
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        const HEAP_MIN: usize = 0x1000;
+        #[cfg(not(any(target_os = "android", target_os = "linux")))]
+        const HEAP_MIN: usize = 0x200_0000_0000;
+        if (arr as usize) >= HEAP_MIN + crate::gc::GC_HEADER_SIZE {
+            let old_header = (arr as *mut u8)
+                .sub(crate::gc::GC_HEADER_SIZE) as *mut crate::gc::GcHeader;
+            // Only forward arrays that came from the GC arena. A
+            // non-array obj_type would mean something has gone wrong
+            // upstream; bail out without forwarding rather than corrupt
+            // an unrelated allocation's header.
+            if (*old_header).obj_type == crate::gc::GC_TYPE_ARRAY {
+                crate::gc::set_forwarding_address(old_header, new_ptr as *mut u8);
+            }
+        }
 
         new_ptr
     }

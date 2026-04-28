@@ -1711,6 +1711,16 @@ pub extern "C" fn js_value_length_f64(value: f64) -> f64 {
         }
         let gc_header = (handle - crate::gc::GC_HEADER_SIZE) as *const crate::gc::GcHeader;
         let obj_type = unsafe { (*gc_header).obj_type };
+        // Issue #233: a FORWARDED array's first 4 bytes are no longer
+        // length but the lower 32 bits of the forwarding pointer.
+        // Follow the chain via the unified array-pointer cleaner so
+        // `samples.length` after a grow returns the real length.
+        if obj_type == crate::gc::GC_TYPE_ARRAY
+            && unsafe { (*gc_header).gc_flags } & crate::gc::GC_FLAG_FORWARDED != 0
+        {
+            let cleaned = crate::array::js_array_get_length(handle as i64);
+            return cleaned as f64;
+        }
         match obj_type {
             crate::gc::GC_TYPE_ARRAY | crate::gc::GC_TYPE_STRING => {
                 return unsafe { *(handle as *const u32) } as f64;
