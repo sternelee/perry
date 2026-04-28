@@ -149,6 +149,70 @@ pub extern "C" fn js_console_log_dynamic(value: f64) {
     }
 }
 
+/// Thunk for `console.log` exposed as a real callable closure value
+/// (#236). Lets `Promise.resolve(x).then(console.log)` actually call into
+/// `js_console_log_dynamic` instead of being a no-op sentinel; the call
+/// signature `extern "C" fn(*const ClosureHeader, f64) -> f64` matches
+/// what `js_closure_call1` invokes through.
+extern "C" fn console_log_callable_thunk(
+    _closure: *const crate::closure::ClosureHeader,
+    value: f64,
+) -> f64 {
+    js_console_log_dynamic(value);
+    f64::from_bits(crate::value::TAG_UNDEFINED)
+}
+
+use std::sync::atomic::{AtomicI64, Ordering};
+/// Singleton closure pointer for `console.log` exposed as a value.
+/// Allocated lazily by `js_console_log_as_closure`. Kept alive across GC
+/// cycles by the `scan_console_log_singleton_roots` scanner registered in
+/// `gc::gc_init`.
+static CONSOLE_LOG_SINGLETON: AtomicI64 = AtomicI64::new(0);
+
+/// Returns a singleton ClosureHeader pointer that, when invoked through
+/// `js_closure_call1`, calls `console.log` on the argument. Used by codegen
+/// for the `let f = console.log` / `.then(console.log)` shapes — pre-fix
+/// (#236) those lowered to the sentinel `0.0` ClosurePtr and the chained
+/// promise either hung (when `.then` was the consumer) or silently dropped
+/// the value. Lazily allocated on first use; the closure carries no
+/// captures so it's a single 16-byte allocation per process.
+#[no_mangle]
+pub extern "C" fn js_console_log_as_closure() -> f64 {
+    let cached = CONSOLE_LOG_SINGLETON.load(Ordering::Acquire);
+    let closure_ptr = if cached != 0 {
+        cached as *mut crate::closure::ClosureHeader
+    } else {
+        let fresh = crate::closure::js_closure_alloc(
+            console_log_callable_thunk as *const u8,
+            0,
+        );
+        // CAS so concurrent first-use callers don't leak a closure.
+        // The loser's allocation is unreachable by any user code path
+        // and will be reclaimed by the next GC sweep — only the winner
+        // is added to the root set via `scan_console_log_singleton_roots`.
+        match CONSOLE_LOG_SINGLETON.compare_exchange(
+            0,
+            fresh as i64,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => fresh,
+            Err(winner) => winner as *mut crate::closure::ClosureHeader,
+        }
+    };
+    f64::from_bits(JSValue::pointer(closure_ptr as *const u8).bits())
+}
+
+/// GC root scanner: pin the lazily-allocated `console.log`-as-closure
+/// singleton against the next sweep.
+pub fn scan_console_log_singleton_roots(mark: &mut dyn FnMut(f64)) {
+    let cached = CONSOLE_LOG_SINGLETON.load(Ordering::Acquire);
+    if cached != 0 {
+        let v = JSValue::pointer(cached as *const u8);
+        mark(f64::from_bits(v.bits()));
+    }
+}
+
 /// Print a number to stdout (optimized path for known numbers)
 #[no_mangle]
 pub extern "C" fn js_console_log_number(value: f64) {

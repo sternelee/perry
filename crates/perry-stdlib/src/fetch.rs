@@ -24,7 +24,14 @@ lazy_static::lazy_static! {
     /// across all fetch() calls. Without this, each fetch allocates a fresh
     /// reqwest::Client (~250KB of state per request) and the memory never gets
     /// reused, causing unbounded RSS growth in long-running services.
+    ///
+    /// Sets a default `User-Agent` so endpoints that reject anonymous requests
+    /// (api.github.com being the canonical example — closes #236) work out of
+    /// the box. Per-request `User-Agent` headers passed via `fetch(url, {
+    /// headers: { "User-Agent": "..." } })` override this default; reqwest's
+    /// `RequestBuilder::header` replaces the client-level value.
     static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::builder()
+        .user_agent(concat!("perry/", env!("CARGO_PKG_VERSION")))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .pool_max_idle_per_host(16)
         .tcp_keepalive(std::time::Duration::from_secs(60))
@@ -69,6 +76,23 @@ pub extern "C" fn js_fetch_response_count() -> i64 {
     FETCH_RESPONSES.lock().map(|g| g.len() as i64).unwrap_or(-1)
 }
 
+/// Build a NaN-boxed JSValue holding a real `Error` object for promise
+/// rejection. Pre-fix (#236) every fetch error site NaN-boxed a bare
+/// `*StringHeader` with `POINTER_TAG` (0x7FFD), which the uncaught-exception
+/// printer in `perry-runtime/src/exception.rs` then read as an
+/// `*ObjectHeader.object_type` u32 — `byte_len` of the message string is
+/// neither `OBJECT_TYPE_ERROR` (2) nor `OBJECT_TYPE_REGULAR` (1), so the
+/// printer fell through to the generic stringifier which printed
+/// `Uncaught exception: [object Object]`. Allocating a real
+/// `ErrorHeader` makes the printer take the dedicated Error arm and emit
+/// `Uncaught exception: Error: <message>` with a stack frame.
+unsafe fn fetch_error_bits<S: AsRef<str>>(msg: S) -> u64 {
+    let s = msg.as_ref();
+    let msg_str = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+    let err = perry_runtime::error::js_error_new_with_message(msg_str);
+    JSValue::pointer(err as *const u8).bits()
+}
+
 /// Perform a GET request
 /// fetch(url) -> Promise<Response>
 #[no_mangle]
@@ -80,8 +104,7 @@ pub unsafe extern "C" fn js_fetch_get(url_ptr: *const StringHeader) -> *mut perr
         Some(u) => u,
         None => {
             let err_msg = "Invalid URL";
-            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = fetch_error_bits(&err_msg);
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -121,8 +144,7 @@ pub unsafe extern "C" fn js_fetch_get(url_ptr: *const StringHeader) -> *mut perr
             }
             Err(e) => {
                 let err_msg = format!("Fetch error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                let err_bits = fetch_error_bits(&err_msg);
                 queue_promise_resolution(promise_ptr, false, err_bits);
             }
         }
@@ -145,8 +167,7 @@ pub unsafe extern "C" fn js_fetch_get_with_auth(
         Some(u) => u,
         None => {
             let err_msg = "Invalid URL";
-            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = fetch_error_bits(&err_msg);
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -191,8 +212,7 @@ pub unsafe extern "C" fn js_fetch_get_with_auth(
             }
             Err(e) => {
                 let err_msg = format!("Fetch error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                let err_bits = fetch_error_bits(&err_msg);
                 queue_promise_resolution(promise_ptr, false, err_bits);
             }
         }
@@ -216,8 +236,7 @@ pub unsafe extern "C" fn js_fetch_post_with_auth(
         Some(u) => u,
         None => {
             let err_msg = "Invalid URL";
-            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = fetch_error_bits(&err_msg);
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -265,8 +284,7 @@ pub unsafe extern "C" fn js_fetch_post_with_auth(
             }
             Err(e) => {
                 let err_msg = format!("Fetch error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                let err_bits = fetch_error_bits(&err_msg);
                 queue_promise_resolution(promise_ptr, false, err_bits);
             }
         }
@@ -290,8 +308,7 @@ pub unsafe extern "C" fn js_fetch_post(
         Some(u) => u,
         None => {
             let err_msg = "Invalid URL";
-            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = fetch_error_bits(&err_msg);
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -341,8 +358,7 @@ pub unsafe extern "C" fn js_fetch_post(
             }
             Err(e) => {
                 let err_msg = format!("Fetch error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                let err_bits = fetch_error_bits(&err_msg);
                 queue_promise_resolution(promise_ptr, false, err_bits);
             }
         }
@@ -367,8 +383,7 @@ pub unsafe extern "C" fn js_fetch_with_options(
         Some(u) => u,
         None => {
             let err_msg = "Invalid URL";
-            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = fetch_error_bits(&err_msg);
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -436,8 +451,7 @@ pub unsafe extern "C" fn js_fetch_with_options(
             }
             Err(e) => {
                 let err_msg = format!("Fetch error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                let err_bits = fetch_error_bits(&err_msg);
                 queue_promise_resolution(promise_ptr, false, err_bits);
             }
         }
@@ -508,8 +522,7 @@ pub unsafe extern "C" fn js_fetch_response_text(handle: i64) -> *mut perry_runti
             Some(resp) => resp.body.clone(),
             None => {
                 let err_msg = "Invalid response handle";
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_nan = f64::from_bits(JSValue::pointer(err_str as *const u8).bits());
+                let err_nan = f64::from_bits(fetch_error_bits(&err_msg));
                 perry_runtime::js_promise_reject(promise, err_nan);
                 return promise;
             }
@@ -581,8 +594,7 @@ pub unsafe extern "C" fn js_fetch_response_json(handle: i64) -> *mut perry_runti
             Some(resp) => resp.body.clone(),
             None => {
                 let err_msg = "Invalid response handle";
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_nan = f64::from_bits(JSValue::pointer(err_str as *const u8).bits());
+                let err_nan = f64::from_bits(fetch_error_bits(&err_msg));
                 perry_runtime::js_promise_reject(promise, err_nan);
                 return promise;
             }
@@ -600,8 +612,7 @@ pub unsafe extern "C" fn js_fetch_response_json(handle: i64) -> *mut perry_runti
         }
         Err(e) => {
             let err_msg = format!("JSON parse error: {}", e);
-            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_nan = f64::from_bits(JSValue::pointer(err_str as *const u8).bits());
+            let err_nan = f64::from_bits(fetch_error_bits(&err_msg));
             perry_runtime::js_promise_reject(promise, err_nan);
         }
     }
@@ -620,8 +631,7 @@ pub unsafe extern "C" fn js_fetch_text(url_ptr: *const StringHeader) -> *mut per
         Some(u) => u,
         None => {
             let err_msg = "Invalid URL";
-            let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-            let err_bits = JSValue::pointer(err_str as *const u8).bits();
+            let err_bits = fetch_error_bits(&err_msg);
             queue_promise_resolution(promise_ptr, false, err_bits);
             return promise;
         }
@@ -638,16 +648,14 @@ pub unsafe extern "C" fn js_fetch_text(url_ptr: *const StringHeader) -> *mut per
                     }
                     Err(e) => {
                         let err_msg = format!("Read error: {}", e);
-                        let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                        let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                        let err_bits = fetch_error_bits(&err_msg);
                         queue_promise_resolution(promise_ptr, false, err_bits);
                     }
                 }
             }
             Err(e) => {
                 let err_msg = format!("Fetch error: {}", e);
-                let err_str = js_string_from_bytes(err_msg.as_ptr(), err_msg.len() as u32);
-                let err_bits = JSValue::pointer(err_str as *const u8).bits();
+                let err_bits = fetch_error_bits(&err_msg);
                 queue_promise_resolution(promise_ptr, false, err_bits);
             }
         }

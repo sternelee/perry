@@ -136,8 +136,15 @@ pub extern "C" fn js_promise_resolve(promise: *mut Promise, value: f64) {
         (*promise).state = PromiseState::Fulfilled;
         (*promise).value = value;
 
-        // Schedule callbacks
-        if !(*promise).on_fulfilled.is_null() {
+        // Schedule callbacks. Push to TASK_QUEUE whenever there's anything
+        // for the microtask runner to do — either invoke the user callback,
+        // or propagate the value to the chained `next` promise. Issue #236:
+        // pre-fix the queue push only fired when `on_fulfilled` was non-null,
+        // so `.then(console.log)` (where `console.log`-as-value lowers to
+        // a NULL ClosurePtr sentinel — see expr.rs:GlobalGet→PropertyGet
+        // value path) skipped the queue entirely; the chained promise then
+        // never settled and `await chained` busy-waited forever.
+        if !(*promise).on_fulfilled.is_null() || !(*promise).next.is_null() {
             TASK_QUEUE.with(|q| {
                 q.borrow_mut().push_back((promise, value, true));
             });
@@ -230,8 +237,10 @@ pub extern "C" fn js_promise_reject(promise: *mut Promise, reason: f64) {
         (*promise).state = PromiseState::Rejected;
         (*promise).reason = reason;
 
-        // Schedule callbacks
-        if !(*promise).on_rejected.is_null() {
+        // Schedule callbacks. Same propagation rule as `js_promise_resolve`
+        // (#236): push to the queue whenever there's a callback to invoke
+        // OR a chained `next` promise to forward to.
+        if !(*promise).on_rejected.is_null() || !(*promise).next.is_null() {
             TASK_QUEUE.with(|q| {
                 q.borrow_mut().push_back((promise, reason, false));
             });
@@ -259,17 +268,22 @@ pub extern "C" fn js_promise_then(
         (*promise).on_rejected = on_rejected;
         (*promise).next = next;
 
-        // If already settled, schedule callback immediately
+        // If already settled, schedule callback immediately. Same propagation
+        // rule as `js_promise_resolve`/`js_promise_reject` (#236): push to the
+        // queue when there's either a callback to invoke OR a chained `next`
+        // promise to forward to. `next` is always non-null here (we just
+        // created it), so this is effectively unconditional — the explicit
+        // checks document the intent.
         match (*promise).state {
             PromiseState::Fulfilled => {
-                if !on_fulfilled.is_null() {
+                if !on_fulfilled.is_null() || !next.is_null() {
                     TASK_QUEUE.with(|q| {
                         q.borrow_mut().push_back((promise, (*promise).value, true));
                     });
                 }
             }
             PromiseState::Rejected => {
-                if !on_rejected.is_null() {
+                if !on_rejected.is_null() || !next.is_null() {
                     TASK_QUEUE.with(|q| {
                         q.borrow_mut().push_back((promise, (*promise).reason, false));
                     });

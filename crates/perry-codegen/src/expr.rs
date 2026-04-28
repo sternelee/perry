@@ -2626,11 +2626,36 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             }
             // GlobalGet receivers (`console.X`, `Math.PI`, `JSON.parse`,
             // `process.env`, …) used as expression VALUES (not in a
-            // call) — there's no real value to materialize. Return a
-            // sentinel `0.0`. The call dispatch in lower_call handles
-            // the same shapes as call callees correctly; this path
-            // only catches the rare `let f = console.log` pattern.
+            // call) — there's no real value to materialize for most
+            // shapes; the call dispatch in lower_call handles the same
+            // receivers correctly when they're invoked. The HIR uses
+            // `Expr::GlobalGet(0)` as a sentinel for ALL builtin
+            // globals (see lower.rs:5037), so the original receiver
+            // name is no longer recoverable here — codegen has to
+            // route by the property string alone.
+            //
+            // Special-case `console.log` (the canonical pattern from
+            // #236): return a runtime-allocated singleton closure that
+            // thunks into `js_console_log_dynamic` so
+            // `.then(console.log)` actually prints. Caveat: this also
+            // catches the rare `let f = Math.log; f(x)` shape and
+            // dispatches through console.log's thunk — but that
+            // pattern previously lowered to the `0.0` sentinel
+            // (silently broken either way) so this is not a regression
+            // for the only realistic alternative caller. The full fix
+            // would side-channel the original global name through
+            // lowering; deferred until a second-callable-builtin
+            // arrives. Other property shapes still fall through to
+            // `0.0`.
             if matches!(object.as_ref(), Expr::GlobalGet(_)) {
+                if property == "log" {
+                    ctx.pending_declares.push((
+                        "js_console_log_as_closure".to_string(),
+                        DOUBLE,
+                        vec![],
+                    ));
+                    return Ok(ctx.block().call(DOUBLE, "js_console_log_as_closure", &[]));
+                }
                 return Ok(double_literal(0.0));
             }
             // Namespace-import member access: `import * as O from './oids';

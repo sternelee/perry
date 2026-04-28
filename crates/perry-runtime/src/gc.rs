@@ -3011,6 +3011,7 @@ pub fn gc_init() {
     gc_register_root_scanner(json_parse_root_scanner);
     gc_register_root_scanner(intern_table_root_scanner);
     gc_register_root_scanner(shadow_stack_root_scanner);
+    gc_register_root_scanner(crate::builtins::scan_console_log_singleton_roots);
 }
 
 /// Root scanner for the string intern table.
