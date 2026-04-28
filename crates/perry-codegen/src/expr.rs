@@ -2332,13 +2332,39 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
                 // receiver is a local that's actually in ctx.locals
                 // (stack slot). Module-level arrays accessed from inside
                 // a function are in ctx.module_globals instead — for
-                // those we fall through to the generic js_array_set_f64
-                // call because lower_index_set_fast needs a local slot
-                // to write back a potentially-reallocated pointer.
+                // those we use js_array_set_f64_extend (the realloc-
+                // capable variant) and write the new pointer back to
+                // the global slot. Issue #221: the previous code
+                // funneled module globals through js_array_set_f64
+                // which returns silently when `index >= length` — so
+                // every `arr[i] = v` against a `const A: T[] = []`
+                // declared empty was a silent no-op, both the value
+                // and the implicit length update vanishing.
                 if let Some(id) = local_id {
                     if ctx.locals.contains_key(&id) {
                         lower_index_set_fast(ctx, &arr_box, &idx_double, &val_double, id)?;
+                    } else if let Some(global_name) = ctx.module_globals.get(&id).cloned() {
+                        let blk = ctx.block();
+                        let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                        let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                        let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                        let new_handle = blk.call(
+                            I64,
+                            "js_array_set_f64_extend",
+                            &[(I64, &arr_handle), (I32, &idx_i32), (DOUBLE, &val_double)],
+                        );
+                        let new_box = nanbox_pointer_inline(blk, &new_handle);
+                        let g_ref = format!("@{}", global_name);
+                        ctx.block().store(DOUBLE, &new_box, &g_ref);
+                        // Gen-GC Phase C2: write barrier on array element store.
+                        let val_bits = ctx.block().bitcast_double_to_i64(&val_double);
+                        emit_write_barrier(ctx, &arr_bits, &val_bits);
                     } else {
+                        // Closure-captured array, or local without a
+                        // stack slot (rare). Keep the bounded path —
+                        // realloc-extend can't be wired without a
+                        // writeback target, and these patterns
+                        // typically pre-size or use .push().
                         let blk = ctx.block();
                         let arr_bits = blk.bitcast_double_to_i64(&arr_box);
                         let arr_handle = blk.and(I64, &arr_bits, POINTER_MASK_I64);
