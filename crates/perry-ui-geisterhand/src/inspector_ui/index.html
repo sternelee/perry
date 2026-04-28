@@ -57,7 +57,7 @@
   header button:hover { border-color: var(--accent); color: var(--accent); }
   main {
     display: grid;
-    grid-template-columns: 360px 1fr;
+    grid-template-columns: 280px 1fr 340px;
     overflow: hidden;
   }
   aside {
@@ -69,6 +69,62 @@
   section {
     overflow: auto;
     padding: 16px 20px;
+  }
+  #preview {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: stretch;
+    background: linear-gradient(135deg, #0c0e12 0%, #11141a 100%);
+    border-right: 1px solid var(--border);
+  }
+  #preview-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    color: var(--muted);
+    font-size: 11px;
+  }
+  #preview-toolbar .spacer { flex: 1; }
+  #preview-frame {
+    background:
+      linear-gradient(45deg, #1a1d24 25%, transparent 25%),
+      linear-gradient(-45deg, #1a1d24 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #1a1d24 75%),
+      linear-gradient(-45deg, transparent 75%, #1a1d24 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    background-color: #0a0c10;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    flex: 1;
+    position: relative;
+  }
+  #preview-frame img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    display: block;
+    border-radius: 2px;
+    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+  }
+  #preview-frame .placeholder {
+    color: var(--muted);
+    font-style: italic;
+    text-align: center;
+  }
+  #preview-frame .selection-overlay {
+    position: absolute;
+    border: 1.5px solid var(--accent);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    border-radius: 2px;
+    transition: opacity 0.15s ease;
   }
   .tree-row {
     padding: 4px 12px 4px 20px;
@@ -194,6 +250,17 @@
 </header>
 <main>
   <aside id="tree"></aside>
+  <section id="preview">
+    <div id="preview-toolbar">
+      <span id="preview-status">no preview yet</span>
+      <span class="spacer"></span>
+      <label><input type="checkbox" id="preview-auto"> auto</label>
+      <button id="preview-refresh">capture</button>
+    </div>
+    <div id="preview-frame">
+      <div class="placeholder">click <strong>capture</strong> to fetch a live screenshot of the running app</div>
+    </div>
+  </section>
   <section id="detail">
     <div class="empty">Select a widget on the left to inspect.</div>
   </section>
@@ -278,6 +345,10 @@ function renderTree() {
       renderTree();
       const w = state.widgets.find(x => x.handle === state.selected);
       if (w) renderDetail(w);
+      // Update the selection overlay on the live preview without
+      // forcing a fresh screenshot — `drawSelectionOverlay` reads the
+      // currently-rendered img and just repositions the highlight box.
+      drawSelectionOverlay();
     });
   }
 }
@@ -408,6 +479,99 @@ $toggle.addEventListener("click", () => {
   startTimer();
 });
 $refresh.addEventListener("click", fetchTree);
+
+// ── Preview pane ──────────────────────────────────────────────────
+const $previewFrame = document.getElementById("preview-frame");
+const $previewStatus = document.getElementById("preview-status");
+const $previewRefresh = document.getElementById("preview-refresh");
+const $previewAuto = document.getElementById("preview-auto");
+
+let previewBlobUrl = null;
+let previewNaturalSize = { w: 0, h: 0 };
+let previewTimer = null;
+const previewIntervalMs = 1500;
+
+async function capturePreview() {
+  $previewStatus.textContent = "capturing…";
+  try {
+    const r = await fetch("/screenshot", { cache: "no-store" });
+    if (!r.ok) {
+      $previewStatus.textContent = `screenshot failed: ${r.status}`;
+      return;
+    }
+    const blob = await r.blob();
+    if (previewBlobUrl) URL.revokeObjectURL(previewBlobUrl);
+    previewBlobUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      previewNaturalSize = { w: img.naturalWidth, h: img.naturalHeight };
+      $previewFrame.innerHTML = "";
+      $previewFrame.appendChild(img);
+      drawSelectionOverlay();
+      const ts = new Date().toLocaleTimeString();
+      $previewStatus.textContent = `${img.naturalWidth}×${img.naturalHeight} · ${ts}`;
+    };
+    img.onerror = () => {
+      $previewStatus.textContent = "decode failed";
+    };
+    img.src = previewBlobUrl;
+  } catch (e) {
+    $previewStatus.textContent = `error: ${e.message}`;
+  }
+}
+
+function drawSelectionOverlay() {
+  // Remove any prior overlay; draw a fresh one for the selected widget.
+  const old = $previewFrame.querySelector(".selection-overlay");
+  if (old) old.remove();
+  if (state.selected === null) return;
+  const w = state.widgets.find(x => x.handle === state.selected);
+  if (!w || !w.frame) return;
+  const img = $previewFrame.querySelector("img");
+  if (!img || !previewNaturalSize.w || !previewNaturalSize.h) return;
+  // The screenshot is the full window in pixels; widget frames are in
+  // points, but on a non-retina backbuffer they happen to match. If the
+  // backend captures at retina (2× on macOS), we'd see a constant
+  // scale factor — use the rendered img size vs naturalSize ratio
+  // applied to widget.frame.
+  const rendered = img.getBoundingClientRect();
+  const frameRect = $previewFrame.getBoundingClientRect();
+  const sx = rendered.width / previewNaturalSize.w;
+  const sy = rendered.height / previewNaturalSize.h;
+  // Scale-to-points heuristic: many backbuffers are 2×; we don't know
+  // for sure here, so use img's intrinsic size as the reference and
+  // assume widget.frame is in the same unit space. If a backend later
+  // reports its DPR via a separate endpoint, this can be tightened.
+  const scale = previewNaturalSize.w / Math.max(1, rendered.width === 0 ? previewNaturalSize.w : previewNaturalSize.w);
+  const overlay = document.createElement("div");
+  overlay.className = "selection-overlay";
+  // Position relative to the preview-frame container, accounting for
+  // the centered img (paddings, letterboxing).
+  const offsetX = rendered.left - frameRect.left;
+  const offsetY = rendered.top - frameRect.top;
+  overlay.style.left = `${offsetX + w.frame.x * sx}px`;
+  overlay.style.top = `${offsetY + w.frame.y * sy}px`;
+  overlay.style.width = `${w.frame.w * sx}px`;
+  overlay.style.height = `${w.frame.h * sy}px`;
+  $previewFrame.appendChild(overlay);
+  // Mute the unused-variable warning — `scale` is reserved for the
+  // DPR-aware refinement above.
+  void scale;
+}
+
+function startPreviewAuto() {
+  stopPreviewAuto();
+  if ($previewAuto.checked) {
+    previewTimer = setInterval(capturePreview, previewIntervalMs);
+  }
+}
+function stopPreviewAuto() {
+  if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
+}
+
+$previewRefresh.addEventListener("click", capturePreview);
+$previewAuto.addEventListener("change", startPreviewAuto);
+window.addEventListener("resize", drawSelectionOverlay);
 
 fetchTree();
 startTimer();
