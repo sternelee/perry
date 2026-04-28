@@ -2088,11 +2088,27 @@ pub(crate) fn lower_class_method(ctx: &mut LoweringContext, method: &ast::ClassM
         .unwrap_or(Type::Any);
 
     // Lower body
-    let body = if let Some(ref block) = method.function.body {
+    let mut body = if let Some(ref block) = method.function.body {
         lower_block_stmt(ctx, block)?
     } else {
         Vec::new()
     };
+
+    // Issue #235: prepend `if (param === undefined) param = default;` for
+    // every default-value param so a caller passing fewer args (which
+    // codegen now pads with TAG_UNDEFINED — see `lower_call.rs` dispatch
+    // tower) gets the declared default instead of literal `undefined`.
+    // Pre-fix the desugaring fired only on free functions (`lower_fn_decl`)
+    // and constructors, never on instance/static class methods. The
+    // standalone Calc.add(a, b = 10) regression case below printed `b` as
+    // `undefined` post-padding because the method body just did `return a + b`
+    // with no default check.
+    let default_stmts = build_default_param_stmts(&params);
+    if !default_stmts.is_empty() {
+        let mut new_body = default_stmts;
+        new_body.extend(body);
+        body = new_body;
+    }
 
     // Phase 4 (expansion): body-based return-type inference for unannotated
     // methods. Same pattern as `lower_fn_decl`: skip when annotation is

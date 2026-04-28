@@ -1177,6 +1177,38 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 for a in args {
                     lowered_args.push(lower_expr(ctx, a)?);
                 }
+                // Issue #235: pad lowered_args with TAG_UNDEFINED so the callee's
+                // default-param desugaring fires when the call site passed fewer
+                // args than the method declares. Pre-fix the dispatch tower
+                // passed exactly `args.len() + 1` doubles to a function declared
+                // with N+1 doubles, leaving any param the caller skipped to be
+                // read from an uninitialized arg-register slot — typically a
+                // real heap pointer that hung the dispatch chain on
+                // `options.session` deref.
+                //
+                // Take max arity across all implementors so the same arg_slices
+                // works for every concrete callee. Implementations with smaller
+                // arity silently ignore extra trailing args at runtime.
+                let mut max_explicit_arity: usize = 0;
+                for (_, fname) in &implementors {
+                    for ((cls, mname), reg_fname) in ctx.methods.iter() {
+                        if reg_fname == fname && mname == property {
+                            if let Some(&n) = ctx.method_param_counts
+                                .get(&(cls.clone(), mname.clone()))
+                            {
+                                if n > max_explicit_arity {
+                                    max_explicit_arity = n;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                let target_total = max_explicit_arity + 1; // +1 for `this`
+                let undefined_lit = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                while lowered_args.len() < target_total {
+                    lowered_args.push(undefined_lit.clone());
+                }
                 let arg_slices: Vec<(crate::types::LlvmType, &str)> =
                     lowered_args.iter().map(|s| (DOUBLE, s.as_str())).collect();
 
@@ -1241,7 +1273,11 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                     // block — see issue #167 and `alloca_entry_array` doc.
                     let n = args.len();
                     let buf_reg = ctx.func.alloca_entry_array(DOUBLE, n);
-                    for (i, a_val) in lowered_args.iter().skip(1).enumerate() {
+                    // skip(1) the receiver, take(n) so the issue-#235 default-arg
+                    // padding entries appended to lowered_args don't overflow the
+                    // n-sized buffer (and aren't needed for the ncm fallback path,
+                    // which forwards user-provided args only).
+                    for (i, a_val) in lowered_args.iter().skip(1).take(n).enumerate() {
                         let slot = ctx.block().gep(DOUBLE, &buf_reg, &[(I64, &format!("{}", i))]);
                         ctx.block().store(DOUBLE, a_val, &slot);
                     }
@@ -1340,6 +1376,50 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
                 lowered_args.push(recv_box.clone());
                 for a in args {
                     lowered_args.push(lower_expr(ctx, a)?);
+                }
+                // Issue #235: pad lowered_args with TAG_UNDEFINED so the
+                // callee's default-param desugaring fires when the call site
+                // passed fewer args than the method declares. Same approach
+                // and reasoning as the dynamic-dispatch branch above —
+                // applied here for the static-dispatch + virtual-override
+                // case (receiver class IS in `ctx.classes`).
+                //
+                // Walk the parent chain `static_fn` was resolved through to
+                // find the fallback's arity; take max across all overrides
+                // so the unified arg_slices works for every concrete callee.
+                let mut max_explicit_arity: usize = 0;
+                let mut walk = Some(class_name.clone());
+                while let Some(cur) = walk {
+                    let key = (cur.clone(), property.clone());
+                    if let Some(&n) = ctx.method_param_counts.get(&key) {
+                        if n > max_explicit_arity {
+                            max_explicit_arity = n;
+                        }
+                        break;
+                    }
+                    walk = ctx
+                        .classes
+                        .get(&cur)
+                        .and_then(|c| c.extends_name.clone());
+                }
+                for (sub_id, _) in &overrides {
+                    for (sub_name, &id) in ctx.class_ids.iter() {
+                        if id == *sub_id {
+                            if let Some(&n) = ctx.method_param_counts
+                                .get(&(sub_name.clone(), property.clone()))
+                            {
+                                if n > max_explicit_arity {
+                                    max_explicit_arity = n;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                let target_total = max_explicit_arity + 1; // +1 for `this`
+                let undefined_lit = double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED));
+                while lowered_args.len() < target_total {
+                    lowered_args.push(undefined_lit.clone());
                 }
                 let arg_slices: Vec<(crate::types::LlvmType, &str)> =
                     lowered_args.iter().map(|s| (DOUBLE, s.as_str())).collect();

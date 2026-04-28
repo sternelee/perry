@@ -172,6 +172,16 @@ pub struct ImportedClass {
     pub constructor_param_count: usize,
     /// Method names defined on this class.
     pub method_names: Vec<String>,
+    /// Per-method explicit param counts, parallel to `method_names`. Issue #235:
+    /// codegen uses this to declare cross-module method symbols with the
+    /// correct arity (was hardcoded "6 as safe upper bound", which made the
+    /// callee read garbage from uninitialized arg-register slots when the
+    /// call site passed fewer args than the declaration claimed) AND to pad
+    /// dispatch-tower call sites with TAG_UNDEFINED so default-param
+    /// desugaring fires correctly. Empty Vec is the legacy fallback for
+    /// source modules that haven't been updated to populate it — codegen
+    /// falls back to the old upper bound when the entry is missing.
+    pub method_param_counts: Vec<usize>,
     /// Static method names defined on this class. Without this, calls like
     /// `MyClass.staticMethod(...)` on an imported class are treated as a
     /// missing method and fall through to `0.0` — turning every
@@ -218,6 +228,18 @@ pub(crate) struct CrossModuleCtx {
     pub type_aliases: std::collections::HashMap<String, perry_types::Type>,
     pub imported_func_param_counts: std::collections::HashMap<String, usize>,
     pub imported_func_return_types: std::collections::HashMap<String, perry_types::Type>,
+    /// Per-method explicit param counts, keyed by `(class_name, method_name)`.
+    /// Built once in `compile_module` from BOTH local `hir.classes` AND
+    /// `opts.imported_classes`. Used at every method-call dispatch site in
+    /// `lower_call.rs` to pad missing trailing args with TAG_UNDEFINED so
+    /// the callee's default-param desugaring fires correctly.
+    /// Pre-fix the dispatch tower passed only the user-provided args + recv
+    /// to a function declared with N+1 doubles, leaving any param the caller
+    /// skipped to be read from an uninitialized arg-register slot. On
+    /// AArch64 / Win64 those slots typically held a real heap pointer left
+    /// over from a prior call's return state — dereferencing `options.session`
+    /// inside the dispatch chain silently hung. See issue #235.
+    pub method_param_counts: std::collections::HashMap<(String, String), usize>,
     /// Per-class `keys_array` global variable names. Each entry maps
     /// `class_name → @perry_class_keys_<modprefix>__<sanitized_class>`.
     /// Built once in `compile_module` (one entry per class — local
@@ -588,6 +610,37 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
     }
 
+    // Issue #235: per-method explicit-param-count map covering BOTH local
+    // classes (from `hir.classes`) AND imported classes (from
+    // `opts.imported_classes`). Every method-call dispatch site in
+    // `lower_call.rs` looks up here to pad missing trailing args with
+    // TAG_UNDEFINED so the callee's default-param desugaring (`if (options
+    // === undefined) options = {}`) fires correctly. Pre-fix the dispatch
+    // tower passed only the user-provided args, leaving the callee to read
+    // uninitialized arg-register slots for any param the caller skipped —
+    // a real heap pointer from a prior call's leftover state, which when
+    // dereferenced for `options.session` silently hung in the dispatch chain.
+    let mut method_param_counts: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    for cls in &hir.classes {
+        for m in &cls.methods {
+            method_param_counts.insert((cls.name.clone(), m.name.clone()), m.params.len());
+        }
+    }
+    for ic in &opts.imported_classes {
+        let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name).to_string();
+        for (i, mname) in ic.method_names.iter().enumerate() {
+            // Default to 0 if the source side hasn't populated method_param_counts
+            // yet (legacy ImportedClass with no parallel Vec). 0 means "no padding".
+            let count = ic.method_param_counts.get(i).copied().unwrap_or(0);
+            // Register under the canonical class name and the local alias if any.
+            method_param_counts.insert((ic.name.clone(), mname.clone()), count);
+            if effective_name != ic.name {
+                method_param_counts.insert((effective_name.clone(), mname.clone()), count);
+            }
+        }
+    }
+
     // Build the cross-module context bundle from CompileOptions.
     let cross_module = CrossModuleCtx {
         namespace_imports: opts.namespace_imports.iter().cloned().collect(),
@@ -596,6 +649,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         type_aliases: opts.type_aliases,
         imported_func_param_counts: opts.imported_func_param_counts,
         imported_func_return_types: opts.imported_func_return_types,
+        method_param_counts,
         class_keys_globals: class_keys_globals_map,
         imported_class_ctors: opts.imported_classes.iter().map(|ic| {
             let effective_name = ic.local_alias.as_deref().unwrap_or(&ic.name);
@@ -947,7 +1001,7 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }
         let src = &ic.source_prefix;
 
-        for method_name in &ic.method_names {
+        for (method_idx, method_name) in ic.method_names.iter().enumerate() {
             // The source module emitted its methods as
             // `perry_method_<source_prefix>__<class>__<method>`.
             // Use the canonical class name (ic.name) for the symbol
@@ -962,24 +1016,23 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
                 .entry((effective_name.to_string(), method_name.clone()))
                 .or_insert_with(|| llvm_fn.clone());
 
-            // Declare extern: double method(double this, double arg0, …).
-            // We don't know the exact param count of each method from the
-            // ImportedClass metadata (only method_names), so declare with
-            // a variadic-safe 6-arg signature. The LLVM IR `declare` is
-            // just a prototype — it only matters that the symbol exists
-            // and the return type is correct. At the call site, only the
-            // actual args are passed.
-            // For methods, signature is: double(double_this, ..args)
-            // We declare conservatively with just (double) → double;
-            // extra args at call sites are fine because LLVM validates
-            // the callsite against the number of args it actually passes.
-            // Actually, LLVM requires exact match. We don't know the
-            // arity, so declare with 6 params as a safe upper bound.
-            // Call sites with fewer args work because LLVM only checks
-            // at the indirect call site. For direct calls, the linker
-            // resolves regardless.
+            // Declare extern: `double method(double this, double arg0, …)`.
+            // Pre-#235 this was hardcoded to 6 doubles ("safe upper bound").
+            // The bug: call sites that passed fewer args (the common case for
+            // methods with default params) made the callee read garbage from
+            // uninitialized arg-register slots — typically a real heap pointer
+            // from a prior call's leftover state. Dereferencing that garbage
+            // for `options.session` etc. silently hung in the dispatch chain.
+            // We now read the actual arity from the parallel
+            // `method_param_counts` Vec populated by the source side. If the
+            // source module didn't populate it (legacy or out-of-sync build),
+            // fall back to 6 to preserve compat.
+            // Total arity = explicit params + 1 implicit `this`.
+            let arity = ic.method_param_counts.get(method_idx).copied()
+                .map(|n| n + 1)
+                .unwrap_or(6);
             let param_types: Vec<crate::types::LlvmType> =
-                std::iter::repeat(DOUBLE).take(6).collect();
+                std::iter::repeat(DOUBLE).take(arity).collect();
             llmod.declare_function(&llvm_fn, DOUBLE, &param_types);
         }
 
@@ -1792,6 +1845,7 @@ fn compile_function(
         local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
+        method_param_counts: &cross_module.method_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
         ffi_signatures: &cross_module.ffi_signatures,
         try_depth: 0,
@@ -2115,6 +2169,7 @@ fn compile_closure(
         local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
+        method_param_counts: &cross_module.method_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
         ffi_signatures: &cross_module.ffi_signatures,
         try_depth: 0,
@@ -2303,6 +2358,7 @@ fn compile_method(
         local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
+        method_param_counts: &cross_module.method_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
         ffi_signatures: &cross_module.ffi_signatures,
         try_depth: 0,
@@ -2548,6 +2604,7 @@ fn compile_module_entry(
         local_async_funcs: &cross_module.local_async_funcs,
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
+        method_param_counts: &cross_module.method_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
         ffi_signatures: &cross_module.ffi_signatures,
         try_depth: 0,
@@ -2765,6 +2822,7 @@ fn compile_module_entry(
         local_async_funcs: &cross_module.local_async_funcs,
             type_aliases: &cross_module.type_aliases,
             imported_func_param_counts: &cross_module.imported_func_param_counts,
+        method_param_counts: &cross_module.method_param_counts,
             imported_func_return_types: &cross_module.imported_func_return_types,
         ffi_signatures: &cross_module.ffi_signatures,
         try_depth: 0,
@@ -3138,6 +3196,7 @@ fn compile_static_method(
         local_async_funcs: &cross_module.local_async_funcs,
         type_aliases: &cross_module.type_aliases,
         imported_func_param_counts: &cross_module.imported_func_param_counts,
+        method_param_counts: &cross_module.method_param_counts,
         imported_func_return_types: &cross_module.imported_func_return_types,
         ffi_signatures: &cross_module.ffi_signatures,
         try_depth: 0,

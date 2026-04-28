@@ -193,7 +193,7 @@ pub fn compute_object_cache_key(
         let mut buf = String::new();
         for c in v {
             buf.push_str(&format!(
-                "{}@{}:ctor={}:parent={}:alias={}:id={}:fields={}:methods={}|",
+                "{}@{}:ctor={}:parent={}:alias={}:id={}:fields={}:methods={}:method_arities={}|",
                 c.name,
                 c.source_prefix,
                 c.constructor_param_count,
@@ -204,6 +204,7 @@ pub fn compute_object_cache_key(
                     .unwrap_or_default(),
                 c.field_names.join(","),
                 c.method_names.join(","),
+                c.method_param_counts.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(","),
             ));
         }
         h.field("imported_classes", &buf);
@@ -598,6 +599,7 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 1,
             method_names: vec!["bar".into()],
+            method_param_counts: vec![0],
             static_method_names: vec![],
             getter_names: vec![],
             setter_names: vec![],
@@ -612,6 +614,7 @@ mod object_cache_tests {
             source_prefix: "src".into(),
             constructor_param_count: 2, // different arity
             method_names: vec!["bar".into()],
+            method_param_counts: vec![0],
             static_method_names: vec![],
             getter_names: vec![],
             setter_names: vec![],

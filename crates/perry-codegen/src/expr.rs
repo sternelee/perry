@@ -292,6 +292,12 @@ pub(crate) struct FnCtx<'a> {
     /// Imported function return types, keyed by local function name.
     /// Used for type-aware dispatch on cross-module call results.
     pub imported_func_return_types: &'a std::collections::HashMap<String, perry_types::Type>,
+    /// Per-method explicit param counts, keyed by `(class_name, method_name)`.
+    /// Built from BOTH local `hir.classes` AND `opts.imported_classes`.
+    /// `lower_call.rs` dispatch sites use this to pad missing trailing args
+    /// with TAG_UNDEFINED so the callee's default-param desugaring fires
+    /// correctly. See issue #235 for the failure mode.
+    pub method_param_counts: &'a std::collections::HashMap<(String, String), usize>,
     /// FFI manifest: `name → (param_kinds, return_kind)` from
     /// `package.json` `nativeLibrary.functions`. Each kind is a string like
     /// `"i64"`, `"f64"`, `"void"`, `"string"`, or `"ptr"`. `lower_call` consults
