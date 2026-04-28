@@ -86,5 +86,9 @@
   "test_gap_fetch_response": {
     "status": "ci-env",
     "reason": "PR #232 (issue #227 follow-up) added `Buffer.from(ab).toString(\"utf8\")` byte-level assertions to the previously-passing `arrayBuffer byteLength: 5` check. The Buffer pull-in trips the same macOS-14 SDK/linker gap as the rest of the Buffer family (test_gap_buffer_ops, test_buffer_small_alloc, test_issue_227_array_buffer_bytes, etc.). Compiles and runs byte-for-byte clean on local macOS 15.x+; only the macOS-14 GitHub runner is affected."
+  },
+  "test_issue_234_blob_methods": {
+    "status": "ci-env",
+    "reason": "Regression test added by issue #234 fix (real Blob with arrayBuffer/text/bytes/slice). Includes a `Buffer.from(blob.arrayBuffer())` round-trip (multi-byte UTF-8 case) which trips the same macOS-14 SDK/linker gap as the rest of the Buffer family (test_gap_buffer_ops, test_buffer_small_alloc, test_issue_227_array_buffer_bytes, test_gap_fetch_response). Compiles and runs byte-for-byte against `node --experimental-strip-types` on local macOS 15.x+; only the macOS-14 GitHub runner is affected."
   }
 }
