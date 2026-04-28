@@ -162,6 +162,25 @@
     color: var(--fg);
     margin: 0 0 18px;
   }
+  .kv-edit input[type="text"],
+  .kv-edit input[type="number"] {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font: inherit;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .kv-edit input[type="text"]:focus,
+  .kv-edit input[type="number"]:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .kv-edit input[type="checkbox"] {
+    accent-color: var(--accent);
+  }
 </style>
 </head>
 <body>
@@ -290,6 +309,27 @@ async function renderDetail(w) {
       <dt>enabled</dt><dd>${w.enabled === false ? "no" : "yes"}</dd>
       <dt>value</dt><dd>${liveValue === null || liveValue === undefined ? "—" : escapeHtml(liveValue)}</dd>
     </dl>
+    <h2>live edit</h2>
+    <dl class="kv kv-edit">
+      <dt>backgroundColor</dt>
+      <dd><input type="text" data-style-prop="backgroundColor" placeholder="#3B82F6 / red / transparent"></dd>
+      <dt>color</dt>
+      <dd><input type="text" data-style-prop="color" placeholder="#fff / black"></dd>
+      <dt>borderColor</dt>
+      <dd><input type="text" data-style-prop="borderColor" placeholder="#000"></dd>
+      <dt>borderWidth</dt>
+      <dd><input type="number" min="0" step="0.5" data-style-prop="borderWidth"></dd>
+      <dt>borderRadius</dt>
+      <dd><input type="number" min="0" step="1" data-style-prop="borderRadius"></dd>
+      <dt>opacity</dt>
+      <dd><input type="number" min="0" max="1" step="0.05" data-style-prop="opacity"></dd>
+      <dt>padding</dt>
+      <dd><input type="number" min="0" step="1" data-style-prop="padding"></dd>
+      <dt>hidden</dt>
+      <dd><input type="checkbox" data-style-prop="hidden" ${w.hidden ? "checked" : ""}></dd>
+      <dt>enabled</dt>
+      <dd><input type="checkbox" data-style-prop="enabled" ${w.enabled === false ? "" : "checked"}></dd>
+    </dl>
     <div class="actions">
       <button data-action="click" ${isClickable ? "" : "disabled"}>fire onClick</button>
       <button data-action="copy">copy JSON</button>
@@ -309,6 +349,45 @@ async function renderDetail(w) {
     navigator.clipboard?.writeText(JSON.stringify(w, null, 2));
     $status.textContent = "copied";
   });
+  for (const input of $detail.querySelectorAll("[data-style-prop]")) {
+    const apply = async () => {
+      const prop = input.dataset.styleProp;
+      let value;
+      if (input.type === "checkbox") {
+        value = input.checked;
+      } else if (input.type === "number") {
+        if (input.value === "") return; // empty = no edit
+        value = Number(input.value);
+        if (Number.isNaN(value)) return;
+      } else {
+        value = input.value.trim();
+        if (value === "") return;
+      }
+      try {
+        const body = JSON.stringify({ [prop]: value });
+        const r = await fetch(`/style/${w.handle}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+        if (r.ok) {
+          const j = await r.json();
+          const applied = (j.applied || []).join(", ");
+          $status.textContent = applied
+            ? `applied ${applied} on ${w.handle}`
+            : `style ignored (unknown prop or invalid value)`;
+        } else {
+          $status.textContent = `style failed: ${r.status}`;
+        }
+      } catch (e) {
+        $status.textContent = `style failed: ${e.message}`;
+      }
+    };
+    input.addEventListener("change", apply);
+    if (input.type !== "checkbox") {
+      input.addEventListener("blur", apply);
+    }
+  }
 }
 
 let timer = null;

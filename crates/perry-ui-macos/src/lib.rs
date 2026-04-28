@@ -13,6 +13,9 @@ pub mod widgets;
 
 pub mod screenshot;
 
+#[cfg(feature = "geisterhand")]
+pub mod geisterhand_style;
+
 /// Run a closure, catching any Rust panics so they don't abort across the FFI boundary.
 /// The global panic hook (installed by crash_log) writes to crash.log first;
 /// if we catch the panic here (non-fatal), we clear the log so it doesn't

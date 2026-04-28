@@ -17,6 +17,14 @@ extern "C" {
     fn perry_geisterhand_queue_set_text(handle: i64, text_ptr: *const u8, text_len: usize);
     fn perry_geisterhand_request_value(handle: i64, out_len: *mut usize) -> *mut u8;
     fn perry_geisterhand_request_tree(out_len: *mut usize) -> *mut u8;
+    fn perry_geisterhand_queue_apply_style(
+        handle: i64,
+        prop_id: u32,
+        a0: f64,
+        a1: f64,
+        a2: f64,
+        a3: f64,
+    );
 }
 
 // Callback kind constants (must match perry-runtime/src/geisterhand_registry.rs)
@@ -25,6 +33,106 @@ const CB_ON_CHANGE: u8 = 1;
 const CB_ON_SUBMIT: u8 = 2;
 const CB_ON_HOVER: u8 = 3;
 const CB_ON_DOUBLE_CLICK: u8 = 4;
+
+// Style prop-id namespace — must stay in lockstep with
+// `perry-runtime/src/geisterhand_registry.rs::STYLE_*` and the
+// per-platform `apply_style` dispatcher (`perry-ui-macos/src/
+// geisterhand_style.rs`). The inspector UI sends camelCase prop names
+// over the wire; the server resolves them via `style_prop_id`.
+const STYLE_BACKGROUND_COLOR: u32 = 1;
+const STYLE_COLOR: u32 = 2;
+const STYLE_BORDER_COLOR: u32 = 3;
+const STYLE_BORDER_WIDTH: u32 = 4;
+const STYLE_BORDER_RADIUS: u32 = 5;
+const STYLE_OPACITY: u32 = 6;
+const STYLE_PADDING_UNIFORM: u32 = 7;
+const STYLE_HIDDEN: u32 = 8;
+const STYLE_ENABLED: u32 = 9;
+
+fn style_prop_id(name: &str) -> Option<u32> {
+    match name {
+        "backgroundColor" => Some(STYLE_BACKGROUND_COLOR),
+        "color" => Some(STYLE_COLOR),
+        "borderColor" => Some(STYLE_BORDER_COLOR),
+        "borderWidth" => Some(STYLE_BORDER_WIDTH),
+        "borderRadius" => Some(STYLE_BORDER_RADIUS),
+        "opacity" => Some(STYLE_OPACITY),
+        "padding" => Some(STYLE_PADDING_UNIFORM),
+        "hidden" => Some(STYLE_HIDDEN),
+        "enabled" => Some(STYLE_ENABLED),
+        _ => None,
+    }
+}
+
+fn is_color_prop(prop_id: u32) -> bool {
+    matches!(prop_id, STYLE_BACKGROUND_COLOR | STYLE_COLOR | STYLE_BORDER_COLOR)
+}
+fn is_bool_prop(prop_id: u32) -> bool {
+    matches!(prop_id, STYLE_HIDDEN | STYLE_ENABLED)
+}
+
+/// Parse a CSS-style color string into `(r, g, b, a)` floats in `[0, 1]`.
+/// Supports the same forms as the codegen-side `parse_color_string`
+/// helper (`crates/perry-codegen/src/lower_call.rs`) so live edits and
+/// compile-time inline styles produce identical pixels. Returns `None`
+/// for unrecognized input; callers drop the edit silently rather than
+/// rendering a magenta sentinel for typos.
+fn parse_color_string(s: &str) -> Option<(f64, f64, f64, f64)> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        let clean: String = hex.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let to_f = |b: u8| (b as f64) / 255.0;
+        return match clean.len() {
+            3 => {
+                let n = u32::from_str_radix(&clean, 16).ok()?;
+                let r = ((n >> 8) & 0xF) as u8;
+                let g = ((n >> 4) & 0xF) as u8;
+                let b = (n & 0xF) as u8;
+                Some((to_f(r * 17), to_f(g * 17), to_f(b * 17), 1.0))
+            }
+            4 => {
+                let n = u32::from_str_radix(&clean, 16).ok()?;
+                let r = ((n >> 12) & 0xF) as u8;
+                let g = ((n >> 8) & 0xF) as u8;
+                let b = ((n >> 4) & 0xF) as u8;
+                let a = (n & 0xF) as u8;
+                Some((to_f(r * 17), to_f(g * 17), to_f(b * 17), to_f(a * 17)))
+            }
+            6 => {
+                let n = u32::from_str_radix(&clean, 16).ok()?;
+                Some((
+                    to_f(((n >> 16) & 0xFF) as u8),
+                    to_f(((n >> 8) & 0xFF) as u8),
+                    to_f((n & 0xFF) as u8),
+                    1.0,
+                ))
+            }
+            8 => {
+                let n = u32::from_str_radix(&clean, 16).ok()?;
+                Some((
+                    to_f(((n >> 24) & 0xFF) as u8),
+                    to_f(((n >> 16) & 0xFF) as u8),
+                    to_f(((n >> 8) & 0xFF) as u8),
+                    to_f((n & 0xFF) as u8),
+                ))
+            }
+            _ => None,
+        };
+    }
+    match s.to_lowercase().as_str() {
+        "white" => Some((1.0, 1.0, 1.0, 1.0)),
+        "black" => Some((0.0, 0.0, 0.0, 1.0)),
+        "red" => Some((1.0, 0.0, 0.0, 1.0)),
+        "green" => Some((0.0, 0.5, 0.0, 1.0)),
+        "blue" => Some((0.0, 0.0, 1.0, 1.0)),
+        "yellow" => Some((1.0, 1.0, 0.0, 1.0)),
+        "cyan" => Some((0.0, 1.0, 1.0, 1.0)),
+        "magenta" => Some((1.0, 0.0, 1.0, 1.0)),
+        "gray" | "grey" => Some((0.502, 0.502, 0.502, 1.0)),
+        "transparent" => Some((0.0, 0.0, 0.0, 0.0)),
+        _ => None,
+    }
+}
 
 /// Inspector UI — single-page HTML+JS app embedded at compile time. Served
 /// at `GET /` so users can open `http://localhost:7676/` in a browser
@@ -307,6 +415,85 @@ pub fn run_server(port: u16) {
                         };
                         unsafe { perry_geisterhand_queue_state_set(handle, value); }
                         ok_json(r#"{"ok":true}"#)
+                    }
+                    None => error_json(400, "invalid handle"),
+                }
+            }
+
+            // POST /style/:handle — apply one or more StyleProps to a widget
+            // (issue #185 Phase D step 2). Body shape: a JSON object whose
+            // keys are camelCase prop names (`backgroundColor`, `color`,
+            // `borderColor`, `borderWidth`, `borderRadius`, `opacity`,
+            // `padding`, `hidden`, `enabled`) and values match each prop's
+            // expected type — strings (CSS color), numbers (scalar), or
+            // booleans. Unknown keys are skipped silently. Each accepted
+            // prop is queued as a separate `ApplyStyle` PendingAction;
+            // the main-thread pump drains and dispatches them via the
+            // platform-registered `apply_style` function pointer (see
+            // `perry-ui-macos/src/geisterhand_style.rs`).
+            (Method::Post, p) if p.starts_with("/style/") => {
+                match parse_handle(p, "/style/") {
+                    Some(handle) => {
+                        let body = read_body(&mut request);
+                        match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(parsed) => match parsed.as_object() {
+                                Some(obj) => {
+                                    let mut applied: Vec<String> = Vec::new();
+                                    for (key, value) in obj {
+                                        let prop_id = match style_prop_id(key) {
+                                            Some(id) => id,
+                                            None => continue,
+                                        };
+                                        if is_color_prop(prop_id) {
+                                            let color = if let Some(s) = value.as_str() {
+                                                parse_color_string(s)
+                                            } else if let Some(o) = value.as_object() {
+                                                Some((
+                                                    o.get("r").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                                    o.get("g").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                                    o.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                                                    o.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0),
+                                                ))
+                                            } else {
+                                                None
+                                            };
+                                            if let Some((r, g, b, a)) = color {
+                                                unsafe {
+                                                    perry_geisterhand_queue_apply_style(
+                                                        handle, prop_id, r, g, b, a,
+                                                    );
+                                                }
+                                                applied.push(key.clone());
+                                            }
+                                        } else if is_bool_prop(prop_id) {
+                                            let v = value.as_bool().unwrap_or(false);
+                                            let a0 = if v { 1.0 } else { 0.0 };
+                                            unsafe {
+                                                perry_geisterhand_queue_apply_style(
+                                                    handle, prop_id, a0, 0.0, 0.0, 0.0,
+                                                );
+                                            }
+                                            applied.push(key.clone());
+                                        } else if let Some(v) = value.as_f64() {
+                                            unsafe {
+                                                perry_geisterhand_queue_apply_style(
+                                                    handle, prop_id, v, 0.0, 0.0, 0.0,
+                                                );
+                                            }
+                                            applied.push(key.clone());
+                                        }
+                                    }
+                                    let body = format!(
+                                        r#"{{"ok":true,"applied":{}}}"#,
+                                        serde_json::to_string(&applied)
+                                            .unwrap_or_else(|_| "[]".into())
+                                    );
+                                    ok_json(&body)
+                                }
+                                None => error_json(400, "expected JSON object"),
+                            },
+                            Err(_) => error_json(400, "invalid JSON"),
+                        }
                     }
                     None => error_json(400, "invalid handle"),
                 }

@@ -43,7 +43,29 @@ pub enum PendingAction {
     ScrollTo { handle: i64, x: f64, y: f64 },
     ReadValue { handle: i64 },
     QueryWidgetTree,
+    /// Issue #185 Phase D step 2: live-edit a single style prop on a
+    /// widget. `prop_id` selects the setter (one of `STYLE_*` constants
+    /// below); `args` carries the prop's payload — colors use all four
+    /// (RGBA 0-1), scalar props use `args[0]`, bools use `args[0] != 0`.
+    /// The pump dispatches to the platform UI lib's registered
+    /// `perry_ui_geisterhand_apply_style` function on the main thread.
+    ApplyStyle { handle: i64, prop_id: u32, args: [f64; 4] },
 }
+
+/// Stable prop-id namespace for `ApplyStyle`. Adds at the end only —
+/// the inspector UI on the wire references these by string name and
+/// the runtime maps the string → id, so the numeric values are
+/// internal but must stay stable across HTTP server / platform UI
+/// crate boundary.
+pub const STYLE_BACKGROUND_COLOR: u32 = 1;
+pub const STYLE_COLOR: u32 = 2;
+pub const STYLE_BORDER_COLOR: u32 = 3;
+pub const STYLE_BORDER_WIDTH: u32 = 4;
+pub const STYLE_BORDER_RADIUS: u32 = 5;
+pub const STYLE_OPACITY: u32 = 6;
+pub const STYLE_PADDING_UNIFORM: u32 = 7;
+pub const STYLE_HIDDEN: u32 = 8;
+pub const STYLE_ENABLED: u32 = 9;
 
 static REGISTRY: Mutex<Vec<RegisteredWidget>> = Mutex::new(Vec::new());
 static PENDING_ACTIONS: Mutex<Vec<PendingAction>> = Mutex::new(Vec::new());
@@ -82,6 +104,7 @@ static UI_TEXTFIELD_SET_STRING_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null
 static UI_SCROLL_SET_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_READ_VALUE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static UI_QUERY_TREE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static UI_APPLY_STYLE_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Register the platform UI crate's state_set function.
 #[no_mangle]
@@ -119,6 +142,18 @@ pub extern "C" fn perry_geisterhand_register_read_value(f: extern "C" fn(i64, *m
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_register_query_tree(f: extern "C" fn(*mut usize) -> *mut u8) {
     UI_QUERY_TREE_FN.store(f as *mut (), Ordering::Release);
+}
+
+/// Register the platform UI crate's `apply_style` dispatcher (#185 Phase D
+/// step 2). The dispatcher takes `(handle, prop_id, a0, a1, a2, a3)` and
+/// is expected to switch on `prop_id` against the `STYLE_*` constants in
+/// this module, calling the correct platform-specific setter (which must
+/// already be main-thread-safe — the pump fires on the main thread).
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_register_apply_style(
+    f: extern "C" fn(i64, u32, f64, f64, f64, f64),
+) {
+    UI_APPLY_STYLE_FN.store(f as *mut (), Ordering::Release);
 }
 
 /// Register a widget callback in the global registry.
@@ -272,6 +307,33 @@ pub extern "C" fn perry_geisterhand_queue_state_set(handle: i64, value: f64) {
     }
 }
 
+/// Queue a single-prop style edit for main-thread dispatch (#185 Phase
+/// D step 2). The four `f64` args are interpreted per-prop:
+///
+/// - color props (`backgroundColor` / `color` / `borderColor`):
+///   `(r, g, b, a)` in `[0.0, 1.0]`.
+/// - scalar props (`borderWidth` / `borderRadius` / `opacity` /
+///   `padding`): value lives in `a0`; `a1` / `a2` / `a3` are unused (0.0).
+/// - bool props (`hidden` / `enabled`): `a0 != 0.0` for true; `a1` /
+///   `a2` / `a3` unused.
+///
+/// The HTTP thread (server.rs `POST /style/:h`) is responsible for
+/// parsing the inbound JSON into the right `prop_id` + arg layout
+/// before queuing.
+#[no_mangle]
+pub extern "C" fn perry_geisterhand_queue_apply_style(
+    handle: i64,
+    prop_id: u32,
+    a0: f64,
+    a1: f64,
+    a2: f64,
+    a3: f64,
+) {
+    if let Ok(mut q) = PENDING_ACTIONS.lock() {
+        q.push(PendingAction::ApplyStyle { handle, prop_id, args: [a0, a1, a2, a3] });
+    }
+}
+
 /// Queue a text-set action for main-thread dispatch (sets Win32 Edit control text + fires onChange).
 #[no_mangle]
 pub extern "C" fn perry_geisterhand_queue_set_text(handle: i64, text_ptr: *const u8, text_len: usize) {
@@ -337,6 +399,16 @@ pub extern "C" fn perry_geisterhand_pump() {
                                 break;
                             }
                         }
+                    }
+                }
+            }
+            PendingAction::ApplyStyle { handle, prop_id, args } => {
+                let f = UI_APPLY_STYLE_FN.load(Ordering::Acquire);
+                if !f.is_null() {
+                    unsafe {
+                        let func: extern "C" fn(i64, u32, f64, f64, f64, f64) =
+                            std::mem::transmute(f);
+                        func(handle, prop_id, args[0], args[1], args[2], args[3]);
                     }
                 }
             }

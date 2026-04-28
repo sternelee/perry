@@ -496,6 +496,9 @@ pub fn app_run(_app_handle: i64) {
             fn perry_geisterhand_register_scroll_set(f: extern "C" fn(i64, f64, f64));
             fn perry_geisterhand_register_read_value(f: extern "C" fn(i64, *mut usize) -> *mut u8);
             fn perry_geisterhand_register_query_tree(f: extern "C" fn(*mut usize) -> *mut u8);
+            fn perry_geisterhand_register_apply_style(
+                f: extern "C" fn(i64, u32, f64, f64, f64, f64),
+            );
         }
         unsafe {
             perry_geisterhand_register_state_set(crate::perry_ui_state_set);
@@ -504,6 +507,7 @@ pub fn app_run(_app_handle: i64) {
             perry_geisterhand_register_scroll_set(crate::widgets::scrollview::perry_ui_scroll_set_offset);
             perry_geisterhand_register_read_value(crate::widgets::perry_ui_read_widget_value);
             perry_geisterhand_register_query_tree(crate::widgets::perry_ui_query_widget_tree);
+            perry_geisterhand_register_apply_style(crate::geisterhand_style::apply_style);
         }
     }
 
