@@ -3137,6 +3137,80 @@ pub(super) fn lower_fetch_native_method(
         }
     }
 
+    // ── Blob instance methods + property getters (issue #234) ──
+    // The receiver is a numeric Blob handle (registry id) carried as f64,
+    // mirroring the Response handle ABI. Locals are tagged blob::Blob via
+    // `register_native_instance` in `destructuring.rs`.
+    if module == "blob" {
+        let recv_handle = lower_expr(ctx, recv)?;
+        match method {
+            "size" => {
+                let blk = ctx.block();
+                let n = blk.call(DOUBLE, "js_blob_size", &[(DOUBLE, &recv_handle)]);
+                return Ok(Some(n));
+            }
+            "type" => {
+                let str_ptr = ctx
+                    .block()
+                    .call(I64, "js_blob_type", &[(DOUBLE, &recv_handle)]);
+                let blk = ctx.block();
+                return Ok(Some(nanbox_string_inline(blk, &str_ptr)));
+            }
+            "arrayBuffer" => {
+                let blk = ctx.block();
+                let promise =
+                    blk.call(I64, "js_blob_array_buffer", &[(DOUBLE, &recv_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "bytes" => {
+                let blk = ctx.block();
+                let promise = blk.call(I64, "js_blob_bytes", &[(DOUBLE, &recv_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "text" => {
+                let blk = ctx.block();
+                let promise = blk.call(I64, "js_blob_text", &[(DOUBLE, &recv_handle)]);
+                return Ok(Some(nanbox_pointer_inline(blk, &promise)));
+            }
+            "slice" => {
+                // slice(start?, end?, type?) — missing numeric args use NaN
+                // as sentinel; missing type uses null pointer (0). Runtime
+                // `js_blob_slice` checks `is_nan()` / `type_ptr.is_null()`
+                // to apply WHATWG defaults.
+                // Missing numeric args use canonical f64::NAN as sentinel;
+                // runtime `js_blob_slice` checks `is_nan()` to apply WHATWG
+                // defaults (start=0, end=len).
+                let start = if !args.is_empty() {
+                    lower_expr(ctx, &args[0])?
+                } else {
+                    double_literal(f64::NAN)
+                };
+                let end = if args.len() >= 2 {
+                    lower_expr(ctx, &args[1])?
+                } else {
+                    double_literal(f64::NAN)
+                };
+                let type_ptr = if args.len() >= 3 {
+                    get_raw_string_ptr(ctx, &args[2])?
+                } else {
+                    "0".to_string()
+                };
+                let new_handle = ctx.block().call(
+                    DOUBLE,
+                    "js_blob_slice",
+                    &[
+                        (DOUBLE, &recv_handle),
+                        (DOUBLE, &start),
+                        (DOUBLE, &end),
+                        (I64, &type_ptr),
+                    ],
+                );
+                return Ok(Some(new_handle));
+            }
+            _ => return Ok(None),
+        }
+    }
+
     // ── axios: response property access (response.status, .data, .statusText, .headers) ──
     if module == "axios" {
         if let Some(recv) = object {

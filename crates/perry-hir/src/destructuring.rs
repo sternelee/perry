@@ -1359,6 +1359,50 @@ pub(crate) fn lower_var_decl_with_destructuring(
                         }
                     }
                 }
+                // Issue #234: const blob = await <res>.blob() — register `blob`
+                // as a blob::Blob native instance so subsequent `blob.text()` /
+                // `.arrayBuffer()` / `.bytes()` / `.slice()` / `.size` /
+                // `.type` calls dispatch through the codegen `module=="blob"`
+                // arm in `lower_call.rs`.
+                if let ast::Expr::Await(await_expr) = init_expr.as_ref() {
+                    if let ast::Expr::Call(call_expr) = await_expr.arg.as_ref() {
+                        if let ast::Callee::Expr(callee) = &call_expr.callee {
+                            if let ast::Expr::Member(member) = callee.as_ref() {
+                                if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                    if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                                        if prop_ident.sym.as_ref() == "blob" {
+                                            if let Some((_, c)) = ctx.lookup_native_instance(obj_ident.sym.as_ref()) {
+                                                if c == "Response" {
+                                                    ctx.register_native_instance(name.clone(), "blob".to_string(), "Blob".to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Issue #234: const b2 = blob.slice(...) — chained slicing
+                // returns a new Blob. Detect when the receiver is already a
+                // blob::Blob native instance.
+                if let ast::Expr::Call(call_expr) = init_expr.as_ref() {
+                    if let ast::Callee::Expr(callee) = &call_expr.callee {
+                        if let ast::Expr::Member(member) = callee.as_ref() {
+                            if let ast::Expr::Ident(obj_ident) = member.obj.as_ref() {
+                                if let ast::MemberProp::Ident(prop_ident) = &member.prop {
+                                    if prop_ident.sym.as_ref() == "slice" {
+                                        if let Some((_, c)) = ctx.lookup_native_instance(obj_ident.sym.as_ref()) {
+                                            if c == "Blob" {
+                                                ctx.register_native_instance(name.clone(), "blob".to_string(), "Blob".to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Check if calling a function whose return type is a native module type

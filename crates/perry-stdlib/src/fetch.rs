@@ -4,7 +4,7 @@
 //! Provides fetch() function for making HTTP requests.
 
 use perry_runtime::{
-    js_array_alloc, js_array_push, js_object_alloc, js_object_alloc_with_shape,
+    js_array_alloc, js_array_push, js_object_alloc,
     js_object_set_field, js_object_set_keys,
     js_string_from_bytes, JSValue, StringHeader,
 };
@@ -824,6 +824,23 @@ lazy_static::lazy_static! {
     static ref NEXT_HEADERS_ID: Mutex<usize> = Mutex::new(1);
     static ref REQUEST_REGISTRY: Mutex<HashMap<usize, RequestRecord>> = Mutex::new(HashMap::new());
     static ref NEXT_REQUEST_ID: Mutex<usize> = Mutex::new(1);
+    static ref BLOB_REGISTRY: Mutex<HashMap<usize, BlobData>> = Mutex::new(HashMap::new());
+    static ref NEXT_BLOB_ID: Mutex<usize> = Mutex::new(1);
+}
+
+#[derive(Clone)]
+struct BlobData {
+    body: Vec<u8>,
+    content_type: String,
+}
+
+fn alloc_blob(data: BlobData) -> usize {
+    let mut id_guard = NEXT_BLOB_ID.lock().unwrap();
+    let id = *id_guard;
+    *id_guard += 1;
+    drop(id_guard);
+    BLOB_REGISTRY.lock().unwrap().insert(id, data);
+    id
 }
 
 fn alloc_headers(store: HeadersStore) -> usize {
@@ -1052,19 +1069,20 @@ pub unsafe extern "C" fn js_response_array_buffer(handle: f64) -> *mut perry_run
     promise
 }
 
-/// response.blob() — returns an object { size: N, type: "..." }
+/// response.blob() — registers a real Blob in BLOB_REGISTRY (cloning body
+/// bytes + content-type) and resolves with the numeric blob handle as f64.
 /// Resolved synchronously; see `js_fetch_response_text`.
 ///
-/// TODO(#234): body bytes are dropped here. A real Blob requires implementing
-/// `.arrayBuffer()` / `.text()` / `.bytes()` / `.slice()` instance methods plus
-/// codegen dispatch routing (`crates/perry-codegen/src/lower_call.rs`).
-/// Until that lands, users needing binary body bytes should call
-/// `response.arrayBuffer()` directly instead of `response.blob()`.
+/// Closes #234 (followup of #232 / #227): pre-fix this returned a
+/// metadata-only stub `{size, type}` and silently dropped `resp.body`. The
+/// codegen-side dispatch arm at `crates/perry-codegen/src/lower_call.rs`
+/// (module=="blob") routes `.arrayBuffer()` / `.text()` / `.bytes()` /
+/// `.slice()` / `.size` / `.type` to the FFIs below.
 #[no_mangle]
 pub unsafe extern "C" fn js_response_blob(handle: f64) -> *mut perry_runtime::Promise {
     let promise = perry_runtime::js_promise_new();
     let id = handle as usize;
-    let (body_len, content_type) = {
+    let data = {
         let guard = FETCH_RESPONSES.lock().unwrap();
         match guard.get(&id) {
             Some(resp) => {
@@ -1072,19 +1090,139 @@ pub unsafe extern "C" fn js_response_blob(handle: f64) -> *mut perry_runtime::Pr
                     .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.clone())
                     .unwrap_or_default();
-                (resp.body.len(), ct)
+                BlobData { body: resp.body.clone(), content_type: ct }
             }
-            None => (0, String::new()),
+            None => BlobData { body: Vec::new(), content_type: String::new() },
         }
     };
-    let packed = b"size\0type\0".as_ptr();
-    let obj = js_object_alloc_with_shape(0x7FFE_FE02, 2, packed, 10);
-    perry_runtime::js_object_set_field(obj, 0, JSValue::number(body_len as f64));
-    let type_str = js_string_from_bytes(content_type.as_ptr(), content_type.len() as u32);
-    perry_runtime::js_object_set_field(obj, 1, JSValue::string_ptr(type_str));
-    let val = JSValue::object_ptr(obj as *mut u8);
+    let blob_id = alloc_blob(data);
+    perry_runtime::js_promise_resolve(promise, blob_id as f64);
+    promise
+}
+
+// ----------------- Blob FFI -----------------
+//
+// Blob handles are plain numeric f64 values (registry IDs into BLOB_REGISTRY),
+// matching the Response handle ABI. They must NOT be NaN-boxed; codegen passes
+// them through as DOUBLE arg kinds. See `lower_call.rs::module=="blob"` arm.
+
+/// blob.size — body byte length as f64.
+#[no_mangle]
+pub extern "C" fn js_blob_size(handle: f64) -> f64 {
+    let id = handle as usize;
+    BLOB_REGISTRY.lock().unwrap()
+        .get(&id)
+        .map(|b| b.body.len() as f64)
+        .unwrap_or(0.0)
+}
+
+/// blob.type — content_type as `*mut StringHeader` (codegen NaN-boxes with STRING_TAG).
+#[no_mangle]
+pub unsafe extern "C" fn js_blob_type(handle: f64) -> *mut StringHeader {
+    let id = handle as usize;
+    let ct = BLOB_REGISTRY.lock().unwrap()
+        .get(&id)
+        .map(|b| b.content_type.clone())
+        .unwrap_or_default();
+    js_string_from_bytes(ct.as_ptr(), ct.len() as u32)
+}
+
+/// blob.arrayBuffer() — allocates a `BufferHeader` holding the body bytes,
+/// resolves the promise with it NaN-boxed as POINTER_TAG. Mirrors
+/// `js_response_array_buffer` (closes #227 path). `new Uint8Array(buf)` and
+/// `Buffer.from(buf)` see the actual byte contents via the BufferHeader
+/// property dispatch in `value.rs`. Resolved synchronously.
+#[no_mangle]
+pub unsafe extern "C" fn js_blob_array_buffer(handle: f64) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let id = handle as usize;
+    let body: Vec<u8> = BLOB_REGISTRY.lock().unwrap()
+        .get(&id)
+        .map(|b| b.body.clone())
+        .unwrap_or_default();
+    let buf = perry_runtime::buffer::buffer_alloc(body.len() as u32);
+    (*buf).length = body.len() as u32;
+    if !body.is_empty() {
+        std::ptr::copy_nonoverlapping(
+            body.as_ptr(),
+            perry_runtime::buffer::buffer_data_mut(buf),
+            body.len(),
+        );
+    }
+    let val = JSValue::object_ptr(buf as *mut u8);
     perry_runtime::js_promise_resolve(promise, f64::from_bits(val.bits()));
     promise
+}
+
+/// blob.bytes() — alias for arrayBuffer() (the BufferHeader is already
+/// byte-array-shaped; users wrap in Uint8Array via `new Uint8Array(buf)` which
+/// hits the `is_registered_buffer` path from #227).
+#[no_mangle]
+pub unsafe extern "C" fn js_blob_bytes(handle: f64) -> *mut perry_runtime::Promise {
+    js_blob_array_buffer(handle)
+}
+
+/// blob.text() — UTF-8-decodes the body bytes into a `StringHeader` and
+/// resolves the promise with it NaN-boxed as STRING_TAG. Lossy decode for
+/// invalid sequences (matches WHATWG Blob.text() spec which uses replacement
+/// characters; lossy_utf8 produces U+FFFD identically).
+#[no_mangle]
+pub unsafe extern "C" fn js_blob_text(handle: f64) -> *mut perry_runtime::Promise {
+    let promise = perry_runtime::js_promise_new();
+    let id = handle as usize;
+    let body: Vec<u8> = BLOB_REGISTRY.lock().unwrap()
+        .get(&id)
+        .map(|b| b.body.clone())
+        .unwrap_or_default();
+    let s = String::from_utf8_lossy(&body).into_owned();
+    let str_ptr = js_string_from_bytes(s.as_ptr(), s.len() as u32);
+    let val = JSValue::string_ptr(str_ptr);
+    perry_runtime::js_promise_resolve(promise, f64::from_bits(val.bits()));
+    promise
+}
+
+/// blob.slice(start?, end?, type?) — returns a NEW blob handle covering
+/// [start, end) of the body. `f64::NAN` sentinel for missing numeric args.
+/// `type_ptr` may be null to inherit the original content-type. Negative
+/// indices count from the end; out-of-range values clamp to [0, len] per
+/// WHATWG Blob spec.
+#[no_mangle]
+pub unsafe extern "C" fn js_blob_slice(
+    handle: f64,
+    start: f64,
+    end: f64,
+    type_ptr: *const StringHeader,
+) -> f64 {
+    let id = handle as usize;
+    let (body, original_type) = {
+        let guard = BLOB_REGISTRY.lock().unwrap();
+        match guard.get(&id) {
+            Some(b) => (b.body.clone(), b.content_type.clone()),
+            None => (Vec::new(), String::new()),
+        }
+    };
+    let len = body.len() as i64;
+    let normalize = |v: f64, default: i64| -> i64 {
+        if v.is_nan() {
+            return default;
+        }
+        let n = v as i64;
+        if n < 0 {
+            (len + n).max(0)
+        } else {
+            n.min(len)
+        }
+    };
+    let s = normalize(start, 0);
+    let e = normalize(end, len);
+    let (lo, hi) = if e < s { (s, s) } else { (s, e) };
+    let slice = body[lo as usize..hi as usize].to_vec();
+    let new_type = if type_ptr.is_null() {
+        original_type
+    } else {
+        string_from_header(type_ptr).unwrap_or(original_type)
+    };
+    alloc_blob(BlobData { body: slice, content_type: new_type }) as f64
 }
 
 /// Response.json(value) — static method. Allocates a Response with JSON-stringified body

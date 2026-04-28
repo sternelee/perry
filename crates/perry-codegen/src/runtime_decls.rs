@@ -817,6 +817,15 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_response_clone", DOUBLE, &[DOUBLE]);
     module.declare_function("js_response_array_buffer", I64, &[DOUBLE]);
     module.declare_function("js_response_blob", I64, &[DOUBLE]);
+    // Blob instance methods (issue #234) — handle is f64 (registry id).
+    // arrayBuffer/bytes/text return a Promise pointer (i64); slice returns a
+    // new blob handle as f64.
+    module.declare_function("js_blob_size", DOUBLE, &[DOUBLE]);
+    module.declare_function("js_blob_type", I64, &[DOUBLE]);
+    module.declare_function("js_blob_array_buffer", I64, &[DOUBLE]);
+    module.declare_function("js_blob_bytes", I64, &[DOUBLE]);
+    module.declare_function("js_blob_text", I64, &[DOUBLE]);
+    module.declare_function("js_blob_slice", DOUBLE, &[DOUBLE, DOUBLE, DOUBLE, I64]);
     // Static factories.
     module.declare_function("js_response_static_json", DOUBLE, &[DOUBLE]);
     module.declare_function("js_response_static_redirect", DOUBLE, &[I64, DOUBLE]);
