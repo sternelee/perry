@@ -70,5 +70,13 @@
   "test_issue_167_loop_alloca_stack_eat": {
     "status": "bug",
     "reason": "Regression test added by v0.5.316 (#167 fix hoisting js_native_call_method args alloca to entry block). Same compile-fail-on-CI / passes-locally pattern as test_inline_uint8array_param — both tests are about Buffer/Uint8Array codepaths and likely share the macOS-14 SDK gap."
+  },
+  "test_gap_array_methods": {
+    "status": "known_limitation",
+    "reason": "TypedArray.prototype.at() returns undefined instead of element values on Int32Array / Float64Array (e.g. `Int32Array.at(0)` → undefined where Node returns 1). Categorical typed-array gap, same family as test_gap_typed_arrays — Perry's .at() codegen fast path is wired for regular Array but not for the TypedArray instance shapes. Was passing 26/28 at v0.5.319 after the SSO-unboxing fix transitively flipped it; regressed somewhere in v0.5.319→v0.5.343 (likely an SSO/typed-array interaction in the bulk extraction series). Stale CLAUDE.md TypeScript-Parity-Status header still reads 26/28 — actual is 25/28 with array_methods/console_methods/typed_arrays failing."
+  },
+  "test_json_lazy_predicates": {
+    "status": "bug",
+    "reason": "`Array.isArray()` returns false on the result of `[...].map(fn)` (Perry: `map-result-isArray:false`, Node: `map-result-isArray:true`). The map-returned shape isn't being recognized by the isArray predicate — likely a missing tag check or the map fast path returns a different runtime type than the isArray fast path expects. Distinct from the typed-array gap; affects the hot Array.prototype.map → Array.isArray idiom that lazy-iterator libraries (lodash etc.) lean on."
   }
 }
