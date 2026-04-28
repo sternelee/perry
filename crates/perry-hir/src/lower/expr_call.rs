@@ -866,6 +866,14 @@ pub(super) fn lower_call(ctx: &mut LoweringContext, call: &ast::CallExpr) -> Res
                                                 return Ok(Expr::FsWriteFileSync(Box::new(path), Box::new(content)));
                                             }
                                         }
+                                        "appendFileSync" => {
+                                            if args.len() >= 2 {
+                                                let mut iter = args.into_iter();
+                                                let path = iter.next().unwrap();
+                                                let content = iter.next().unwrap();
+                                                return Ok(Expr::FsAppendFileSync(Box::new(path), Box::new(content)));
+                                            }
+                                        }
                                         "existsSync" => {
                                             if args.len() >= 1 {
                                                 return Ok(Expr::FsExistsSync(Box::new(args.into_iter().next().unwrap())));
