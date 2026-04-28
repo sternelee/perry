@@ -28,6 +28,7 @@ use super::{
     lower_notification_schedule, lower_perry_ui_table_call, native_module_lookup,
     perry_i18n_table_lookup, perry_plugin_instance_method_lookup, perry_plugin_table_lookup,
     perry_system_table_lookup, perry_ui_instance_method_lookup, perry_ui_table_lookup,
+    perry_updater_table_lookup,
 };
 
 pub(crate) fn lower_native_method_call(
@@ -304,6 +305,20 @@ pub(crate) fn lower_native_method_call(
         );
     }
 
+    // perry/updater dispatch: compareVersions, verifyHash, verifySignature,
+    // sentinel state helpers, install, relaunch.
+    if module == "perry/updater" && object.is_none() {
+        if let Some(sig) = perry_updater_table_lookup(method) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+        bail!(
+            "perry/updater: '{}' is not a known function (args: {}). \
+             Check types/perry/updater/index.d.ts for the supported API surface.",
+            method,
+            args.len()
+        );
+    }
+
     if module == "perry/ui"
         && object.is_none()
         && method != "App"
@@ -455,6 +470,12 @@ pub(crate) fn lower_native_method_call(
                 let src = lower_expr(ctx, &args[0])?;
                 let dst = lower_expr(ctx, &args[1])?;
                 ctx.block().call_void("js_fs_copy_file_sync", &[(DOUBLE, &src), (DOUBLE, &dst)]);
+                return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
+            }
+            "chmodSync" if args.len() >= 2 => {
+                let p = lower_expr(ctx, &args[0])?;
+                let m = lower_expr(ctx, &args[1])?;
+                ctx.block().call_void("js_fs_chmod_sync", &[(DOUBLE, &p), (DOUBLE, &m)]);
                 return Ok(double_literal(f64::from_bits(crate::nanbox::TAG_UNDEFINED)));
             }
             _ => {

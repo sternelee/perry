@@ -17,6 +17,7 @@ use crate::lower_array_method::lower_array_method;
 use perry_dispatch::{
     ArgKind as UiArgKind, MethodRow as UiSig, ReturnKind as UiReturnKind,
     PERRY_I18N_TABLE, PERRY_SYSTEM_TABLE, PERRY_UI_INSTANCE_TABLE, PERRY_UI_TABLE,
+    PERRY_UPDATER_TABLE,
 };
 
 // Tier 2.2 (v0.5.333-339): incremental extraction of `lower_call.rs`
@@ -411,6 +412,12 @@ pub(crate) fn lower_call(ctx: &mut FnCtx<'_>, callee: &Expr, args: &[Expr]) -> R
         // These arrive as ExternFuncRef because perry/system imports aren't
         // lowered to NativeMethodCall in the HIR.
         if let Some(sig) = perry_system_table_lookup(name) {
+            return lower_perry_ui_table_call(ctx, sig, args);
+        }
+        // perry/updater dispatch: same shape as perry/system. Imports from
+        // `perry/updater` arrive as ExternFuncRef; route by name to the
+        // perry_updater_* runtime symbols in `perry-updater`.
+        if let Some(sig) = perry_updater_table_lookup(name) {
             return lower_perry_ui_table_call(ctx, sig, args);
         }
         // Built-in runtime extern functions (`js_weakmap_set`,
@@ -3134,6 +3141,18 @@ pub(super) fn perry_system_table_lookup(method: &str) -> Option<&'static UiSig> 
 
 pub(super) fn perry_i18n_table_lookup(method: &str) -> Option<&'static UiSig> {
     PERRY_I18N_TABLE.iter().find(|s| s.method == method)
+}
+
+// =============================================================================
+// perry/updater dispatch table
+// =============================================================================
+
+/// Maps the TS exports from `types/perry/updater/index.d.ts` to their runtime
+/// symbols exported by the `core` and `desktop` modules of `perry-updater`.
+/// The download itself stays in TS (uses existing `fetch()`); this table only
+/// covers verify, install, relaunch, sentinel state, and path resolution.
+pub(super) fn perry_updater_table_lookup(method: &str) -> Option<&'static UiSig> {
+    PERRY_UPDATER_TABLE.iter().find(|s| s.method == method)
 }
 
 // =============================================================================

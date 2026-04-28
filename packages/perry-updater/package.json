@@ -1,0 +1,11 @@
+{
+  "name": "@perry/updater",
+  "version": "0.1.0",
+  "description": "Auto-updater for Perry desktop apps — manifest fetch, download, hash + Ed25519 verification, atomic install, rollback. Desktop-only (mobile updates go through App Store / Play Store).",
+  "main": "src/index.ts",
+  "perry": {
+    "nativeModule": true
+  },
+  "keywords": ["perry", "updater", "auto-update", "desktop"],
+  "license": "MIT"
+}

@@ -1139,6 +1139,7 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "curve25519-dalek-derive",
+ "digest",
  "fiat-crypto",
  "rustc_version 0.4.1",
  "subtle",
@@ -1551,6 +1552,30 @@ name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+
+[[package]]
+name = "ed25519"
+version = "2.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
+dependencies = [
+ "pkcs8",
+ "signature",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
+dependencies = [
+ "curve25519-dalek",
+ "ed25519",
+ "serde",
+ "sha2",
+ "subtle",
+ "zeroize",
+]
 
 [[package]]
 name = "ego-tree"
@@ -4347,6 +4372,7 @@ dependencies = [
  "clap",
  "cron",
  "dashmap 6.1.0",
+ "ed25519-dalek",
  "flate2",
  "futures-util",
  "governor",
@@ -4368,6 +4394,7 @@ dependencies = [
  "once_cell",
  "pbkdf2",
  "perry-runtime",
+ "perry-updater",
  "rand 0.8.5",
  "redis",
  "regex",
@@ -4542,6 +4569,20 @@ dependencies = [
  "perry-ui-testkit",
  "png 0.17.16",
  "windows",
+]
+
+[[package]]
+name = "perry-updater"
+version = "0.5.345"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "perry-runtime",
+ "semver 1.0.28",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

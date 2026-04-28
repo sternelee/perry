@@ -30,6 +30,7 @@ members = [
     "crates/perry-ui-test",
     "crates/perry-ui-testkit",
     "crates/perry-doc-tests",
+    "crates/perry-updater",
 ]
 # Only build platform-independent crates by default.
 # Platform-specific UI crates (perry-ui-macos, perry-ui-ios, etc.) must be built
@@ -52,6 +53,7 @@ default-members = [
     "crates/perry-codegen-glance",
     "crates/perry-codegen-wear-tiles",
     "crates/perry-codegen-wasm",
+    "crates/perry-updater",
 ]
 
 # Aggressive release optimizations for small, fast binaries
@@ -187,3 +189,4 @@ perry-codegen-glance = { path = "crates/perry-codegen-glance" }
 perry-codegen-wear-tiles = { path = "crates/perry-codegen-wear-tiles" }
 perry-codegen-wasm = { path = "crates/perry-codegen-wasm" }
 perry-ui-testkit = { path = "crates/perry-ui-testkit" }
+perry-updater = { path = "crates/perry-updater" }

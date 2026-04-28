@@ -154,6 +154,116 @@ pub extern "C" fn js_child_process_spawn_background(
     }
 }
 
+/// Spawn `cmd` fully detached from the parent process (orphaned — survives
+/// parent exit). Stdin/stdout/stderr go to the OS's null device.
+///
+/// This is the shared detach implementation used by both `js_child_process_spawn_detached`
+/// (the user-facing FFI) and `perry-updater`'s relaunch path. Keep the
+/// per-OS detachment logic (Unix `setsid`, Windows `DETACHED_PROCESS |
+/// CREATE_NEW_PROCESS_GROUP`) in this one place — it's subtle and easy to
+/// get wrong if duplicated.
+///
+/// Returns the spawned child's PID on success, or `None` on failure (caller
+/// chooses how to surface that — `-1.0`/`-1` etc.).
+pub fn spawn_detached_command(
+    cmd: &str,
+    args: &[&str],
+    cwd: Option<&str>,
+) -> Option<u32> {
+    let mut command = Command::new(cmd);
+    for a in args {
+        command.arg(a);
+    }
+    if let Some(d) = cwd {
+        command.current_dir(d);
+    }
+
+    // Detach stdio so the child doesn't inherit the parent's terminal.
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::null());
+    command.stderr(Stdio::null());
+
+    // Detach from process group so parent exit doesn't take the child with it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| {
+                // setsid creates a new session + new process group and detaches
+                // from the controlling terminal.
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS = 0x00000008, CREATE_NEW_PROCESS_GROUP = 0x00000200
+        command.creation_flags(0x00000008 | 0x00000200);
+    }
+
+    match command.spawn() {
+        Ok(child) => {
+            let pid = child.id();
+            // Drop the Child handle without wait() — the OS reaps it.
+            std::mem::drop(child);
+            Some(pid)
+        }
+        Err(_) => None,
+    }
+}
+
+/// Spawn a process fully detached from the parent (orphaned, survives parent exit).
+/// Used by the auto-updater to relaunch the new binary before this process exits.
+/// cmd_val: NaN-boxed string (command path)
+/// args_ptr: raw pointer to ArrayHeader of string args (0 = none)
+/// cwd_val: NaN-boxed string (working directory) or null/undefined for cwd inheritance
+/// Returns: pid as f64 on success, -1.0 on error
+#[no_mangle]
+pub extern "C" fn js_child_process_spawn_detached(
+    cmd_val: f64,
+    args_ptr: i64,
+    cwd_val: f64,
+) -> f64 {
+    unsafe {
+        let cmd_str = match extract_string_from_nanboxed(cmd_val) {
+            Some(s) => s,
+            None => return -1.0,
+        };
+
+        let mut owned_args: Vec<String> = Vec::new();
+        if args_ptr != 0 {
+            let arr_ptr = args_ptr as *const crate::array::ArrayHeader;
+            let args_len = (*arr_ptr).length as usize;
+            let args_data = (arr_ptr as *const u8)
+                .add(std::mem::size_of::<crate::array::ArrayHeader>()) as *const f64;
+            for i in 0..args_len {
+                let arg_val = *args_data.add(i);
+                if let Some(arg_str) = extract_string_from_nanboxed(arg_val) {
+                    owned_args.push(arg_str);
+                }
+            }
+        }
+        let args_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+
+        let cwd_bits = cwd_val.to_bits();
+        let cwd_owned = if cwd_bits != TAG_NULL_BITS && cwd_bits != TAG_UNDEFINED_BITS {
+            extract_string_from_nanboxed(cwd_val)
+        } else {
+            None
+        };
+        let cwd_ref: Option<&str> = cwd_owned.as_deref();
+
+        match spawn_detached_command(&cmd_str, &args_refs, cwd_ref) {
+            Some(pid) => pid as f64,
+            None => -1.0,
+        }
+    }
+}
+
 /// Get the status of a background process (non-blocking).
 /// Returns: object {alive: boolean, exitCode: number | null}
 #[no_mangle]

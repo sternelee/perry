@@ -53,6 +53,10 @@ pub fn module_to_features(module: &str) -> &'static [&'static str] {
         // getAddress, keccak256, …) that bottom out in sha3/keccak in
         // the crypto bucket.
         "ethers" => &["crypto"],
+        // perry/updater's signature verification routes through
+        // js_crypto_ed25519_verify in perry-stdlib::crypto, so importing
+        // perry/updater pulls in the crypto feature transitively.
+        "perry/updater" => &["crypto"],
 
         // ── Compression (zlib) ────────────────────────────────────────
         "zlib" => &["compression"],

@@ -317,6 +317,42 @@ pub extern "C" fn js_fs_unlink_sync(path_value: f64) -> i32 {
     }
 }
 
+/// Change file permissions (POSIX mode bits). Accepts NaN-boxed string path + numeric mode (e.g. 0o755).
+/// Returns 1 on success, 0 on error. No-op + success on Windows where POSIX modes don't apply.
+#[no_mangle]
+pub extern "C" fn js_fs_chmod_sync(path_value: f64, mode: f64) -> i32 {
+    unsafe {
+        let path_ptr = extract_string_ptr(path_value);
+        if path_ptr.is_null() {
+            return 0;
+        }
+
+        let len = (*path_ptr).byte_len as usize;
+        let data_ptr = (path_ptr as *const u8).add(std::mem::size_of::<StringHeader>());
+        let path_bytes = std::slice::from_raw_parts(data_ptr, len);
+
+        let path_str = match std::str::from_utf8(path_bytes) {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::Permissions::from_mode(mode as u32);
+            match fs::set_permissions(path_str, perms) {
+                Ok(_) => 1,
+                Err(_) => 0,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (path_str, mode);
+            1
+        }
+    }
+}
+
 /// Read a file synchronously as binary and return a Buffer (binary-safe, works for PNG etc.)
 /// Returns a *mut BufferHeader on success, null on error
 /// Accepts NaN-boxed string path

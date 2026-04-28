@@ -12,6 +12,11 @@
 //! - `compression` - zlib compression
 //! - `full` - Everything (default)
 
+// Re-export the updater crate so its #[no_mangle] FFI symbols are
+// retained in libperry_stdlib.a (Cargo would otherwise drop unused
+// rlib deps during the staticlib bundle step).
+pub use perry_updater;
+
 // Core modules - always available
 pub mod common;
 pub mod dotenv;

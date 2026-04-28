@@ -121,6 +121,8 @@ pub const NATIVE_MODULES: &[&str] = &[
     "worker_threads",
     // Perry threading primitives (parallelMap, spawn)
     "perry/thread",
+    // Perry auto-updater (compareVersions, verifyHash, installUpdate, …)
+    "perry/updater",
     // SQLite
     "better-sqlite3",
 ];
