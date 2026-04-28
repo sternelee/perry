@@ -194,6 +194,8 @@ pub fn declare_phase_b_strings(module: &mut LlModule) {
     module.declare_function("js_map_from_array", I64, &[I64]);
     module.declare_function("js_object_has_property", DOUBLE, &[DOUBLE, DOUBLE]);
     module.declare_function("js_fs_write_file_sync", I32, &[DOUBLE, DOUBLE]);
+    // fs.appendFileSync(path, content) — returns i32 status. Issue #226.
+    module.declare_function("js_fs_append_file_sync", I32, &[DOUBLE, DOUBLE]);
     module.declare_function("js_fs_exists_sync", I32, &[DOUBLE]);
     // fs.readFileSync(path, encoding) — returns a raw *mut StringHeader i64.
     module.declare_function("js_fs_read_file_sync", I64, &[DOUBLE]);

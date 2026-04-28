@@ -7022,6 +7022,27 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
             Ok(double_literal(0.0))
         }
 
+        Expr::FsAppendFileSync(path, content) => {
+            // Issue #226. JS and WASM backends already had arms for this
+            // HIR variant; the LLVM backend was missing the case here next
+            // to `FsWriteFileSync`. The runtime fn
+            // (`crates/perry-runtime/src/fs.rs::js_fs_append_file_sync`)
+            // is correct; the codegen + lowerer plumbing was the gap.
+            // The companion fix in `crates/perry-hir/src/lower/expr_call.rs`
+            // extends the namespace-import path (`fs.appendFileSync` via
+            // `import * as fs from "fs"`) — without that the variant
+            // never gets emitted for the common usage shape. Returns i32
+            // (1=success) which we discard; appendFileSync is void in JS.
+            let p = lower_expr(ctx, path)?;
+            let c = lower_expr(ctx, content)?;
+            let _ = ctx.block().call(
+                I32,
+                "js_fs_append_file_sync",
+                &[(DOUBLE, &p), (DOUBLE, &c)],
+            );
+            Ok(double_literal(0.0))
+        }
+
         // -------- NativeMethodCall (Phase H.1) --------
         // Perry's HIR uses NativeMethodCall { module, method, object, args }
         // for method calls on natively-typed receivers — specifically for
