@@ -26,8 +26,22 @@ const CB_ON_SUBMIT: u8 = 2;
 const CB_ON_HOVER: u8 = 3;
 const CB_ON_DOUBLE_CLICK: u8 = 4;
 
+/// Inspector UI — single-page HTML+JS app embedded at compile time. Served
+/// at `GET /` so users can open `http://localhost:7676/` in a browser
+/// and see a live tree view of their app's widgets, with per-widget
+/// metadata and a button to fire onClick. (Phase D step 1.) Uses only
+/// the existing JSON endpoints (`/widgets?tree=true`, `/value/:h`,
+/// `/click/:h`) — no new server-side surface needed for the read-only
+/// view. Live-edit (style mutation) lands in step 2 once the
+/// `/style/:h` endpoint is wired.
+const INSPECTOR_HTML: &str = include_str!("inspector_ui/index.html");
+
 fn json_header() -> Header {
     Header::from_bytes("Content-Type", "application/json").unwrap()
+}
+
+fn html_header() -> Header {
+    Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap()
 }
 
 fn cors_header() -> Header {
@@ -115,6 +129,14 @@ pub fn run_server(port: u16) {
         }
 
         let response = match (method, path) {
+            // GET / — inspector UI (Phase D step 1). Self-contained HTML+JS
+            // page; uses the JSON endpoints below to render a live tree.
+            (Method::Get, "/") | (Method::Get, "/inspector") | (Method::Get, "/index.html") => {
+                Response::from_data(INSPECTOR_HTML.as_bytes().to_vec())
+                    .with_header(html_header())
+                    .with_header(cors_header())
+            }
+
             // GET /widgets — list all registered widgets.
             // Supports ?label=, ?type= filters and ?tree=true for visibility/frame data.
             (Method::Get, "/widgets") if query_param(&full_url, "tree") == Some("true") => {

@@ -245,6 +245,14 @@ pub(crate) struct CrossModuleCtx {
     /// `stdlib` feature on when perry-stdlib depends on it, which
     /// excludes the cfg-gated stub in `perry-runtime/src/stdlib_stubs.rs`).
     pub needs_stdlib: bool,
+    /// Whether the project needs the Geisterhand inspector linked in.
+    /// Threaded through from `CompileOptions::needs_geisterhand` so the
+    /// entry-module init prelude can emit the `perry_geisterhand_start`
+    /// call site (which also pins the geisterhand server module against
+    /// `-dead_strip`, keeping `INSPECTOR_HTML` referenced).
+    pub needs_geisterhand: bool,
+    /// Port the Geisterhand inspector listens on when `needs_geisterhand`.
+    pub geisterhand_port: u16,
     /// Compile-time constant values for module globals. Maps LocalId → f64
     /// for variables like `__platform__` whose value is known at compile time.
     /// Used by `lower_if` to constant-fold platform checks and skip emitting
@@ -615,6 +623,8 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
         }),
         imported_vars: opts.imported_vars,
         needs_stdlib: opts.needs_stdlib,
+        needs_geisterhand: opts.needs_geisterhand,
+        geisterhand_port: opts.geisterhand_port,
         compile_time_constants,
         clamp3_functions: hir.functions.iter()
             .filter_map(|f| crate::collectors::detect_clamp3(f).map(|_| f.id))
@@ -2424,6 +2434,13 @@ fn compile_module_entry(
         // and the first GC cycle after connect() would free them (issue #54).
         let ic_base = llmod.ic_counter;
     let buffer_alias_base = llmod.buffer_alias_counter;
+        // Declare `perry_geisterhand_start` BEFORE `main` is created — once
+        // `main` holds a mutable borrow on `llmod`, no further
+        // `llmod.declare_function` calls are allowed. Inline (not in
+        // `runtime_decls`) because most builds don't link geisterhand.
+        if cross_module.needs_geisterhand && !is_dylib {
+            llmod.declare_function("perry_geisterhand_start", VOID, &[I32]);
+        }
         let main = if is_dylib {
             llmod.define_function("perry_module_init", VOID, vec![])
         } else {
@@ -2445,6 +2462,25 @@ fn compile_module_entry(
             if cross_module.needs_stdlib {
                 blk.call_void("js_stdlib_init_dispatch", &[]);
             }
+            // Start the Geisterhand HTTP inspector if requested. The
+            // port comes from `--geisterhand-port` (default 7676). Calling
+            // `perry_geisterhand_start` here also pins the geisterhand
+            // server module against macOS's lazy-load `-dead_strip`, so
+            // the inspector_ui HTML embedded via `include_str!` makes it
+            // into the final binary instead of being eliminated as
+            // unreferenced rodata.
+        }
+        if !is_dylib && cross_module.needs_geisterhand {
+            // Function was declared above (before `main` claimed
+            // `&mut llmod`). Lifetime: `port_str` lives for the body of
+            // this block, long enough for `call_void` to consume the
+            // `&str` reference.
+            let port_str = cross_module.geisterhand_port.to_string();
+            let blk = main.block_mut(0).unwrap();
+            blk.call_void("perry_geisterhand_start", &[(I32, port_str.as_str())]);
+        }
+        {
+            let blk = main.block_mut(0).unwrap();
             // Entry module's own string pool first.
             blk.call_void(&strings_init_name, &[]);
             // Then every non-entry module's init in order. Each

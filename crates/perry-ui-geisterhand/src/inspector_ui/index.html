@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perry Inspector</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181c23;
+    --border: #262c36;
+    --fg: #e2e6ec;
+    --muted: #8a93a3;
+    --accent: #5c8df6;
+    --hit: #2a3344;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    color: var(--fg);
+    background: var(--bg);
+    display: grid;
+    grid-template-rows: 38px 1fr;
+    grid-template-columns: 1fr;
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    gap: 12px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  header .status {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  header .spacer { flex: 1; }
+  header button {
+    background: var(--hit);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  header button:hover { border-color: var(--accent); color: var(--accent); }
+  main {
+    display: grid;
+    grid-template-columns: 360px 1fr;
+    overflow: hidden;
+  }
+  aside {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    overflow: auto;
+    padding: 8px 0;
+  }
+  section {
+    overflow: auto;
+    padding: 16px 20px;
+  }
+  .tree-row {
+    padding: 4px 12px 4px 20px;
+    cursor: pointer;
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    white-space: nowrap;
+    border-left: 2px solid transparent;
+  }
+  .tree-row:hover { background: var(--hit); }
+  .tree-row.selected {
+    background: var(--hit);
+    border-left-color: var(--accent);
+  }
+  .tree-row .kind {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .tree-row .label {
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+  .tree-row .meta {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .tree-row.hidden .kind,
+  .tree-row.hidden .label {
+    text-decoration: line-through;
+    opacity: 0.5;
+  }
+  .empty {
+    padding: 16px 20px;
+    color: var(--muted);
+    font-style: italic;
+  }
+  h2 {
+    margin: 0 0 12px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .kv {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 4px 16px;
+    margin-bottom: 18px;
+  }
+  .kv dt {
+    color: var(--muted);
+  }
+  .kv dd {
+    margin: 0;
+    color: var(--fg);
+    word-break: break-word;
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin: 14px 0 24px;
+  }
+  .actions button {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 12px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .actions button:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .actions button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 12px;
+    overflow: auto;
+    font-size: 12px;
+    color: var(--fg);
+    margin: 0 0 18px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Perry Inspector</h1>
+  <span class="status" id="status">connecting…</span>
+  <span class="spacer"></span>
+  <span class="status" id="auto">auto-refresh: on</span>
+  <button id="toggle-auto">pause</button>
+  <button id="refresh">refresh</button>
+</header>
+<main>
+  <aside id="tree"></aside>
+  <section id="detail">
+    <div class="empty">Select a widget on the left to inspect.</div>
+  </section>
+</main>
+<script>
+"use strict";
+
+const state = {
+  selected: null,
+  widgets: [],
+  autoRefresh: true,
+  intervalMs: 1500,
+};
+
+const $status = document.getElementById("status");
+const $auto = document.getElementById("auto");
+const $tree = document.getElementById("tree");
+const $detail = document.getElementById("detail");
+const $toggle = document.getElementById("toggle-auto");
+const $refresh = document.getElementById("refresh");
+
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const KIND_NAMES = {
+  0: "Button", 1: "TextField", 2: "Slider", 3: "Toggle",
+  4: "Picker", 5: "Menu", 6: "Shortcut", 7: "Table", 8: "ScrollView",
+};
+
+function kindName(w) {
+  if (w.widget_type === undefined || w.widget_type === null) return w.kind || "Widget";
+  return KIND_NAMES[w.widget_type] || `Type${w.widget_type}`;
+}
+
+function rowFor(w) {
+  const k = kindName(w);
+  const lab = w.label || w.value || "";
+  const hidden = w.hidden ? " hidden" : "";
+  const meta = w.frame
+    ? `${Math.round(w.frame.w)}×${Math.round(w.frame.h)}`
+    : "";
+  return `<div class="tree-row${hidden}" data-handle="${w.handle}">
+    <span class="kind">${escapeHtml(k)}</span>
+    <span class="label">${escapeHtml(lab)}</span>
+    <span class="meta">${escapeHtml(meta)}</span>
+  </div>`;
+}
+
+async function fetchTree() {
+  try {
+    const r = await fetch("/widgets?tree=true");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const arr = await r.json();
+    state.widgets = Array.isArray(arr) ? arr : [];
+    $status.textContent = `${state.widgets.length} widget${state.widgets.length === 1 ? "" : "s"}`;
+    renderTree();
+    if (state.selected !== null) {
+      const sel = state.widgets.find(w => w.handle === state.selected);
+      if (sel) renderDetail(sel);
+    }
+  } catch (e) {
+    $status.textContent = `error: ${e.message}`;
+  }
+}
+
+function renderTree() {
+  if (!state.widgets.length) {
+    $tree.innerHTML = '<div class="empty">No widgets yet.</div>';
+    return;
+  }
+  $tree.innerHTML = state.widgets.map(rowFor).join("");
+  for (const row of $tree.querySelectorAll(".tree-row")) {
+    if (Number(row.dataset.handle) === state.selected) row.classList.add("selected");
+    row.addEventListener("click", () => {
+      state.selected = Number(row.dataset.handle);
+      renderTree();
+      const w = state.widgets.find(x => x.handle === state.selected);
+      if (w) renderDetail(w);
+    });
+  }
+}
+
+async function fetchValue(handle) {
+  try {
+    const r = await fetch(`/value/${handle}`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j.value;
+  } catch {
+    return null;
+  }
+}
+
+async function renderDetail(w) {
+  const k = kindName(w);
+  const liveValue = await fetchValue(w.handle);
+  const frame = w.frame
+    ? `x=${Math.round(w.frame.x)} y=${Math.round(w.frame.y)} w=${Math.round(w.frame.w)} h=${Math.round(w.frame.h)}`
+    : "(layout not yet resolved)";
+  const isClickable = w.widget_type === 0 || w.widget_type === undefined;
+  $detail.innerHTML = `
+    <h2>${escapeHtml(k)} (handle ${w.handle})</h2>
+    <dl class="kv">
+      <dt>label</dt><dd>${escapeHtml(w.label ?? "")}</dd>
+      <dt>frame</dt><dd>${escapeHtml(frame)}</dd>
+      <dt>hidden</dt><dd>${w.hidden ? "yes" : "no"}</dd>
+      <dt>enabled</dt><dd>${w.enabled === false ? "no" : "yes"}</dd>
+      <dt>value</dt><dd>${liveValue === null || liveValue === undefined ? "—" : escapeHtml(liveValue)}</dd>
+    </dl>
+    <div class="actions">
+      <button data-action="click" ${isClickable ? "" : "disabled"}>fire onClick</button>
+      <button data-action="copy">copy JSON</button>
+    </div>
+    <h2>raw</h2>
+    <pre>${escapeHtml(JSON.stringify(w, null, 2))}</pre>
+  `;
+  $detail.querySelector('[data-action="click"]')?.addEventListener("click", async () => {
+    try {
+      const r = await fetch(`/click/${w.handle}`, { method: "POST" });
+      $status.textContent = r.ok ? `clicked ${w.handle}` : `click failed: ${r.status}`;
+    } catch (e) {
+      $status.textContent = `click failed: ${e.message}`;
+    }
+  });
+  $detail.querySelector('[data-action="copy"]')?.addEventListener("click", () => {
+    navigator.clipboard?.writeText(JSON.stringify(w, null, 2));
+    $status.textContent = "copied";
+  });
+}
+
+let timer = null;
+function startTimer() {
+  stopTimer();
+  if (state.autoRefresh) {
+    timer = setInterval(fetchTree, state.intervalMs);
+  }
+}
+function stopTimer() {
+  if (timer) { clearInterval(timer); timer = null; }
+}
+
+$toggle.addEventListener("click", () => {
+  state.autoRefresh = !state.autoRefresh;
+  $auto.textContent = `auto-refresh: ${state.autoRefresh ? "on" : "off"}`;
+  $toggle.textContent = state.autoRefresh ? "pause" : "resume";
+  startTimer();
+});
+$refresh.addEventListener("click", fetchTree);
+
+fetchTree();
+startTimer();
+</script>
+</body>
+</html>
