@@ -82,5 +82,9 @@
   "test_issue_227_array_buffer_bytes": {
     "status": "ci-env",
     "reason": "Regression test added by #227 fix (response.arrayBuffer() body bytes — js_response_array_buffer copy-into-BufferHeader + js_uint8array_new buffer-source detection branch). Same compile-fail-on-CI / passes-locally pattern as the rest of the Buffer/Uint8Array family (test_gap_buffer_ops, test_buffer_small_alloc, test_inline_uint8array_param, etc.) — macOS-14 runner SDK/linker gap. The fix itself is verified locally byte-for-byte against `node --experimental-strip-types`; cargo test runtime+stdlib clean."
+  },
+  "test_gap_fetch_response": {
+    "status": "ci-env",
+    "reason": "PR #232 (issue #227 follow-up) added `Buffer.from(ab).toString(\"utf8\")` byte-level assertions to the previously-passing `arrayBuffer byteLength: 5` check. The Buffer pull-in trips the same macOS-14 SDK/linker gap as the rest of the Buffer family (test_gap_buffer_ops, test_buffer_small_alloc, test_issue_227_array_buffer_bytes, etc.). Compiles and runs byte-for-byte clean on local macOS 15.x+; only the macOS-14 GitHub runner is affected."
   }
 }
