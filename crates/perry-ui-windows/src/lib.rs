@@ -79,6 +79,9 @@ pub mod layout;
 
 pub mod screenshot;
 
+#[cfg(feature = "geisterhand")]
+pub mod geisterhand_style;
+
 // =============================================================================
 // FFI exports — these are the functions called from codegen-generated code
 // =============================================================================

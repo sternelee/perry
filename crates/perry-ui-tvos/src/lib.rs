@@ -10,6 +10,9 @@ pub mod state;
 pub mod websocket;
 pub mod widgets;
 
+#[cfg(feature = "geisterhand")]
+pub mod geisterhand_style;
+
 /// Debug logging macro that writes to a file (NSLog/eprintln don't work reliably on iOS)
 #[macro_export]
 macro_rules! ws_log {
