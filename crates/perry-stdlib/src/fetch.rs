@@ -1194,12 +1194,9 @@ pub unsafe extern "C" fn js_blob_slice(
     type_ptr: *const StringHeader,
 ) -> f64 {
     let id = handle as usize;
-    let (body, original_type) = {
+    let body: Vec<u8> = {
         let guard = BLOB_REGISTRY.lock().unwrap();
-        match guard.get(&id) {
-            Some(b) => (b.body.clone(), b.content_type.clone()),
-            None => (Vec::new(), String::new()),
-        }
+        guard.get(&id).map(|b| b.body.clone()).unwrap_or_default()
     };
     let len = body.len() as i64;
     let normalize = |v: f64, default: i64| -> i64 {
@@ -1217,10 +1214,13 @@ pub unsafe extern "C" fn js_blob_slice(
     let e = normalize(end, len);
     let (lo, hi) = if e < s { (s, s) } else { (s, e) };
     let slice = body[lo as usize..hi as usize].to_vec();
+    // Per WHATWG Blob spec: when `contentType` is absent, the new blob's
+    // type is the empty string — NOT inherited from the original. Same
+    // applies when the caller's type string fails to decode.
     let new_type = if type_ptr.is_null() {
-        original_type
+        String::new()
     } else {
-        string_from_header(type_ptr).unwrap_or(original_type)
+        string_from_header(type_ptr).unwrap_or_default()
     };
     alloc_blob(BlobData { body: slice, content_type: new_type }) as f64
 }

@@ -3173,13 +3173,11 @@ pub(super) fn lower_fetch_native_method(
                 return Ok(Some(nanbox_pointer_inline(blk, &promise)));
             }
             "slice" => {
-                // slice(start?, end?, type?) — missing numeric args use NaN
-                // as sentinel; missing type uses null pointer (0). Runtime
-                // `js_blob_slice` checks `is_nan()` / `type_ptr.is_null()`
-                // to apply WHATWG defaults.
-                // Missing numeric args use canonical f64::NAN as sentinel;
-                // runtime `js_blob_slice` checks `is_nan()` to apply WHATWG
-                // defaults (start=0, end=len).
+                // slice(start?, end?, type?) — missing numeric args use
+                // canonical f64::NAN as sentinel; missing type uses null
+                // pointer (0). Runtime `js_blob_slice` checks `is_nan()`
+                // / `type_ptr.is_null()` to apply WHATWG defaults
+                // (start=0, end=len, type="").
                 let start = if !args.is_empty() {
                     lower_expr(ctx, &args[0])?
                 } else {
