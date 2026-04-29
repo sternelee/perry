@@ -26,5 +26,5 @@
   "test_gap_typed_arrays": {
     "status": "known_limitation",
     "reason": "Categorical typed-array gap documented in CLAUDE.md TypeScript-Parity-Status header (`typed_arrays (categorical gap)`). Perry's TypedArray instance shapes (Int8Array / Uint8Array / Int16Array / Uint16Array / Int32Array / Uint32Array / Float32Array / Float64Array) don't fully cover the prototype surface that JS code expects. Same family as `test_gap_array_methods`'s `.at()` issue. Tracked separately as the broader TypedArray completeness work."
-  },
+  }
 }
