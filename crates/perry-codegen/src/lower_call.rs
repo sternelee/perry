@@ -2477,7 +2477,78 @@ fn apply_field_initializers_recursive(
         // resolves against the correct class.
         ctx.class_stack.push(class_name_in_chain.clone());
         for (prop, init_expr) in init_pairs {
-            // Build a PropertySet { this, prop, init_expr } and lower.
+            // Issue #263: arrow-function class fields like
+            // `arrowField = () => this.value` need their reserved `this`
+            // capture slot patched with the constructor's `this` AFTER
+            // the closure is built — same pattern `lower_object_literal`
+            // already uses for object-literal methods. Without this, the
+            // arrow's body reads slot `auto_captures.len()` of the
+            // closure's capture array (initialized to 0.0 by the
+            // closure-build site at expr.rs:3294-3304), then `this.value`
+            // dereferences address 0 and SIGSEGVs.
+            if let Expr::Closure {
+                params: cparams,
+                body: cbody,
+                captures: ccaps,
+                captures_this: true,
+                ..
+            } = &init_expr {
+                let auto_caps = crate::type_analysis::compute_auto_captures(ctx, cparams, cbody, ccaps);
+                let this_idx = auto_caps.len() as u32;
+
+                // Lower the closure expression to a NaN-boxed pointer.
+                let closure_val = lower_expr(ctx, &init_expr)?;
+
+                // Read the current `this` from the constructor's this_stack.
+                let this_val = if let Some(slot) = ctx.this_stack.last().cloned() {
+                    ctx.block().load(DOUBLE, &slot)
+                } else {
+                    double_literal(0.0)
+                };
+
+                // Patch the closure's reserved this-slot in-place, then
+                // store the closure as the field via the runtime FFI.
+                let blk = ctx.block();
+                let bits = blk.bitcast_double_to_i64(&closure_val);
+                let closure_handle = blk.and(I64, &bits, POINTER_MASK_I64);
+                let idx_str = this_idx.to_string();
+                blk.call_void(
+                    "js_closure_set_capture_f64",
+                    &[
+                        (I64, &closure_handle),
+                        (I32, &idx_str),
+                        (DOUBLE, &this_val),
+                    ],
+                );
+
+                // Now store the patched closure as the field. Emit the
+                // property-write call directly, mirroring PropertySet's
+                // codegen path (expr.rs:2559+) — we can't go through
+                // `lower_expr` again because that would re-lower the
+                // closure expression and produce a fresh, unpatched
+                // closure pointer.
+                let key_idx = ctx.strings.intern(&prop);
+                let key_handle_global = format!("@{}", ctx.strings.entry(key_idx).handle_global);
+                let blk = ctx.block();
+                let key_box = blk.load(DOUBLE, &key_handle_global);
+                let key_bits = blk.bitcast_double_to_i64(&key_box);
+                let key_raw = blk.and(I64, &key_bits, POINTER_MASK_I64);
+                let this_bits = blk.bitcast_double_to_i64(&this_val);
+                let this_raw = blk.and(I64, &this_bits, POINTER_MASK_I64);
+                blk.call_void(
+                    "js_object_set_field_by_name",
+                    &[
+                        (I64, &this_raw),
+                        (I64, &key_raw),
+                        (DOUBLE, &closure_val),
+                    ],
+                );
+                continue;
+            }
+
+            // Non-closure (or non-this-capturing closure) initializer:
+            // build a PropertySet { this, prop, init_expr } and lower
+            // through the existing path.
             let set_expr = Expr::PropertySet {
                 object: Box::new(Expr::This),
                 property: prop,
