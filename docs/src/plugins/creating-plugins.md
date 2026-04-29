@@ -1,32 +1,13 @@
 # Creating Plugins
 
-> **Status: wired** ([#189](https://github.com/PerryTS/perry/issues/189) closed). See [Plugin System Overview — Status](overview.md) for the full surface. Snippets below are still kept as `text` fences because the doc-tests harness doesn't yet build + load a stub plugin end-to-end; a real project with a plugin shared library will compile and link.
+> **Status: wired** ([#189](https://github.com/PerryTS/perry/issues/189) closed). See [Plugin System Overview — Status](overview.md) for the full surface. Snippets below are compile-link verified by the doc-tests harness against [`docs/examples/plugins/plugin_snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/plugins/plugin_snippets.ts) and [`docs/examples/plugins/host_snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/plugins/host_snippets.ts).
 
 Build Perry plugins as shared libraries that extend host applications.
 
 ## Step 1: Write the Plugin
 
-```text
-// counter-plugin.ts
-let count = 0;
-
-export function activate(api: PluginAPI) {
-  api.setMetadata("counter", "1.0.0", "Counts hook invocations");
-
-  api.registerHook("onRequest", (data) => {
-    count++;
-    console.log(`Request #${count}`);
-    return data;
-  });
-
-  api.registerTool("getCount", () => {
-    return count;
-  });
-}
-
-export function deactivate() {
-  console.log(`Total requests processed: ${count}`);
-}
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:counter-plugin}}
 ```
 
 ## Step 2: Compile as Shared Library
@@ -45,59 +26,58 @@ Perry automatically:
 
 ## Step 3: Load from Host
 
-```text
-// host-app.ts
-import { loadPlugin, emitHook, invokeTool, discoverPlugins } from "perry/plugin";
+```typescript
+{{#include ../../examples/plugins/host_snippets.ts:imports}}
 
-// Load a specific plugin
-loadPlugin("./counter-plugin.dylib");
+{{#include ../../examples/plugins/host_snippets.ts:load}}
 
-// Or discover plugins in a directory
-discoverPlugins("./plugins/");
+{{#include ../../examples/plugins/host_snippets.ts:discover}}
 
-// Use the plugin
-emitHook("onRequest", { path: "/api/users" });
-const count = invokeTool("getCount", {});
-console.log(`Processed ${count} requests`);
+{{#include ../../examples/plugins/host_snippets.ts:emit-hook}}
+
+{{#include ../../examples/plugins/host_snippets.ts:invoke-tool}}
 ```
 
 ## Plugin API Reference
 
-The `api` object passed to `activate()` provides:
+The `api: PluginApi` passed to `activate()` provides:
 
 ### Metadata
 
-```text
-api.setMetadata(name: string, version: string, description: string)
+```typescript
+api.setMetadata(name: string, version: string, description: string): void
 ```
 
 ### Hooks
 
-```text
-api.registerHook(name: string, callback: (data: any) => any, priority?: number)
+```typescript
+api.registerHook(name: string, handler: (ctx: unknown) => unknown): void
+api.registerHookEx(name: string, handler: (ctx: unknown) => unknown, priority: number, mode: number): void
 ```
 
-Hooks are called in priority order (lower number = called first).
+`registerHook` defaults to priority 10 / mode 0 (filter). Use `registerHookEx`
+for explicit priority and mode (0=filter, 1=action, 2=waterfall). Lower
+priority numbers run first.
 
 ### Tools
 
-```text
-api.registerTool(name: string, callback: (args: any) => any)
+```typescript
+api.registerTool(name: string, description: string, handler: (args: unknown) => unknown): void
 ```
 
 Tools are invoked by name from the host.
 
 ### Configuration
 
-```text
+```typescript
 const value = api.getConfig(key: string)  // Read host-provided config
 ```
 
 ### Events
 
-```text
-api.on(event: string, handler: (data: any) => void)  // Listen for events
-api.emit(event: string, data: any)                     // Emit to other plugins
+```typescript
+api.on(event: string, handler: (data: unknown) => void): void  // Listen for events
+api.emit(event: string, data: unknown): void                    // Emit to other plugins
 ```
 
 ## Next Steps

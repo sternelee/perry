@@ -1,6 +1,6 @@
 # Hooks & Events
 
-> **Status: wired** ([#189](https://github.com/PerryTS/perry/issues/189) closed). `api.registerHook`, `api.on`, `emitHook`, `emitEvent`, `invokeTool` all dispatch to `crates/perry-runtime/src/plugin.rs`. Snippets below are still `text` fences pending an end-to-end doc-tests stub plugin.
+> **Status: wired** ([#189](https://github.com/PerryTS/perry/issues/189) closed). `api.registerHook`, `api.on`, `emitHook`, `emitEvent`, `invokeTool` all dispatch to `crates/perry-runtime/src/plugin.rs`. Snippets below are compile-link verified against [`docs/examples/plugins/{plugin,host}_snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/plugins/).
 
 Perry plugins communicate through hooks, events, and tools.
 
@@ -12,46 +12,38 @@ Hooks support three execution modes:
 
 Each plugin receives data and returns (possibly modified) data. The output of one plugin becomes the input of the next:
 
-```text
-api.registerHook("transform", (data) => {
-  data.content = data.content.toUpperCase();
-  return data; // Returned data goes to next plugin
-});
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:hook-filter}}
 ```
 
 ### Action Mode
 
-Plugins receive data but return value is ignored. Used for side effects:
+Plugins receive data but return value is ignored. Used for side effects. Pass
+`mode = 1` to `registerHookEx`:
 
-```text
-api.registerHook("onSave", (data) => {
-  console.log(`Saved: ${data.path}`);
-  // Return value ignored
-});
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:hook-action}}
 ```
 
 ### Waterfall Mode
 
-Like filter mode, but specifically for accumulating/building up a result through the chain:
+Like filter mode, but specifically for accumulating/building up a result
+through the chain. Pass `mode = 2` to `registerHookEx`:
 
-```text
-api.registerHook("buildMenu", (items) => {
-  items.push({ label: "My Plugin Action", action: () => {} });
-  return items;
-});
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:hook-waterfall}}
 ```
 
 ## Hook Priority
 
-Lower priority numbers run first:
+Lower priority numbers run first. Use `registerHookEx` for explicit priority
+and mode:
 
-```text
-api.registerHook("beforeSave", validate, 10);   // Runs first
-api.registerHook("beforeSave", transform, 20);   // Runs second
-api.registerHook("beforeSave", log, 100);         // Runs last
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:hook-priority}}
 ```
 
-Default priority is 50.
+Default priority is 10 (the value `registerHook` passes implicitly).
 
 ## Event Bus
 
@@ -59,73 +51,51 @@ Plugins can communicate with each other through events:
 
 ### Emitting Events
 
-```text
-// From a plugin
-api.emit("dataUpdated", { source: "my-plugin", records: 42 });
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:emit-from-plugin}}
+```
 
-// From the host
-import { emitEvent } from "perry/plugin";
-emitEvent("dataUpdated", { source: "host", records: 100 });
+```typescript
+{{#include ../../examples/plugins/host_snippets.ts:emit-event}}
 ```
 
 ### Listening for Events
 
-```text
-api.on("dataUpdated", (data) => {
-  console.log(`${data.source} updated ${data.records} records`);
-});
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:on-event}}
 ```
 
 ## Tools
 
-Plugins register callable tools:
+Plugins register callable tools (note the 3-arg shape: `name`, `description`,
+`handler`):
 
-```text
-// Plugin registers a tool
-api.registerTool("formatCode", (args) => {
-  return formatSource(args.code, args.language);
-});
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:register-tool}}
 ```
 
-```text
-// Host invokes the tool
-import { invokeTool } from "perry/plugin";
-
-const formatted = invokeTool("formatCode", {
-  code: "const x=1",
-  language: "typescript",
-});
+```typescript
+{{#include ../../examples/plugins/host_snippets.ts:invoke-tool}}
 ```
 
 ## Configuration
 
-Hosts can pass configuration to plugins:
+Hosts can pass configuration to plugins via `setPluginConfig`:
 
-```text
-// Host sets config
-import { setConfig } from "perry/plugin";
-setConfig("theme", "dark");
-setConfig("maxRetries", "3");
+```typescript
+{{#include ../../examples/plugins/host_snippets.ts:init}}
 ```
 
-```text
-// Plugin reads config
-export function activate(api: PluginAPI) {
-  const theme = api.getConfig("theme");     // "dark"
-  const retries = api.getConfig("maxRetries"); // "3"
-}
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:read-config}}
 ```
 
 ## Introspection
 
 Query loaded plugins and their registrations:
 
-```text
-import { listPlugins, listHooks, listTools } from "perry/plugin";
-
-const plugins = listPlugins();  // [{ name, version, description }]
-const hooks = listHooks();      // [{ name, pluginName, priority }]
-const tools = listTools();      // [{ name, pluginName }]
+```typescript
+{{#include ../../examples/plugins/host_snippets.ts:introspect}}
 ```
 
 ## Next Steps

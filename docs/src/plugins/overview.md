@@ -1,6 +1,6 @@
 # Plugin System Overview
 
-> **Status: wired.** Both receiver-less calls (`loadPlugin`, `listPlugins`, `emitHook`, `invokeTool`, ...) and `PluginApi` instance methods (`api.registerHook`, `api.registerTool`, ...) dispatch through `crates/perry-codegen/src/lower_call.rs::PERRY_PLUGIN_TABLE` and `PERRY_PLUGIN_INSTANCE_TABLE` to the runtime FFI in `crates/perry-runtime/src/plugin.rs`. TypeScript surface lives in `types/perry/plugin/index.d.ts`. The snippets below are still kept as `text` fences because the doc-tests harness doesn't yet load a stub plugin end-to-end, but a real project that builds a plugin shared library and references it from a host program will compile, link, and run. Closed via [#189](https://github.com/PerryTS/perry/issues/189).
+> **Status: wired** ([#189](https://github.com/PerryTS/perry/issues/189) closed). Receiver-less calls (`loadPlugin`, `listPlugins`, `emitHook`, `invokeTool`, ...) and `PluginApi` instance methods (`api.registerHook`, `api.registerTool`, ...) dispatch through `crates/perry-codegen/src/lower_call.rs::PERRY_PLUGIN_TABLE` and `PERRY_PLUGIN_INSTANCE_TABLE`. TypeScript surface lives in `types/perry/plugin/index.d.ts`. Host-side snippets below are compile-link verified by the doc-tests harness against [`docs/examples/plugins/host_snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/plugins/host_snippets.ts); plugin-side `activate(api)` snippets against [`docs/examples/plugins/plugin_snippets.ts`](https://github.com/PerryTS/perry/blob/main/docs/examples/plugins/plugin_snippets.ts).
 
 Perry supports native plugins as shared libraries (`.dylib`/`.so`). Plugins extend Perry applications with custom hooks, tools, services, and routes.
 
@@ -26,24 +26,8 @@ Host
 
 ### Plugin (compiled with `--output-type dylib`)
 
-```text
-// my-plugin.ts
-export function activate(api: PluginAPI) {
-  api.setMetadata("my-plugin", "1.0.0", "A sample plugin");
-
-  api.registerHook("beforeSave", (data) => {
-    console.log("About to save:", data);
-    return data; // Return modified data (filter mode)
-  });
-
-  api.registerTool("greet", (args) => {
-    return `Hello, ${args.name}!`;
-  });
-}
-
-export function deactivate() {
-  console.log("Plugin deactivated");
-}
+```typescript
+{{#include ../../examples/plugins/plugin_snippets.ts:counter-plugin}}
 ```
 
 ```bash
@@ -52,21 +36,16 @@ perry my-plugin.ts --output-type dylib -o my-plugin.dylib
 
 ### Host Application
 
-```text
-import { loadPlugin, emitHook, invokeTool, listPlugins } from "perry/plugin";
+```typescript
+{{#include ../../examples/plugins/host_snippets.ts:imports}}
 
-loadPlugin("./my-plugin.dylib");
+{{#include ../../examples/plugins/host_snippets.ts:load}}
 
-// List loaded plugins
-const plugins = listPlugins();
-console.log(plugins); // [{ name: "my-plugin", version: "1.0.0", ... }]
+{{#include ../../examples/plugins/host_snippets.ts:introspect}}
 
-// Emit a hook
-const result = emitHook("beforeSave", { content: "..." });
+{{#include ../../examples/plugins/host_snippets.ts:emit-hook}}
 
-// Invoke a tool
-const greeting = invokeTool("greet", { name: "Perry" });
-console.log(greeting); // "Hello, Perry!"
+{{#include ../../examples/plugins/host_snippets.ts:invoke-tool}}
 ```
 
 ## Plugin ABI
