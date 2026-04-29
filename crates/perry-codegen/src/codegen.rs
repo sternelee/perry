@@ -838,8 +838,28 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             for m in &c.methods {
                 collect_closures_in_stmts(&m.body, &mut seen, &mut closures);
             }
+            for (_, getter_fn) in &c.getters {
+                collect_closures_in_stmts(&getter_fn.body, &mut seen, &mut closures);
+            }
+            for (_, setter_fn) in &c.setters {
+                collect_closures_in_stmts(&setter_fn.body, &mut seen, &mut closures);
+            }
+            for sm in &c.static_methods {
+                collect_closures_in_stmts(&sm.body, &mut seen, &mut closures);
+            }
             if let Some(ctor) = &c.constructor {
                 collect_closures_in_stmts(&ctor.body, &mut seen, &mut closures);
+            }
+            // Class field initializers (`private foo = (x) => this.bar(x)`) are
+            // hoisted into the constructor at codegen time via
+            // `apply_field_initializers_recursive`, so any closure literal inside
+            // an `init` expression gets a `js_closure_alloc(@perry_closure_*)`
+            // emission. We must walk the inits too, otherwise the body never
+            // gets compiled and clang errors with "use of undefined value" (#261).
+            for field in &c.fields {
+                if let Some(init) = &field.init {
+                    collect_closures_in_stmts(&[perry_hir::Stmt::Expr(init.clone())], &mut seen, &mut closures);
+                }
             }
         }
         collect_closures_in_stmts(&hir.init, &mut seen, &mut closures);
@@ -1252,6 +1272,17 @@ pub fn compile_module(hir: &HirModule, opts: CompileOptions) -> Result<Vec<u8>> 
             }
             if let Some(ctor) = &c.constructor {
                 collect_closures_in_stmts(&ctor.body, &mut seen, &mut closures);
+            }
+            // Class field initializers (`private foo = (x) => this.bar(x)`) are
+            // hoisted into the constructor at codegen time via
+            // `apply_field_initializers_recursive`, so any closure literal inside
+            // an `init` expression gets a `js_closure_alloc(@perry_closure_*)`
+            // emission. We must walk the inits too, otherwise the body never
+            // gets compiled and clang errors with "use of undefined value" (#261).
+            for field in &c.fields {
+                if let Some(init) = &field.init {
+                    collect_closures_in_stmts(&[perry_hir::Stmt::Expr(init.clone())], &mut seen, &mut closures);
+                }
             }
         }
         collect_closures_in_stmts(&hir.init, &mut seen, &mut closures);

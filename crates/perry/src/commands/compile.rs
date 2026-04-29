@@ -430,11 +430,18 @@ pub fn run_with_parse_cache(
         OutputFormat::Json => {}
     }
 
+    // Canonicalize the input path first so its `.parent()` is an absolute directory.
+    // Without this, a bare filename like `perry demo.ts` produced `Path::new("").parent()`
+    // → fallback `"."`, and the walk-up loops below (package.json + perry.toml discovery)
+    // immediately terminated because `PathBuf::from(".").pop()` returns false. That meant
+    // perry.compilePackages / perry.packageAliases declared in a parent package.json were
+    // silently ignored unless the user invoked perry from the directory containing it (#260).
     let project_root = args.input
-        .parent()
-        .unwrap_or(Path::new("."))
         .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from("."));
+        .ok()
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
 
     let mut ctx = CompilationContext::new(project_root.clone());
 
