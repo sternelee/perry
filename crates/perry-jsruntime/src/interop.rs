@@ -40,6 +40,18 @@ pub extern "C" fn js_runtime_init() {
     perry_runtime::js_set_handle_call_method(js_call_method);
     perry_runtime::js_set_native_module_js_loader(native_module_js_property_loader);
     perry_runtime::js_set_new_from_handle_v8(js_new_from_handle_v8_impl);
+    perry_runtime::js_set_handle_typeof(js_handle_typeof);
+}
+
+/// Probe a V8 handle's `typeof` discriminator. Returns 1 for callables (functions),
+/// 0 for everything else. Wired into `js_value_typeof` so user-visible `typeof gp`
+/// returns `"function"` when `gp` is a V8 callable handle. (Issue #258.)
+unsafe extern "C" fn js_handle_typeof(value: f64) -> i32 {
+    with_runtime(|state| {
+        let scope = &mut state.runtime.handle_scope();
+        let v = native_to_v8(scope, value);
+        if v.is_function() { 1 } else { 0 }
+    })
 }
 
 /// V8 new_instance implementation — called via callback from perry-runtime's js_new_from_handle

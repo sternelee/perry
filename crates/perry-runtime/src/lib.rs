@@ -99,7 +99,7 @@ pub use string::js_string_from_bytes;
 pub use promise::{js_promise_new, js_promise_resolve, js_promise_reject};
 pub use bigint::js_bigint_from_string;
 pub use value::{js_nanbox_get_pointer, js_nanbox_pointer, js_nanbox_string, js_get_string_pointer_unified, js_jsvalue_to_string};
-pub use value::{js_set_handle_array_get, js_set_handle_array_length, js_set_handle_object_get_property, js_set_handle_to_string, js_set_handle_call_method, js_set_native_module_js_loader, js_set_new_from_handle_v8};
+pub use value::{js_set_handle_array_get, js_set_handle_array_length, js_set_handle_object_get_property, js_set_handle_to_string, js_set_handle_call_method, js_set_native_module_js_loader, js_set_new_from_handle_v8, js_set_handle_typeof};
 pub use array::{js_array_push_f64};
 pub use object::js_object_set_field_by_name;
 pub use promise::{js_promise_run_microtasks, js_promise_state, js_is_promise, js_promise_value};

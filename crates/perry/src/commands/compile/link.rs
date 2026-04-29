@@ -664,6 +664,28 @@ pub(super) fn build_and_run_link(
         && find_ui_library(target).is_some();
     if !skip_runtime {
         if let Some(ref jsruntime) = jsruntime_lib {
+            // Issue #257: when user code only references V8 FFIs that have stubs in
+            // perry-runtime (`js_load_module` + `js_call_function` + …, but NOT
+            // `js_call_method`), Mach-O lazy archive resolution satisfies those
+            // symbols against the (now-weak) closure.rs stubs and never pulls
+            // `interop.o` from libperry_jsruntime.a — yielding a binary that
+            // silently links V8 nowhere even though the driver thought it linked
+            // jsruntime. Force-keep `js_runtime_shutdown` (a no_mangle symbol that
+            // exists ONLY in jsruntime/interop.rs, never stubbed in runtime) via
+            // `-Wl,-u`, which tells the linker to treat it as undefined. The
+            // resolver then has to pull `interop.o` from jsruntime.a, which
+            // cascades V8/deno_core deps and gives strong defs of all V8 FFIs that
+            // override the weak runtime stubs. ELF gets `--undefined=` (same
+            // semantics, different syntax). Windows links jsruntime via standard
+            // archive scan and doesn't have the same weak-shadow issue.
+            if !is_windows {
+                let undef_flag = if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
+                    "-Wl,-u,_js_runtime_shutdown"
+                } else {
+                    "-Wl,--undefined=js_runtime_shutdown"
+                };
+                cmd.arg(undef_flag);
+            }
             cmd.arg(jsruntime);
             // Also link runtime to supply symbols DCE'd from jsruntime (e.g. js_register_class_method)
             if !is_android && !is_windows {

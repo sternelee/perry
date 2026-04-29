@@ -1059,8 +1059,15 @@ pub extern "C" fn js_value_typeof(value: f64) -> *mut StringHeader {
         // are observed as "string" from user code.
         get_cached(&TYPEOF_STRING, "string")
     } else if crate::value::is_js_handle(value) {
-        // JS handle from V8 runtime - always an object
-        get_cached(&TYPEOF_OBJECT, "object")
+        // JS handle from V8 runtime — ask V8 whether it's a callable, otherwise default
+        // to "object". Issue #258: pre-fix this always returned "object" even for
+        // V8 functions; the registered callback now flips it to "function" when the
+        // handle wraps a v8::Function.
+        if crate::value::js_handle_is_function(value) {
+            get_cached(&TYPEOF_FUNCTION, "function")
+        } else {
+            get_cached(&TYPEOF_OBJECT, "object")
+        }
     } else if jsval.is_pointer() {
         // Object/array/closure/symbol pointer - check via the side-table first.
         let ptr = jsval.as_pointer::<u8>();

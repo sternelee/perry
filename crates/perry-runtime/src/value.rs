@@ -94,6 +94,10 @@ type JsHandleToStringFn = extern "C" fn(f64) -> *mut crate::string::StringHeader
 type JsHandleCallMethodFn = unsafe extern "C" fn(f64, *const i8, usize, *const f64, usize) -> f64;
 type JsNativeModuleJsLoaderFn = unsafe extern "C" fn(*const u8, usize, *const u8, usize) -> f64;
 type JsNewFromHandleV8Fn = unsafe extern "C" fn(f64, *const f64, usize) -> f64;
+/// Returns the JS spec `typeof` string discriminator for a V8 handle:
+/// 1 = "function" (V8 callable), 0 = "object" (everything else — including arrays).
+/// Negative values reserved for future use ("symbol" = 2 if V8 ever exposes it that way).
+type JsHandleTypeofFn = unsafe extern "C" fn(f64) -> i32;
 
 static JS_HANDLE_ARRAY_GET: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 static JS_HANDLE_ARRAY_LENGTH: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
@@ -102,6 +106,7 @@ static JS_HANDLE_TO_STRING: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut())
 pub static JS_HANDLE_CALL_METHOD: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 pub static JS_NATIVE_MODULE_JS_LOADER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 pub static JS_NEW_FROM_HANDLE_V8: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+pub static JS_HANDLE_TYPEOF: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Set the JS handle array get function (called by perry-jsruntime)
 #[no_mangle]
@@ -145,6 +150,26 @@ pub extern "C" fn js_set_native_module_js_loader(func: JsNativeModuleJsLoaderFn)
 #[no_mangle]
 pub extern "C" fn js_set_new_from_handle_v8(func: JsNewFromHandleV8Fn) {
     JS_NEW_FROM_HANDLE_V8.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Set the V8 handle typeof discriminator (called by perry-jsruntime).
+/// Used by `js_value_typeof` so `typeof someJsFunction` returns `"function"`
+/// instead of `"object"` when the handle wraps a V8 callable. (Issue #258.)
+#[no_mangle]
+pub extern "C" fn js_set_handle_typeof(func: JsHandleTypeofFn) {
+    JS_HANDLE_TYPEOF.store(func as *mut (), Ordering::SeqCst);
+}
+
+/// Probe a V8 handle's JS `typeof` discriminator. Returns 1 for `"function"`,
+/// 0 for `"object"`, and 0 if the V8 callback hasn't been registered (no V8 →
+/// fall through to the default "object" classification). Internal helper for
+/// `js_value_typeof`.
+#[inline]
+pub(crate) fn js_handle_is_function(value: f64) -> bool {
+    let ptr = JS_HANDLE_TYPEOF.load(Ordering::Relaxed);
+    if ptr.is_null() { return false; }
+    let func: JsHandleTypeofFn = unsafe { std::mem::transmute(ptr) };
+    unsafe { func(value) == 1 }
 }
 
 /// Get element from a JS handle array. Dispatches through the function pointer
