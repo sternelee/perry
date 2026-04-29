@@ -35,13 +35,13 @@ Perry implements Node.js file system APIs for reading, writing, and managing fil
 ```
 
 For recursive removal Perry exposes `rmRecursive` (a thin wrapper around
-`std::fs::remove_dir_all`). It is not yet wired into the LLVM backend, so the
-verified snippet above uses `rmdirSync` (empty directories only). Track the
-follow-up at issue #198.
+`std::fs::remove_dir_all`). Wired via
+[#193](https://github.com/PerryTS/perry/issues/193) through
+`js_fs_rm_recursive` in the LLVM backend.
 
-```text
+```typescript
 import { rmRecursive } from "fs";
-rmRecursive("output"); // Not yet wired into the LLVM codegen
+rmRecursive("output"); // Recursive remove; returns 1 on success, 0 on failure.
 ```
 
 ## Path Utilities

@@ -1,6 +1,6 @@
 # Creating Plugins
 
-> **Status: not yet wired into any codegen path.** See [Plugin System Overview — Status](overview.md) for the full caveat. The `perry/plugin` runtime FFI exists, but the TypeScript-level static and `PluginApi`-instance dispatchers are missing, so the snippets below compile but no-op at runtime. Left as `,no-test`.
+> **Status: wired** ([#189](https://github.com/PerryTS/perry/issues/189) closed). See [Plugin System Overview — Status](overview.md) for the full surface. Snippets below are still kept as `text` fences because the doc-tests harness doesn't yet build + load a stub plugin end-to-end; a real project with a plugin shared library will compile and link.
 
 Build Perry plugins as shared libraries that extend host applications.
 

@@ -1,6 +1,6 @@
 # Hooks & Events
 
-> **Status: not yet wired into any codegen path.** See [Plugin System Overview — Status](overview.md) for the full caveat. Every snippet below uses `api.registerHook` / `api.on` / `emitHook` / `emitEvent` / `invokeTool` — none of those calls reach the runtime FFI today. Left as `,no-test`.
+> **Status: wired** ([#189](https://github.com/PerryTS/perry/issues/189) closed). `api.registerHook`, `api.on`, `emitHook`, `emitEvent`, `invokeTool` all dispatch to `crates/perry-runtime/src/plugin.rs`. Snippets below are still `text` fences pending an end-to-end doc-tests stub plugin.
 
 Perry plugins communicate through hooks, events, and tools.
 

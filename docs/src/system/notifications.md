@@ -42,8 +42,10 @@ while the app is foregrounded; the payload is the APNs `aps` userInfo
 dictionary (or equivalent platform shape) converted to a plain object.
 
 Requires the relevant platform capability (APNs entitlement on iOS/macOS,
-Firebase Messaging on Android — not yet wired). No-op on platforms without a
-push pipeline (tvOS, visionOS, watchOS, GTK4, Windows, Web).
+Firebase Messaging on Android — wired via JNI through
+`PerryFirebaseMessagingService`, see [#98](https://github.com/PerryTS/perry/issues/98)).
+No-op on platforms without a push pipeline (tvOS, visionOS, watchOS, GTK4,
+Windows, Web).
 
 ## Platform Implementation
 

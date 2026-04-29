@@ -78,10 +78,12 @@ All UI functions are imported from `perry/ui`:
 {{#include ../../examples/ui/overview/imports.ts:imports}}
 ```
 
-> Canvas, camera capture, and a virtualized `Table` widget exist in some
-> platform backends but are not yet wired into the native (LLVM) codegen for
-> desktop targets. The pages dedicated to those features document the shape of
-> the API and which targets currently honor it.
+> [`Canvas`](canvas.md), [`CameraView`](camera.md), and the virtualized
+> [`Table`](table.md) widget are wired through the LLVM codegen (closed via
+> [#190](https://github.com/PerryTS/perry/issues/190),
+> [#191](https://github.com/PerryTS/perry/issues/191), and
+> [#192](https://github.com/PerryTS/perry/issues/192)). See each widget's page
+> for the platform-support matrix.
 
 ## Platform Differences
 

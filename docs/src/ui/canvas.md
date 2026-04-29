@@ -2,11 +2,12 @@
 
 The `Canvas` widget provides a 2D drawing surface for custom graphics.
 
-> **Availability**: `Canvas` is wired in the **JS / web / wasm** codegen path
-> only. The native LLVM codegen used for `--target macos`, `--target linux`,
-> and `--target windows` does not yet expose `Canvas`, so the snippets below
-> are not part of the doc-tests harness. To run them, use `perry app.ts -o
-> app --target web`.
+> **Availability**: `Canvas` is wired in the **LLVM** codegen path (macOS, iOS,
+> Linux, Android) and the **JS / web / wasm** codegen path. Closed via
+> [#190](https://github.com/PerryTS/perry/issues/190). The snippets below are
+> still kept as `text` fences pending an end-to-end doc-tests example that
+> attaches the canvas to a run loop and verifies pixel output; they compile
+> and link cleanly today.
 
 The drawing API is **method-based** on the canvas handle (matching the FFI
 shape — `perry_ui_canvas_set_fill_color(handle, r, g, b, a)` etc.). Colors
@@ -70,13 +71,13 @@ canvas.fillText("Hello Canvas!", 50, 50);
 
 | Platform | Implementation | Status |
 |----------|---------------|--------|
-| Web | HTML5 Canvas | Fully wired |
-| WASM | HTML5 Canvas via JS bridge | Fully wired |
-| macOS | Core Graphics (CGContext) | Runtime FFI exists; not yet exposed in LLVM codegen |
-| iOS | Core Graphics (CGContext) | Runtime FFI exists; not yet exposed in LLVM codegen |
-| Linux | Cairo | Runtime FFI exists; not yet exposed in LLVM codegen |
+| Web | HTML5 Canvas | Wired |
+| WASM | HTML5 Canvas via JS bridge | Wired |
+| macOS | Core Graphics (CGContext) | Wired |
+| iOS | Core Graphics (CGContext) | Wired |
+| Linux | Cairo | Wired |
 | Windows | GDI | Planned |
-| Android | Canvas/Bitmap | Runtime FFI exists; not yet exposed in LLVM codegen |
+| Android | Canvas/Bitmap | Wired |
 
 ## Next Steps
 
