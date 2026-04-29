@@ -1,26 +1,14 @@
 {
   "test_edge_control_flow": {
     "status": "flake",
-    "reason": "Intermittent: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Appeared alongside test_cli_simulation between the 2026-04-24 and 2026-04-25 runs. Possibly state-dependent on sibling tests or non-deterministic codegen path; investigate separately."
+    "reason": "Intermittent: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Appeared alongside test_cli_simulation between the 2026-04-24 and 2026-04-25 runs. Possibly state-dependent on sibling tests or non-deterministic codegen path; investigate separately. Tracked at https://github.com/PerryTS/perry/issues/272."
   },
   "test_edge_error_handling": {
     "status": "flake",
-    "reason": "Same flake family as test_edge_control_flow: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Pre-existing, appeared between 2026-04-24 and 2026-04-25 parity runs."
-  },
-  "test_gap_async_advanced": {
-    "status": "known_limitation",
-    "reason": "Async generators, for-await-of, Promise.allSettled not implemented (segfault)"
-  },
-  "test_stress_promises": {
-    "status": "bug",
-    "reason": "Multiple distinct Promise issues remaining after v0.5.283 fix (which addressed (a) microtask FIFO ordering — TASK_QUEUE was a Vec with .pop() → LIFO; switched to VecDeque + pop_front, and (b) `.then(h)` / `.catch(h)` not catching throws inside h — microtask runner now wraps closure call in setjmp): (1) `new Promise<T>((resolve, reject) => ...)` constructor body not running (lines `constructor resolve: 99` / `constructor reject: constructor-err` missing from output); (2) `Promise.any` produces no output (any/any-all-rejected/any-errors-length lines missing); (3) `.then(p => Promise.resolve(...))` doesn't unwrap inner Promise (logs `Promise { <pending> }` instead of resolved value); (4) `.finally(() => ...).then(v => ...)` value-passing wrong (Perry: `finally value: 0`, Node: `finally value: done`)."
-  },
-  "test_gap_array_methods": {
-    "status": "known_limitation",
-    "reason": "TypedArray.prototype.at() returns undefined instead of element values on Int32Array / Float64Array (e.g. `Int32Array.at(0)` → undefined where Node returns 1). Categorical typed-array gap, same family as test_gap_typed_arrays — Perry's .at() codegen fast path is wired for regular Array but not for the TypedArray instance shapes. Was passing 26/28 at v0.5.319 after the SSO-unboxing fix transitively flipped it; regressed somewhere in v0.5.319→v0.5.343 (likely an SSO/typed-array interaction in the bulk extraction series). Stale CLAUDE.md TypeScript-Parity-Status header still reads 26/28 — actual is 25/28 with array_methods/console_methods/typed_arrays failing."
+    "reason": "Same flake family as test_edge_control_flow: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Pre-existing, appeared between 2026-04-24 and 2026-04-25 parity runs. Tracked at https://github.com/PerryTS/perry/issues/273."
   },
   "test_gap_typed_arrays": {
     "status": "known_limitation",
-    "reason": "Categorical typed-array gap documented in CLAUDE.md TypeScript-Parity-Status header (`typed_arrays (categorical gap)`). Perry's TypedArray instance shapes (Int8Array / Uint8Array / Int16Array / Uint16Array / Int32Array / Uint32Array / Float32Array / Float64Array) don't fully cover the prototype surface that JS code expects. Same family as `test_gap_array_methods`'s `.at()` issue. Tracked separately as the broader TypedArray completeness work."
+    "reason": "Uint8ClampedArray doesn't clamp values 0-255 (Node: `Uint8Clamped: 255 0 128` from inputs [300, -10, 128]; Perry: `Uint8Clamped: 300 -10 128` — input passed through as-is). Categorical typed-array gap; the wider TypedArray completeness work (Int8Array / Uint8Array / Int16Array / Uint16Array / Int32Array / Uint32Array / Float32Array / Float64Array prototype surface) is also incomplete. The .at() sub-issue was fixed in #289 (v0.5.381)."
   }
 }
