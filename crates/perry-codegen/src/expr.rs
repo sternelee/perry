@@ -1684,6 +1684,28 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // bench_array_ops with ~400K reads per iteration this is a
         // major performance win.
         Expr::IndexGet { object, index } => {
+            // Uint8ClampedArray reads must use byte-stride load (the
+            // runtime stores 1 byte per element, not 8). Route to the
+            // runtime helper which handles the per-kind load. Without
+            // this intercept the generic numeric-key path below emits
+            // an f64 stride read that returns garbage on byte-packed
+            // Uint8ClampedArray storage.
+            if matches!(
+                receiver_class_name(ctx, object).as_deref(),
+                Some("Uint8ClampedArray")
+            ) {
+                let arr_box = lower_expr(ctx, object)?;
+                let idx_double = lower_expr(ctx, index)?;
+                let blk = ctx.block();
+                let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                let arr_i64 = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                return Ok(blk.call(
+                    DOUBLE,
+                    "js_typed_array_get",
+                    &[(I64, &arr_i64), (I32, &idx_i32)],
+                ));
+            }
             // Scalar-replaced array literal: `arr[k]` where arr was bound to
             // `[...]` and never escaped, and k is a compile-time index in
             // range. Loads directly from the kth stack alloca — no heap,
@@ -2328,6 +2350,29 @@ pub(crate) fn lower_expr(ctx: &mut FnCtx<'_>, expr: &Expr) -> Result<String> {
         // `js_array_set_f64` (no return value, no realloc) since there's
         // no local to write a possibly-realloc'd pointer back to.
         Expr::IndexSet { object, index, value } => {
+            // Uint8ClampedArray writes must apply ToUint8Clamp (NaN → 0,
+            // v ≤ 0 → 0, v ≥ 255 → 255, otherwise round-half-to-even).
+            // Route to the runtime helper which already implements the
+            // proper clamping in its KIND_UINT8_CLAMPED branch. Without
+            // this intercept the generic numeric-key path below emits a
+            // raw f64 stride store that bypasses clamping entirely.
+            if matches!(
+                receiver_class_name(ctx, object).as_deref(),
+                Some("Uint8ClampedArray")
+            ) {
+                let arr_box = lower_expr(ctx, object)?;
+                let idx_double = lower_expr(ctx, index)?;
+                let val_double = lower_expr(ctx, value)?;
+                let blk = ctx.block();
+                let arr_bits = blk.bitcast_double_to_i64(&arr_box);
+                let arr_i64 = blk.and(I64, &arr_bits, POINTER_MASK_I64);
+                let idx_i32 = blk.fptosi(DOUBLE, &idx_double, I32);
+                blk.call_void(
+                    "js_typed_array_set",
+                    &[(I64, &arr_i64), (I32, &idx_i32), (DOUBLE, &val_double)],
+                );
+                return Ok(val_double);
+            }
             // Same dispatch tree as IndexGet: known array → fast inline,
             // string key on dynamic receiver → object field set, otherwise
             // bail with a clear error.

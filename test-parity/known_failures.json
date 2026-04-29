@@ -1,14 +1,1 @@
-{
-  "test_edge_control_flow": {
-    "status": "flake",
-    "reason": "Intermittent: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Appeared alongside test_cli_simulation between the 2026-04-24 and 2026-04-25 runs. Possibly state-dependent on sibling tests or non-deterministic codegen path; investigate separately. Tracked at https://github.com/PerryTS/perry/issues/272."
-  },
-  "test_edge_error_handling": {
-    "status": "flake",
-    "reason": "Same flake family as test_edge_control_flow: failed in parity run 2026-04-25 but passed on isolated re-run with the same binary. Pre-existing, appeared between 2026-04-24 and 2026-04-25 parity runs. Tracked at https://github.com/PerryTS/perry/issues/273."
-  },
-  "test_gap_typed_arrays": {
-    "status": "known_limitation",
-    "reason": "Uint8ClampedArray doesn't clamp values 0-255 (Node: `Uint8Clamped: 255 0 128` from inputs [300, -10, 128]; Perry: `Uint8Clamped: 300 -10 128` — input passed through as-is). Categorical typed-array gap; the wider TypedArray completeness work (Int8Array / Uint8Array / Int16Array / Uint16Array / Int32Array / Uint32Array / Float32Array / Float64Array prototype surface) is also incomplete. The .at() sub-issue was fixed in #289 (v0.5.381)."
-  }
-}
+{}
