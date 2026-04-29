@@ -1006,7 +1006,10 @@ const BORDER_SUBCLASS_ID: usize = 0x70_72_72_79; // 'p','r','r','y'
 /// shows up immediately.
 #[cfg(target_os = "windows")]
 fn ensure_border_subclass(handle: i64) {
-    use windows::Win32::UI::Controls::SetWindowSubclass;
+    // Win32_UI_Shell, not Win32_UI_Controls — both functions live in Shell
+    // per windows-rs 0.58. The crate's own per-feature gate `Win32_UI_Shell`
+    // is already enabled in Cargo.toml.
+    use windows::Win32::UI::Shell::SetWindowSubclass;
     let installed = BORDER_SUBCLASSED.with(|s| s.borrow().contains(&handle));
     if !installed {
         if let Some(hwnd) = get_hwnd_safe(handle) {
@@ -1051,7 +1054,7 @@ unsafe extern "system" fn border_subclass_proc(
     _id: usize,
     refdata: usize,
 ) -> LRESULT {
-    use windows::Win32::UI::Controls::DefSubclassProc;
+    use windows::Win32::UI::Shell::DefSubclassProc;
     use windows::Win32::Graphics::Gdi::{
         CreatePen, GetDC, ReleaseDC, SelectObject, DeleteObject,
         Rectangle, GetStockObject, NULL_BRUSH, PS_SOLID,
